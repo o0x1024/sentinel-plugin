@@ -61,6 +61,18 @@
       "default_severity": "info",
       "tags": ["hash", "md5", "sha256", "crypto", "hmac"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/hash_calculator.ts"
+    },
+    {
+      "id": "nextjs_rce_scanner",
+      "name": "Next.js RCE Scanner",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "exploit",
+      "description": "Detect and exploit Next.js prototype pollution RCE vulnerability",
+      "default_severity": "critical",
+      "tags": ["nextjs", "rce", "prototype-pollution", "cve", "exploit"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/nextjs_rce_scanner.ts"
     }
   ]
 }
