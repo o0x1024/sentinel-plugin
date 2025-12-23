@@ -7,7 +7,7 @@
 ## 简介
 
 本仓库包含社区贡献和官方开发的 Sentinel AI 插件，包括：
-- **被动扫描插件** - 分析 HTTP 流量发现安全漏洞
+- **被动扫描插件** - 分析 HTTP 流量并主动验证漏洞
 - **Agent 工具插件** - 为 AI Agent 提供安全测试工具
 
 ## 目录结构
@@ -23,8 +23,378 @@ sentinel-plugin/
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
     └── agent/             # Agent 工具插件
-        └── url_encoder.ts
+        ├── url_encoder.ts
+        └── hash_calculator.ts
 ```
+
+## 插件运行环境
+
+Sentinel 插件运行在基于 Deno 的 JavaScript/TypeScript 运行时中，完整支持 Web API 和额外的安全测试工具函数。
+
+### 可用 API
+
+#### 核心 API
+
+| API | 描述 |
+|-----|------|
+| `Sentinel.emitFinding(finding)` | 上报安全漏洞发现 |
+| `Sentinel.log(level, message)` | 日志输出 (level: "debug", "info", "warn", "error") |
+| `fetch(url, options)` | HTTP 客户端，支持超时设置 |
+
+#### Web 标准 API
+
+| API | 描述 |
+|-----|------|
+| `URL`, `URLSearchParams` | URL 解析和操作 |
+| `TextEncoder`, `TextDecoder` | 文本编码/解码 (UTF-8 等) |
+| `atob`, `btoa` | Base64 编码/解码 |
+| `crypto.subtle` | Web Crypto API (SHA-256, AES, RSA 等) |
+| `crypto.getRandomValues()` | 加密安全随机数 |
+| `Headers`, `Request`, `Response` | Fetch API 原语 |
+| `Blob`, `File` | 二进制数据处理 |
+| `AbortController`, `AbortSignal` | 请求取消 |
+| `setTimeout`, `setInterval` | 定时器 |
+| `ReadableStream`, `WritableStream` | 流 API |
+| `CompressionStream`, `DecompressionStream` | gzip/deflate 压缩 |
+| `performance.now()` | 高精度计时 |
+| `console.log/warn/error` | 控制台输出 |
+
+#### Deno 网络 API
+
+| API | 描述 |
+|-----|------|
+| `Deno.connect(options)` | TCP 连接 |
+| `Deno.connectTls(options)` | TLS 连接 |
+| `Deno.listen(options)` | TCP 服务器 |
+| `Deno.resolveDns(hostname, type)` | DNS 解析 |
+
+#### 工具函数
+
+| 函数 | 描述 |
+|------|------|
+| `sleep(ms)` / `delay(ms)` | 异步延迟 |
+| `timeout(promise, ms)` | Promise 超时包装器 |
+| `retry(fn, options)` | 指数退避重试 |
+| `chunk(array, size)` | 数组分块 |
+| `parallelLimit(tasks, limit)` | 限制并发的并行执行 |
+
+#### 安全测试工具 (`SecurityUtils`)
+
+| 函数 | 描述 |
+|------|------|
+| `SecurityUtils.urlEncode(str)` | URL 编码 |
+| `SecurityUtils.urlDecode(str)` | URL 解码 |
+| `SecurityUtils.htmlEncode(str)` | HTML 实体编码 |
+| `SecurityUtils.htmlDecode(str)` | HTML 实体解码 |
+| `SecurityUtils.hexEncode(str)` | 十六进制编码 |
+| `SecurityUtils.hexDecode(hex)` | 十六进制解码 |
+| `SecurityUtils.unicodeEscape(str)` | Unicode 转义编码 |
+| `SecurityUtils.randomString(len, charset)` | 随机字符串生成 |
+| `SecurityUtils.randomBytes(len)` | 随机字节生成 |
+| `SecurityUtils.parseCookies(header)` | 解析 Cookie 头 |
+| `SecurityUtils.buildCookieHeader(cookies)` | 构建 Cookie 头 |
+| `SecurityUtils.parseQuery(qs)` | 解析查询字符串 |
+| `SecurityUtils.buildQuery(params)` | 构建查询字符串 |
+| `SecurityUtils.extractUrls(text)` | 从文本提取 URL |
+| `SecurityUtils.extractEmails(text)` | 从文本提取邮箱 |
+| `SecurityUtils.extractIPs(text)` | 从文本提取 IP 地址 |
+
+### 远程模块导入
+
+插件可以从 URL 导入外部 TypeScript/JavaScript 模块：
+
+```typescript
+// 从 deno.land 导入
+import { encode as base64Encode } from "https://deno.land/std@0.208.0/encoding/base64.ts";
+
+// 从 esm.sh 导入
+import lodash from "https://esm.sh/lodash@4.17.21";
+
+// 从 unpkg 导入
+import axios from "https://unpkg.com/axios/dist/axios.min.js";
+```
+
+**注意:** 远程模块会被本地缓存以提高性能。
+
+---
+
+## 插件开发
+
+### 被动扫描插件
+
+被动插件从代理拦截 HTTP 事务。与简单的模式匹配不同，**有效的被动插件应该主动发送 payload 来验证漏洞**。
+
+#### 插件模式
+
+1. **模式检测** - 分析现有请求/响应中的可疑模式
+2. **主动验证** - 发送带 payload 的额外请求来确认漏洞
+
+#### 示例：带主动验证的 SQL 注入检测器
+
+```typescript
+/**
+ * 带主动验证的 SQL 注入检测器
+ * @plugin sql_injection_detector
+ */
+
+interface HttpTransaction {
+  request: {
+    id: string;
+    method: string;
+    url: string;
+    headers: Record<string, string>;
+    body: number[];
+    content_type?: string;
+    query_params: Record<string, string>;
+    is_https: boolean;
+    timestamp: string;
+  };
+  response?: {
+    request_id: string;
+    status: number;
+    headers: Record<string, string>;
+    body: number[];
+    content_type?: string;
+    timestamp: string;
+  };
+}
+
+// SQL 注入验证 payload
+const SQL_PAYLOADS = [
+  "' OR '1'='1",
+  "' OR '1'='1' --",
+  "1' AND '1'='1",
+  "1 AND 1=1",
+  "' UNION SELECT NULL--",
+  "1; WAITFOR DELAY '0:0:5'--",  // 基于时间
+  "1' AND SLEEP(5)--",           // MySQL 基于时间
+];
+
+// SQL 错误模式
+const SQL_ERROR_PATTERNS = [
+  /SQL syntax.*MySQL/i,
+  /ORA-\d{5}/i,
+  /PostgreSQL.*ERROR/i,
+  /SQLITE_ERROR/i,
+  /SqlException/i,
+];
+
+function bytesToString(bytes: number[]): string {
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+// 主动验证：发送 payload 并检查响应
+async function verifyInjection(
+  baseUrl: string,
+  paramName: string,
+  originalValue: string,
+  method: string,
+  headers: Record<string, string>
+): Promise<{ vulnerable: boolean; payload: string; evidence: string }> {
+  
+  for (const payload of SQL_PAYLOADS) {
+    try {
+      const testValue = originalValue + payload;
+      const url = new URL(baseUrl);
+      url.searchParams.set(paramName, testValue);
+      
+      const startTime = performance.now();
+      const response = await fetch(url.toString(), {
+        method,
+        headers: { ...headers, 'X-Sentinel-Test': 'true' },
+        timeout: 10000,
+      });
+      const elapsed = performance.now() - startTime;
+      
+      const body = await response.text();
+      
+      // 检查基于错误的 SQLi
+      for (const pattern of SQL_ERROR_PATTERNS) {
+        if (pattern.test(body)) {
+          return {
+            vulnerable: true,
+            payload,
+            evidence: `响应中包含 SQL 错误: ${body.match(pattern)?.[0]}`
+          };
+        }
+      }
+      
+      // 检查基于时间的 SQLi (响应 > 4.5s 表示 5s 延迟生效)
+      if (payload.includes('SLEEP') || payload.includes('DELAY')) {
+        if (elapsed > 4500) {
+          return {
+            vulnerable: true,
+            payload,
+            evidence: `基于时间的 SQLi: 响应耗时 ${elapsed.toFixed(0)}ms`
+          };
+        }
+      }
+      
+    } catch (e) {
+      Sentinel.log('debug', `${paramName} 验证失败: ${e}`);
+    }
+  }
+  
+  return { vulnerable: false, payload: '', evidence: '' };
+}
+
+export async function scan_transaction(transaction: HttpTransaction): Promise<void> {
+  const { request, response } = transaction;
+  
+  // 跳过不适用的请求
+  if (!['GET', 'POST'].includes(request.method)) return;
+  
+  // 提取参数
+  const url = new URL(request.url);
+  const params = new Map<string, string>();
+  
+  url.searchParams.forEach((value, key) => {
+    params.set(key, value);
+  });
+  
+  // 测试每个参数
+  for (const [paramName, paramValue] of params) {
+    // 快速检查：如果值已包含注入特征则跳过
+    if (/['";]/.test(paramValue)) continue;
+    
+    const result = await verifyInjection(
+      request.url,
+      paramName,
+      paramValue,
+      request.method,
+      request.headers
+    );
+    
+    if (result.vulnerable) {
+      Sentinel.emitFinding({
+        title: 'SQL 注入漏洞已确认',
+        description: `参数 "${paramName}" 存在 SQL 注入漏洞。\nPayload: ${result.payload}`,
+        severity: 'critical',
+        vuln_type: 'sqli',
+        confidence: 'high',
+        url: request.url,
+        method: request.method,
+        param_name: paramName,
+        evidence: result.evidence,
+        cwe: 'CWE-89',
+        owasp: 'A03:2021',
+        remediation: '使用参数化查询或预编译语句。'
+      });
+    }
+    
+    // 速率限制
+    await sleep(100);
+  }
+}
+
+globalThis.scan_transaction = scan_transaction;
+```
+
+### Agent 工具插件
+
+Agent 插件为 AI 代理提供工具。使用 JSDoc 注释来定义输入参数：
+
+#### 参数 Schema 定义
+
+**方法 1: JSDoc + TypeScript 接口（推荐）**
+
+```typescript
+/**
+ * URL 编码/解码工具
+ * 
+ * @description 编码或解码 URL 和文本
+ * @author Sentinel Team
+ * @version 1.0.0
+ */
+
+/**
+ * 工具输入参数
+ */
+interface ToolInput {
+  /** 要编码或解码的文本 */
+  text: string;
+  /** 操作模式: "encode" 或 "decode" */
+  mode: "encode" | "decode";
+  /** 编码类型: "url", "base64", "html" */
+  encoding?: string;
+}
+
+interface ToolOutput {
+  success: boolean;
+  data?: any;
+  error?: string;
+}
+
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
+  const { text, mode, encoding = "url" } = input;
+  
+  try {
+    let result: string;
+    
+    if (encoding === "url") {
+      result = mode === "encode" 
+        ? encodeURIComponent(text)
+        : decodeURIComponent(text);
+    } else if (encoding === "base64") {
+      result = mode === "encode" ? btoa(text) : atob(text);
+    } else {
+      result = mode === "encode"
+        ? SecurityUtils.htmlEncode(text)
+        : SecurityUtils.htmlDecode(text);
+    }
+    
+    return { success: true, data: { result, mode, encoding } };
+  } catch (e) {
+    return { success: false, error: String(e) };
+  }
+}
+
+globalThis.analyze = analyze;
+```
+
+**方法 2: Header Schema Block（用于复杂 schema）**
+
+```typescript
+/* @sentinel_schema
+{
+  "type": "object",
+  "required": ["targets"],
+  "properties": {
+    "targets": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "要扫描的 URL 或主机列表"
+    },
+    "concurrency": {
+      "type": "integer",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 100,
+      "description": "并发请求数"
+    },
+    "timeout": {
+      "type": "integer",
+      "default": 5000,
+      "description": "请求超时时间（毫秒）"
+    }
+  }
+}
+*/
+
+interface ToolInput {
+  targets: string[];
+  concurrency?: number;
+  timeout?: number;
+}
+
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
+  // 实现
+}
+
+globalThis.analyze = analyze;
+```
+
+---
 
 ## 插件清单 (plugins.json)
 
@@ -48,83 +418,23 @@ sentinel-plugin/
 }
 ```
 
-## 插件开发
-
-### 被动扫描插件
-
-被动插件分析 HTTP 事务，必须导出 `scan_transaction` 函数：
-
-```typescript
-interface HttpTransaction {
-  request: {
-    id: string;
-    method: string;
-    url: string;
-    headers: Record<string, string>;
-    body: number[];  // Uint8Array 序列化为 number[]
-    content_type?: string;
-    query_params: Record<string, string>;
-    is_https: boolean;
-    timestamp: string;
-  };
-  response?: {
-    request_id: string;
-    status: number;
-    headers: Record<string, string>;
-    body: number[];
-    content_type?: string;
-    timestamp: string;
-  };
-}
-
-// 被动插件主入口
-export function scan_transaction(transaction: HttpTransaction): void {
-  // 分析事务并通过 Sentinel.emitFinding() 上报发现
-}
-
-// 必需：绑定到 globalThis
-globalThis.scan_transaction = scan_transaction;
-```
-
-### Agent 工具插件
-
-Agent 插件为 AI 提供工具，必须导出 `analyze` 函数：
-
-```typescript
-interface ToolInput {
-  [key: string]: any;
-}
-
-interface ToolOutput {
-  success: boolean;
-  data?: any;
-  error?: string;
-}
-
-// Agent 插件主入口
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-  // 处理输入并返回结果
-  return { success: true, data: { result: "..." } };
-}
-
-// 必需：绑定到 globalThis
-globalThis.analyze = analyze;
-```
-
-### 上报漏洞发现（被动插件）
-
-使用全局 `Sentinel.emitFinding()` API：
+## 上报漏洞发现
 
 ```typescript
 Sentinel.emitFinding({
-  title: "检测到 SQL 注入",
-  description: "在参数中发现 SQL 注入特征",
-  severity: "high",
-  vuln_type: "sqli",
-  confidence: "high",
-  url: transaction.request.url,
-  method: transaction.request.method,
-  evidence: "' OR 1=1 --"
+  title: "漏洞标题",
+  description: "详细描述",
+  severity: "critical|high|medium|low|info",
+  vuln_type: "sqli|xss|ssrf|...",
+  confidence: "high|medium|low",
+  url: "https://example.com/page",
+  method: "GET|POST|...",
+  param_name: "受影响参数",
+  param_value: "参数值",
+  evidence: "漏洞证据",
+  cwe: "CWE-89",
+  owasp: "A03:2021",
+  remediation: "修复建议"
 });
 ```
 
@@ -161,4 +471,3 @@ Sentinel.emitFinding({
 ## 许可证
 
 MIT License
-

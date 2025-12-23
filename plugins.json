@@ -1,67 +1,66 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "updated_at": "2024-12-23",
   "plugins": [
     {
       "id": "sql_injection_detector",
       "name": "SQL Injection Detector",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "passive",
       "category": "sqli",
-      "description": "Detects potential SQL injection vulnerabilities by analyzing HTTP transactions",
-      "default_severity": "high",
-      "tags": ["sql", "injection", "security", "owasp"],
+      "description": "Detects SQL injection vulnerabilities through pattern matching and active payload verification (error-based, time-based, boolean-based)",
+      "default_severity": "critical",
+      "tags": ["sql", "injection", "security", "owasp", "active-scan"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/sql_injection_detector.ts"
     },
     {
       "id": "xss_detector",
       "name": "XSS Vulnerability Detector",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "passive",
       "category": "xss",
-      "description": "Detects potential Cross-Site Scripting vulnerabilities in HTTP transactions",
+      "description": "Detects Cross-Site Scripting vulnerabilities through passive analysis and active payload verification",
       "default_severity": "high",
-      "tags": ["xss", "cross-site-scripting", "security", "owasp"],
+      "tags": ["xss", "cross-site-scripting", "security", "owasp", "active-scan"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/xss_detector.ts"
     },
     {
       "id": "sensitive_info_detector",
       "name": "Sensitive Information Detector",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "passive",
       "category": "info_leak",
-      "description": "Detects sensitive information leakage in HTTP responses",
+      "description": "Detects sensitive information disclosure in HTTP responses including API keys, credentials, PII, and debug information",
       "default_severity": "medium",
-      "tags": ["information-disclosure", "secrets", "api-keys", "credentials"],
+      "tags": ["information-disclosure", "secrets", "api-keys", "credentials", "pii"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/sensitive_info_detector.ts"
     },
     {
       "id": "url_encoder",
-      "name": "URL Encoder/Decoder Tool",
-      "version": "1.0.0",
+      "name": "URL Encoder/Decoder",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "utility",
-      "description": "A utility tool for encoding and decoding URLs with multiple schemes",
+      "description": "Encode and decode text using various schemes (URL, Base64, HTML entities, Hex, Unicode)",
       "default_severity": "info",
-      "tags": ["encoding", "url", "utility", "decoder"],
+      "tags": ["encoding", "url", "base64", "html", "utility"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/url_encoder.ts"
     },
     {
       "id": "hash_calculator",
-      "name": "Hash Calculator Tool",
-      "version": "1.0.0",
+      "name": "Hash Calculator",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "utility",
-      "description": "Calculate various hash values for given text or compare hashes",
+      "description": "Calculate cryptographic hashes (MD5, SHA-1, SHA-256, SHA-384, SHA-512) with optional HMAC support",
       "default_severity": "info",
-      "tags": ["hash", "md5", "sha256", "checksum", "crypto"],
+      "tags": ["hash", "md5", "sha256", "crypto", "hmac"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/hash_calculator.ts"
     }
   ]
 }
-

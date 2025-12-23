@@ -1,15 +1,16 @@
 /**
+ * XSS Detector with Active Verification
+ * 
  * @plugin xss_detector
- * @name XSS Vulnerability Detector
- * @version 1.0.0
+ * @name XSS Detector
+ * @version 2.0.0
  * @author Sentinel Team
  * @category xss
  * @default_severity high
- * @tags xss, cross-site-scripting, security, owasp
- * @description Detects potential Cross-Site Scripting vulnerabilities in HTTP transactions
+ * @tags xss, cross-site-scripting, security, owasp, active
+ * @description Detects Cross-Site Scripting (XSS) vulnerabilities with passive analysis and active payload verification
  */
 
-// Type definitions
 interface RequestContext {
   id: string;
   method: string;
@@ -36,7 +37,17 @@ interface HttpTransaction {
   response?: ResponseContext;
 }
 
-// Helper: Convert byte array to UTF-8 string
+declare const Sentinel: {
+  emitFinding: (finding: any) => void;
+  log: (level: string, message: string) => void;
+};
+
+declare const SecurityUtils: {
+  randomString: (length: number, charset?: string) => string;
+};
+
+declare function sleep(ms: number): Promise<void>;
+
 function bytesToString(bytes: number[]): string {
   try {
     return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));
@@ -45,182 +56,448 @@ function bytesToString(bytes: number[]): string {
   }
 }
 
-// XSS payload patterns
-const XSS_PATTERNS = [
-  /<script\b[^>]*>[\s\S]*?<\/script>/i,
-  /<script\b[^>]*>/i,
-  /javascript\s*:/i,
-  /on\w+\s*=/i,
-  /<img\b[^>]*\bonerror\s*=/i,
-  /<svg\b[^>]*\bonload\s*=/i,
-  /<iframe\b[^>]*>/i,
-  /<object\b[^>]*>/i,
-  /<embed\b[^>]*>/i,
-  /expression\s*\(/i,
-  /data:\s*text\/html/i,
-  /vbscript\s*:/i,
+// XSS payload templates with unique markers
+function generatePayloads(marker: string): Array<{ payload: string; type: string; context: string }> {
+  return [
+    // Basic script injection
+    { 
+      payload: `<script>alert('${marker}')</script>`,
+      type: 'reflected',
+      context: 'html'
+    },
+    // Event handler injection
+    { 
+      payload: `"><img src=x onerror=alert('${marker}')>`,
+      type: 'reflected',
+      context: 'attribute'
+    },
+    { 
+      payload: `'><img src=x onerror=alert('${marker}')>`,
+      type: 'reflected',
+      context: 'attribute'
+    },
+    // SVG injection
+    { 
+      payload: `<svg onload=alert('${marker}')>`,
+      type: 'reflected',
+      context: 'html'
+    },
+    // JavaScript URL injection
+    { 
+      payload: `javascript:alert('${marker}')`,
+      type: 'reflected',
+      context: 'href'
+    },
+    // Breaking out of attributes
+    { 
+      payload: `" onfocus=alert('${marker}') autofocus="`,
+      type: 'reflected',
+      context: 'attribute'
+    },
+    // Template literal injection
+    { 
+      payload: `\${alert('${marker}')}`,
+      type: 'reflected',
+      context: 'template'
+    },
+    // Breaking out of script context
+    { 
+      payload: `</script><script>alert('${marker}')</script>`,
+      type: 'reflected',
+      context: 'script'
+    },
+    // Style-based (older browsers)
+    { 
+      payload: `<div style="background:url(javascript:alert('${marker}'))">`,
+      type: 'reflected',
+      context: 'style'
+    },
+    // Data URI injection
+    { 
+      payload: `<a href="data:text/html,<script>alert('${marker}')</script>">click</a>`,
+      type: 'reflected',
+      context: 'data-uri'
+    },
+    // DOM-based payloads
+    { 
+      payload: `#<script>alert('${marker}')</script>`,
+      type: 'dom',
+      context: 'fragment'
+    },
+    // Polyglot
+    {
+      payload: `jaVasCript:/*-/*\`/*\\'\`/*"/**/(/* */oNcLiCk=alert('${marker}') )//`,
+      type: 'reflected',
+      context: 'polyglot'
+    },
+  ];
+}
+
+// Dangerous patterns indicating reflection without proper encoding
+const REFLECTION_PATTERNS = [
+  /<script[^>]*>[^<]*<\/script>/gi,
+  /on\w+\s*=\s*["'][^"']*["']/gi,
+  /<img[^>]+onerror\s*=/gi,
+  /<svg[^>]+onload\s*=/gi,
+  /javascript\s*:/gi,
 ];
 
-// DOM XSS sinks
-const DOM_XSS_SINKS = [
-  /document\.write\s*\(/i,
-  /document\.writeln\s*\(/i,
-  /\.innerHTML\s*=/i,
-  /\.outerHTML\s*=/i,
-  /eval\s*\(/i,
-  /setTimeout\s*\([^,]*['"]/i,
-  /setInterval\s*\([^,]*['"]/i,
-  /new\s+Function\s*\(/i,
+// Security headers that mitigate XSS
+const SECURITY_HEADERS = [
+  'content-security-policy',
+  'x-xss-protection',
+  'x-content-type-options',
 ];
 
-// Extract parameters
-function extractParameters(url: string, body: string): Record<string, string> {
-  const params: Record<string, string> = {};
+// Parameter extraction
+function extractParameters(
+  url: string,
+  body: string,
+  contentType?: string
+): Map<string, { value: string; location: 'query' | 'body' }> {
+  const params = new Map<string, { value: string; location: 'query' | 'body' }>();
   
   try {
     const urlObj = new URL(url);
     urlObj.searchParams.forEach((value, key) => {
-      params[`query:${key}`] = value;
+      params.set(key, { value, location: 'query' });
     });
   } catch {
     const match = url.match(/\?(.+)/);
     if (match) {
       match[1].split('&').forEach(pair => {
-        const [key, value] = pair.split('=');
-        if (key) params[`query:${key}`] = decodeURIComponent(value || '');
+        const [key, ...rest] = pair.split('=');
+        if (key) {
+          params.set(key, { 
+            value: decodeURIComponent(rest.join('=')),
+            location: 'query'
+          });
+        }
       });
     }
   }
   
   if (body) {
-    body.split('&').forEach(pair => {
-      const [key, value] = pair.split('=');
-      if (key) params[`body:${key}`] = decodeURIComponent(value || '');
-    });
+    if (contentType?.includes('application/json')) {
+      try {
+        const json = JSON.parse(body);
+        const flatten = (obj: any, prefix = '') => {
+          for (const [key, value] of Object.entries(obj)) {
+            const fullKey = prefix ? `${prefix}.${key}` : key;
+            if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+              flatten(value, fullKey);
+            } else if (typeof value === 'string') {
+              params.set(fullKey, { value, location: 'body' });
+            }
+          }
+        };
+        flatten(json);
+      } catch { /* ignore */ }
+    } else {
+      body.split('&').forEach(pair => {
+        const [key, ...rest] = pair.split('=');
+        if (key) {
+          params.set(key, {
+            value: decodeURIComponent(rest.join('=')),
+            location: 'body'
+          });
+        }
+      });
+    }
   }
   
   return params;
 }
 
-// Check for reflected XSS
-function checkReflection(params: Record<string, string>, responseBody: string): { param: string; value: string } | null {
-  for (const [name, value] of Object.entries(params)) {
-    if (value.length > 3 && responseBody.includes(value)) {
-      if (/<|>|'|"|javascript|on\w+\s*=/.test(value)) {
-        return { param: name, value };
-      }
-    }
+// Build test URL
+function buildUrlWithPayload(baseUrl: string, paramName: string, payload: string): string {
+  try {
+    const url = new URL(baseUrl);
+    url.searchParams.set(paramName, payload);
+    return url.toString();
+  } catch {
+    return baseUrl;
   }
-  return null;
 }
 
-// Check missing security headers
-function checkMissingHeaders(headers: Record<string, string>): string[] {
-  const missing: string[] = [];
-  const headerNames = Object.keys(headers).map(h => h.toLowerCase());
+// Check if payload is reflected in response
+function isPayloadReflected(responseBody: string, marker: string, payload: string): {
+  reflected: boolean;
+  encoded: boolean;
+  context: string;
+} {
+  // Check for exact marker reflection
+  if (responseBody.includes(marker)) {
+    // Check if payload is reflected unencoded
+    if (responseBody.includes(payload)) {
+      return { reflected: true, encoded: false, context: 'unencoded' };
+    }
+    
+    // Check for dangerous patterns around the marker
+    const markerIndex = responseBody.indexOf(marker);
+    const contextStart = Math.max(0, markerIndex - 100);
+    const contextEnd = Math.min(responseBody.length, markerIndex + marker.length + 100);
+    const context = responseBody.substring(contextStart, contextEnd);
+    
+    // Check if inside script tag
+    if (/<script[^>]*>.*$/i.test(context) || /^.*<\/script>/i.test(context)) {
+      return { reflected: true, encoded: false, context: 'script' };
+    }
+    
+    // Check if inside event handler
+    if (/on\w+\s*=\s*["'][^"']*$/i.test(context)) {
+      return { reflected: true, encoded: false, context: 'event-handler' };
+    }
+    
+    // Check if inside href/src attribute
+    if (/(?:href|src)\s*=\s*["'][^"']*$/i.test(context)) {
+      return { reflected: true, encoded: false, context: 'attribute' };
+    }
+    
+    return { reflected: true, encoded: true, context: 'html' };
+  }
   
-  if (!headerNames.some(h => h.includes('content-security-policy'))) {
-    missing.push('Content-Security-Policy');
+  return { reflected: false, encoded: false, context: '' };
+}
+
+// Active XSS verification
+interface VerificationResult {
+  vulnerable: boolean;
+  payload: string;
+  type: string;
+  context: string;
+  evidence: string;
+}
+
+async function verifyXss(
+  baseUrl: string,
+  paramName: string,
+  originalValue: string,
+  headers: Record<string, string>
+): Promise<VerificationResult> {
+  const marker = SecurityUtils.randomString(8, 'abcdefghijklmnopqrstuvwxyz');
+  const payloads = generatePayloads(marker);
+  
+  const testHeaders = { ...headers };
+  delete testHeaders['content-length'];
+  testHeaders['X-Sentinel-Test'] = 'true';
+  
+  for (const { payload, type, context } of payloads) {
+    try {
+      const testUrl = buildUrlWithPayload(baseUrl, paramName, payload);
+      
+      const response = await fetch(testUrl, {
+        method: 'GET',
+        headers: testHeaders,
+        timeout: 10000,
+      });
+      
+      // Skip non-HTML responses
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+        continue;
+      }
+      
+      const body = await response.text();
+      const reflection = isPayloadReflected(body, marker, payload);
+      
+      if (reflection.reflected && !reflection.encoded) {
+        // Check for dangerous reflection
+        const dangerousPatterns = [
+          new RegExp(`<script[^>]*>[^<]*${marker}[^<]*</script>`, 'i'),
+          new RegExp(`on\\w+\\s*=\\s*["'][^"']*${marker}`, 'i'),
+          new RegExp(`<[^>]+\\s+on\\w+\\s*=`, 'i'),
+          new RegExp(`<img[^>]+onerror`, 'i'),
+          new RegExp(`<svg[^>]+onload`, 'i'),
+        ];
+        
+        for (const pattern of dangerousPatterns) {
+          if (pattern.test(body)) {
+            return {
+              vulnerable: true,
+              payload,
+              type,
+              context: reflection.context,
+              evidence: `Payload reflected in dangerous context: ${reflection.context}`,
+            };
+          }
+        }
+        
+        // Payload reflected, might still be exploitable
+        return {
+          vulnerable: true,
+          payload,
+          type,
+          context: reflection.context,
+          evidence: `XSS payload reflected without encoding in ${reflection.context} context`,
+        };
+      }
+    } catch (e) {
+      Sentinel.log('debug', `XSS test failed for ${paramName}: ${e}`);
+    }
+    
+    // Rate limiting
+    await sleep(50);
   }
-  if (!headerNames.includes('x-xss-protection')) {
-    missing.push('X-XSS-Protection');
-  }
-  if (!headerNames.includes('x-content-type-options')) {
-    missing.push('X-Content-Type-Options');
+  
+  return {
+    vulnerable: false,
+    payload: '',
+    type: '',
+    context: '',
+    evidence: '',
+  };
+}
+
+// Check security headers
+function checkSecurityHeaders(headers: Record<string, string>): string[] {
+  const missing: string[] = [];
+  const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
+  
+  for (const header of SECURITY_HEADERS) {
+    if (!headerKeys.includes(header)) {
+      missing.push(header);
+    }
   }
   
   return missing;
 }
 
-// Main scan function
-export function scan_transaction(transaction: HttpTransaction): void {
+// Main entry point
+export async function scan_transaction(transaction: HttpTransaction): Promise<void> {
   const { request, response } = transaction;
   
-  const bodyText = bytesToString(request.body);
-  const params = extractParameters(request.url, bodyText);
+  // Skip non-applicable methods
+  if (!['GET', 'POST'].includes(request.method)) {
+    return;
+  }
   
-  // Check for XSS patterns in request parameters
-  for (const [paramName, paramValue] of Object.entries(params)) {
-    for (const pattern of XSS_PATTERNS) {
-      if (pattern.test(paramValue)) {
-        (globalThis as any).Sentinel.emitFinding({
-          title: 'XSS Payload Detected in Request',
-          description: `Parameter "${paramName}" contains XSS payload.\nValue: ${paramValue.substring(0, 100)}${paramValue.length > 100 ? '...' : ''}`,
-          severity: 'high',
-          vuln_type: 'xss',
-          confidence: 'medium',
-          url: request.url,
-          method: request.method,
-          evidence: paramValue.substring(0, 200),
-          cwe: 'CWE-79',
-          owasp: 'A03:2021',
-          remediation: 'Encode all user input before rendering in HTML context.'
-        });
+  // Skip static resources
+  const staticExt = /\.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|json)(\?|$)/i;
+  if (staticExt.test(request.url)) {
+    return;
+  }
+  
+  // Skip non-HTML responses for reflection testing
+  if (response) {
+    const contentType = response.headers?.['content-type'] || '';
+    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+      return;
+    }
+  }
+  
+  const bodyText = bytesToString(request.body);
+  const params = extractParameters(request.url, bodyText, request.content_type);
+  
+  if (params.size === 0) {
+    return;
+  }
+  
+  Sentinel.log('info', `XSS scan started: ${request.url} (${params.size} params)`);
+  
+  // Check for missing security headers
+  if (response?.headers) {
+    const missingHeaders = checkSecurityHeaders(response.headers);
+    if (missingHeaders.includes('content-security-policy')) {
+      Sentinel.emitFinding({
+        title: 'Missing Content-Security-Policy Header',
+        description: `The response lacks a Content-Security-Policy header, which helps prevent XSS attacks by restricting script sources.`,
+        severity: 'medium',
+        vuln_type: 'security_misconfiguration',
+        confidence: 'high',
+        url: request.url,
+        method: request.method,
+        evidence: 'Content-Security-Policy header not found',
+        cwe: 'CWE-693',
+        owasp: 'A05:2021',
+        remediation: 'Implement a strict Content-Security-Policy header.',
+      });
+    }
+  }
+  
+  // Passive check: Look for existing XSS patterns in response
+  if (response?.body) {
+    const responseBody = bytesToString(response.body);
+    
+    for (const pattern of REFLECTION_PATTERNS) {
+      if (pattern.test(responseBody)) {
+        // Check if any parameter value is reflected unsanitized
+        for (const [paramName, { value }] of params) {
+          if (value.length >= 3 && responseBody.includes(value)) {
+            // Check context of reflection
+            const index = responseBody.indexOf(value);
+            const contextStart = Math.max(0, index - 50);
+            const contextEnd = Math.min(responseBody.length, index + value.length + 50);
+            const context = responseBody.substring(contextStart, contextEnd);
+            
+            if (/<script|on\w+=|javascript:/i.test(context)) {
+              Sentinel.emitFinding({
+                title: 'Potential XSS via Parameter Reflection',
+                description: `Parameter "${paramName}" is reflected in response near potentially dangerous HTML context.`,
+                severity: 'medium',
+                vuln_type: 'xss',
+                confidence: 'low',
+                url: request.url,
+                method: request.method,
+                param_name: paramName,
+                evidence: context.substring(0, 200),
+                cwe: 'CWE-79',
+                owasp: 'A03:2021',
+                remediation: 'Properly encode all user input before including in HTML output.',
+              });
+              break;
+            }
+          }
+        }
         break;
       }
     }
   }
   
-  if (!response?.body) return;
-  
-  const responseBody = bytesToString(response.body);
-  
-  // Check for reflected XSS
-  const reflected = checkReflection(params, responseBody);
-  if (reflected) {
-    (globalThis as any).Sentinel.emitFinding({
-      title: 'Potential Reflected XSS',
-      description: `Parameter "${reflected.param}" is reflected in response without proper encoding.\nValue: ${reflected.value.substring(0, 100)}`,
-      severity: 'high',
-      vuln_type: 'xss',
-      confidence: 'high',
-      url: request.url,
-      method: request.method,
-      evidence: reflected.value.substring(0, 200),
-      cwe: 'CWE-79',
-      owasp: 'A03:2021',
-      remediation: 'Implement output encoding for all user-controlled data.'
-    });
-  }
-  
-  // Check for DOM XSS sinks
-  for (const pattern of DOM_XSS_SINKS) {
-    if (pattern.test(responseBody)) {
-      (globalThis as any).Sentinel.emitFinding({
-        title: 'DOM XSS Sink Detected',
-        description: `Response contains potentially dangerous JavaScript sink: ${pattern.toString()}`,
-        severity: 'medium',
-        vuln_type: 'xss',
-        confidence: 'low',
-        url: request.url,
-        method: request.method,
-        evidence: responseBody.match(pattern)?.[0] || '',
-        cwe: 'CWE-79',
-        owasp: 'A03:2021',
-        remediation: 'Avoid using dangerous DOM APIs with user-controlled data.'
-      });
-      break;
+  // Active verification for each parameter
+  for (const [paramName, { value, location }] of params) {
+    // Skip very long values
+    if (value.length > 200) {
+      continue;
     }
-  }
-  
-  // Check for missing security headers
-  const isHtml = response.content_type?.includes('text/html');
-  if (isHtml) {
-    const missingHeaders = checkMissingHeaders(response.headers);
-    if (missingHeaders.length > 0) {
-      (globalThis as any).Sentinel.emitFinding({
-        title: 'Missing XSS Protection Headers',
-        description: `Response is missing security headers: ${missingHeaders.join(', ')}`,
-        severity: 'low',
+    
+    // Skip values that look like encoded data
+    if (/^[A-Za-z0-9+/=]{50,}$/.test(value)) {
+      continue;
+    }
+    
+    Sentinel.log('debug', `Testing XSS for parameter: ${paramName}`);
+    
+    const result = await verifyXss(
+      request.url,
+      paramName,
+      value,
+      request.headers
+    );
+    
+    if (result.vulnerable) {
+      Sentinel.emitFinding({
+        title: `XSS Vulnerability Confirmed (${result.type})`,
+        description: `Parameter "${paramName}" (${location}) is vulnerable to ${result.type} Cross-Site Scripting.\n\nPayload: ${result.payload}\nContext: ${result.context}`,
+        severity: 'high',
         vuln_type: 'xss',
         confidence: 'high',
         url: request.url,
         method: request.method,
-        evidence: `Missing: ${missingHeaders.join(', ')}`,
-        remediation: 'Add Content-Security-Policy, X-XSS-Protection, and X-Content-Type-Options headers.'
+        param_name: paramName,
+        param_value: value,
+        evidence: result.evidence,
+        cwe: 'CWE-79',
+        owasp: 'A03:2021',
+        remediation: 'Implement proper output encoding based on the context (HTML, JavaScript, URL, CSS). Use Content-Security-Policy headers.',
       });
     }
+    
+    // Rate limiting
+    await sleep(100);
   }
+  
+  Sentinel.log('info', `XSS scan completed: ${request.url}`);
 }
 
 // Required: bind to globalThis
