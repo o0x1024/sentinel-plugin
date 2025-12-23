@@ -3,7 +3,7 @@
  * 
  * @plugin url_encoder
  * @name URL Encoder
- * @version 2.0.0
+ * @version 2.1.0
  * @author Sentinel Team
  * @category utility
  * @default_severity info
@@ -21,27 +21,47 @@ declare const SecurityUtils: {
 };
 
 /**
- * Tool input parameters - parsed by plugin adapter to generate JSON Schema
+ * Tool input parameters
  */
 interface ToolInput {
-  /**
-   * The text to encode or decode
-   * @example "Hello World!"
-   */
   text: string;
-  
-  /**
-   * Operation mode
-   * @default "encode"
-   */
   mode: "encode" | "decode";
-  
-  /**
-   * Encoding type to use
-   * @default "url"
-   */
   encoding?: "url" | "base64" | "html" | "hex" | "unicode";
 }
+
+/**
+ * 【方案2】导出参数 Schema 函数
+ * 
+ * 这是最优雅的方式：插件自己告诉引擎它需要什么参数。
+ * 引擎加载插件后会调用此函数获取参数说明。
+ */
+export function get_input_schema() {
+  return {
+    type: "object",
+    required: ["text", "mode"],
+    properties: {
+      text: {
+        type: "string",
+        description: "要编码或解码的文本"
+      },
+      mode: {
+        type: "string",
+        enum: ["encode", "decode"],
+        description: "操作模式：encode=编码, decode=解码",
+        default: "encode"
+      },
+      encoding: {
+        type: "string",
+        enum: ["url", "base64", "html", "hex", "unicode"],
+        description: "编码类型",
+        default: "url"
+      }
+    }
+  };
+}
+
+// 绑定到 globalThis
+globalThis.get_input_schema = get_input_schema;
 
 interface ToolOutput {
   success: boolean;

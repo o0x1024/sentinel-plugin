@@ -3,7 +3,7 @@
  * 
  * @plugin hash_calculator
  * @name Hash Calculator
- * @version 2.0.0
+ * @version 2.1.0
  * @author Sentinel Team
  * @category utility
  * @default_severity info
@@ -15,29 +15,48 @@
  * Tool input parameters
  */
 interface ToolInput {
-  /**
-   * The text to hash
-   * @example "password123"
-   */
   text: string;
-  
-  /**
-   * Hash algorithm to use
-   * @default "sha256"
-   */
   algorithm?: "md5" | "sha1" | "sha256" | "sha384" | "sha512";
-  
-  /**
-   * Output format for the hash
-   * @default "hex"
-   */
   format?: "hex" | "base64";
-  
-  /**
-   * Calculate HMAC with this key (optional)
-   */
   hmacKey?: string;
 }
+
+/**
+ * 【方案2】导出参数 Schema 函数
+ * 
+ * 插件自己定义需要的参数，引擎加载后调用此函数获取。
+ */
+export function get_input_schema() {
+  return {
+    type: "object",
+    required: ["text"],
+    properties: {
+      text: {
+        type: "string",
+        description: "要计算哈希的文本"
+      },
+      algorithm: {
+        type: "string",
+        enum: ["md5", "sha1", "sha256", "sha384", "sha512"],
+        description: "哈希算法",
+        default: "sha256"
+      },
+      format: {
+        type: "string",
+        enum: ["hex", "base64"],
+        description: "输出格式",
+        default: "hex"
+      },
+      hmacKey: {
+        type: "string",
+        description: "HMAC 密钥（可选，填写后计算 HMAC 而非普通哈希）"
+      }
+    }
+  };
+}
+
+// 绑定到 globalThis
+globalThis.get_input_schema = get_input_schema;
 
 interface ToolOutput {
   success: boolean;

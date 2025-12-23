@@ -292,37 +292,58 @@ globalThis.scan_transaction = scan_transaction;
 
 ### Agent Tool Plugin
 
-Agent plugins provide tools for AI agents. Use JSDoc comments to define input parameters:
+Agent plugins provide tools for AI agents. **The recommended way to expose parameters is through a `get_input_schema()` function.**
 
 #### Parameter Schema Definition
 
-**Method 1: JSDoc + TypeScript Interface (Recommended)**
+**Method 1: `get_input_schema()` Function (Recommended ⭐)**
+
+The most elegant way: plugin tells the engine what parameters it needs at runtime.
 
 ```typescript
 /**
  * URL Encoder/Decoder Tool
- * 
- * @description Encode or decode URLs and text
- * @author Sentinel Team
- * @version 1.0.0
  */
 
-/**
- * Tool input parameters
- */
 interface ToolInput {
-  /** The text to encode or decode */
   text: string;
-  /** Operation mode: "encode" or "decode" */
   mode: "encode" | "decode";
-  /** Encoding type: "url", "base64", "html" */
-  encoding?: string;
+  encoding?: "url" | "base64" | "html";
 }
 
 interface ToolOutput {
   success: boolean;
   data?: any;
   error?: string;
+}
+
+/**
+ * Export this function to tell the engine what parameters this plugin accepts.
+ * The engine will call this function after loading the plugin.
+ */
+export function get_input_schema() {
+  return {
+    type: "object",
+    required: ["text", "mode"],
+    properties: {
+      text: {
+        type: "string",
+        description: "The text to encode or decode"
+      },
+      mode: {
+        type: "string",
+        enum: ["encode", "decode"],
+        description: "Operation mode",
+        default: "encode"
+      },
+      encoding: {
+        type: "string",
+        enum: ["url", "base64", "html"],
+        description: "Encoding type",
+        default: "url"
+      }
+    }
+  };
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
@@ -349,10 +370,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
   }
 }
 
+// Bind to globalThis for engine access
+globalThis.get_input_schema = get_input_schema;
 globalThis.analyze = analyze;
 ```
 
-**Method 2: Header Schema Block (for complex schemas)**
+**Why this method is better:**
+- ✅ No regex parsing needed - engine directly calls the function
+- ✅ Type-safe - you define the schema in code
+- ✅ Dynamic - can generate schema based on runtime conditions
+- ✅ Self-documenting - schema lives with the code
+- ✅ Easy to understand - even beginners can read it
+
+**Method 2: Header Schema Block (for complex schemas, fallback)**
 
 ```typescript
 /* @sentinel_schema
@@ -371,11 +401,6 @@ globalThis.analyze = analyze;
       "minimum": 1,
       "maximum": 100,
       "description": "Number of concurrent requests"
-    },
-    "timeout": {
-      "type": "integer",
-      "default": 5000,
-      "description": "Request timeout in milliseconds"
     }
   }
 }
@@ -384,7 +409,6 @@ globalThis.analyze = analyze;
 interface ToolInput {
   targets: string[];
   concurrency?: number;
-  timeout?: number;
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
@@ -393,6 +417,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
 globalThis.analyze = analyze;
 ```
+
+> ⚠️ Method 2 is a fallback for plugins that don't export `get_input_schema()`. New plugins should use Method 1.
 
 ---
 

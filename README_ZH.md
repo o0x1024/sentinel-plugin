@@ -292,37 +292,58 @@ globalThis.scan_transaction = scan_transaction;
 
 ### Agent 工具插件
 
-Agent 插件为 AI 代理提供工具。使用 JSDoc 注释来定义输入参数：
+Agent 插件为 AI 代理提供工具。**推荐使用 `get_input_schema()` 函数来暴露参数说明。**
 
 #### 参数 Schema 定义
 
-**方法 1: JSDoc + TypeScript 接口（推荐）**
+**方法 1: `get_input_schema()` 函数（推荐 ⭐）**
+
+最优雅的方式：插件自己告诉引擎它需要什么参数。引擎加载插件后会调用这个函数。
 
 ```typescript
 /**
  * URL 编码/解码工具
- * 
- * @description 编码或解码 URL 和文本
- * @author Sentinel Team
- * @version 1.0.0
  */
 
-/**
- * 工具输入参数
- */
 interface ToolInput {
-  /** 要编码或解码的文本 */
   text: string;
-  /** 操作模式: "encode" 或 "decode" */
   mode: "encode" | "decode";
-  /** 编码类型: "url", "base64", "html" */
-  encoding?: string;
+  encoding?: "url" | "base64" | "html";
 }
 
 interface ToolOutput {
   success: boolean;
   data?: any;
   error?: string;
+}
+
+/**
+ * 导出这个函数来告诉引擎插件接受哪些参数。
+ * 引擎加载插件后会自动调用它。
+ */
+export function get_input_schema() {
+  return {
+    type: "object",
+    required: ["text", "mode"],
+    properties: {
+      text: {
+        type: "string",
+        description: "要编码或解码的文本"
+      },
+      mode: {
+        type: "string",
+        enum: ["encode", "decode"],
+        description: "操作模式",
+        default: "encode"
+      },
+      encoding: {
+        type: "string",
+        enum: ["url", "base64", "html"],
+        description: "编码类型",
+        default: "url"
+      }
+    }
+  };
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
@@ -349,10 +370,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
   }
 }
 
+// 绑定到 globalThis 供引擎访问
+globalThis.get_input_schema = get_input_schema;
 globalThis.analyze = analyze;
 ```
 
-**方法 2: Header Schema Block（用于复杂 schema）**
+**为什么这个方法更好：**
+- ✅ 不需要正则解析 - 引擎直接调用函数
+- ✅ 类型安全 - 在代码中定义 schema
+- ✅ 动态灵活 - 可以根据运行时条件生成 schema
+- ✅ 自文档化 - schema 和代码在一起
+- ✅ 简单易懂 - 小学生都能看懂
+
+**方法 2: Header Schema Block（备选，用于复杂 schema）**
 
 ```typescript
 /* @sentinel_schema
@@ -371,11 +401,6 @@ globalThis.analyze = analyze;
       "minimum": 1,
       "maximum": 100,
       "description": "并发请求数"
-    },
-    "timeout": {
-      "type": "integer",
-      "default": 5000,
-      "description": "请求超时时间（毫秒）"
     }
   }
 }
@@ -384,7 +409,6 @@ globalThis.analyze = analyze;
 interface ToolInput {
   targets: string[];
   concurrency?: number;
-  timeout?: number;
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
@@ -393,6 +417,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
 globalThis.analyze = analyze;
 ```
+
+> ⚠️ 方法 2 是备选方案，用于插件没有导出 `get_input_schema()` 时的静态解析。新插件应该使用方法 1。
 
 ---
 
