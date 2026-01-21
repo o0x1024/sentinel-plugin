@@ -73,6 +73,18 @@
       "default_severity": "critical",
       "tags": ["nextjs", "rce", "prototype-pollution", "cve", "exploit"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/nextjs_rce_scanner.ts"
+    },
+    {
+      "id": "subdomain_enumerator",
+      "name": "Subdomain Enumerator",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Enumerate subdomains using multiple data sources (crt.sh, HackerTarget, RapidDNS, AlienVault, VirusTotal, URLScan, Anubis, DNSDumpster, Sublist3r, CertSpotter)",
+      "default_severity": "info",
+      "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_enumerator.ts"
     }
   ]
 }
