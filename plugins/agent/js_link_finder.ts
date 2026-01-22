@@ -12,7 +12,8 @@
  */
 
 interface ToolInput {
-    url: string;
+    url?: string;
+    urls?: string[];
     timeout?: number;
     userAgent?: string;
     recursive?: boolean;
@@ -22,6 +23,7 @@ interface ToolInput {
     includeInline?: boolean;
     followSourceMaps?: boolean;
     probeSpaManifests?: boolean;
+    concurrency?: number;
 }
 
 interface JsLink {
@@ -32,10 +34,17 @@ interface JsLink {
     hash?: string;
 }
 
+interface UrlResult {
+    url: string;
+    jsLinks: JsLink[];
+    crawledPages?: string[];
+}
+
 interface ToolOutput {
     success: boolean;
     data?: {
-        baseUrl: string;
+        baseUrls: string[];
+        results: UrlResult[];
         jsLinks: JsLink[];
         summary: {
             total: number;
@@ -48,9 +57,9 @@ interface ToolOutput {
             manifests: number;
             uniqueDomains: string[];
             totalSize: number;
+            urlsScanned: number;
         };
         crawledPages?: string[];
-        debug?: any;
     };
     error?: string;
 }
@@ -61,11 +70,15 @@ interface ToolOutput {
 function get_input_schema() {
     return {
         type: "object",
-        required: ["url"],
         properties: {
             url: {
                 type: "string",
-                description: "Target URL to find JavaScript files from"
+                description: "Single target URL (use 'urls' for multiple targets)"
+            },
+            urls: {
+                type: "array",
+                items: { type: "string" },
+                description: "Array of target URLs to find JavaScript files from (supports batch processing)"
             },
             timeout: {
                 type: "number",
@@ -85,7 +98,7 @@ function get_input_schema() {
             },
             maxFiles: {
                 type: "number",
-                description: "Maximum JS files to collect (default: 100)"
+                description: "Maximum JS files to collect per URL (default: 100)"
             },
             includeSameOriginOnly: {
                 type: "boolean",
@@ -102,6 +115,10 @@ function get_input_schema() {
             probeSpaManifests: {
                 type: "boolean",
                 description: "Probe common SPA manifest endpoints (default: true)"
+            },
+            concurrency: {
+                type: "number",
+                description: "Number of concurrent requests (default: 100)"
             }
         }
     };
@@ -118,9 +135,37 @@ function get_output_schema() {
             data: {
                 type: "object",
                 properties: {
-                    baseUrl: { type: "string" },
-                    jsLinks: { type: "array" },
-                    summary: { type: "object" }
+                    baseUrls: { type: "array", items: { type: "string" }, description: "List of scanned base URLs" },
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string", description: "Scanned URL" },
+                                jsLinks: { type: "array", description: "JS links found for this URL" },
+                                crawledPages: { type: "array", items: { type: "string" } }
+                            }
+                        },
+                        description: "Per-URL results"
+                    },
+                    jsLinks: { type: "array", description: "All JS links combined (deduplicated)" },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            total: { type: "integer" },
+                            external: { type: "integer" },
+                            inline: { type: "integer" },
+                            modules: { type: "integer" },
+                            dynamic: { type: "integer" },
+                            sourcemaps: { type: "integer" },
+                            webpack: { type: "integer" },
+                            manifests: { type: "integer" },
+                            uniqueDomains: { type: "array", items: { type: "string" } },
+                            totalSize: { type: "integer" },
+                            urlsScanned: { type: "integer" }
+                        }
+                    },
+                    crawledPages: { type: "array", items: { type: "string" } }
                 }
             },
             error: { type: "string" }
@@ -132,7 +177,36 @@ function get_output_schema() {
 const DEFAULT_TIMEOUT = 15000;
 const DEFAULT_MAX_FILES = 100;
 const DEFAULT_MAX_DEPTH = 2;
+const DEFAULT_CONCURRENCY = 100;
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/**
+ * Execute tasks with concurrency control
+ */
+async function executeConcurrently<T, R>(
+    items: T[],
+    concurrency: number,
+    executor: (item: T) => Promise<R>
+): Promise<R[]> {
+    const results: R[] = [];
+    const executing: Promise<void>[] = [];
+    
+    for (const item of items) {
+        const promise = executor(item).then(result => {
+            results.push(result);
+        });
+        
+        executing.push(promise);
+        
+        if (executing.length >= concurrency) {
+            await Promise.race(executing);
+            executing.splice(executing.findIndex(p => p === promise), 1);
+        }
+    }
+    
+    await Promise.all(executing);
+    return results;
+}
 
 /**
  * Simple hash function for inline scripts
@@ -536,17 +610,177 @@ function getSameOriginLinks(html: string, baseUrl: string): string[] {
 }
 
 /**
+ * Scan a single URL for JS links
+ */
+async function scanSingleUrl(
+    targetUrl: string,
+    timeout: number,
+    userAgent: string,
+    recursive: boolean,
+    maxDepth: number,
+    maxFiles: number,
+    includeSameOriginOnly: boolean,
+    includeInline: boolean,
+    followSourceMaps: boolean,
+    probeSpaManifests: boolean,
+    globalSeenUrls: Set<string>
+): Promise<UrlResult | null> {
+    // Validate URL
+    let baseUrl: string;
+    try {
+        baseUrl = new URL(targetUrl).href;
+    } catch {
+        return null;
+    }
+    
+    const urlLinks: JsLink[] = [];
+    const crawledPages: string[] = [];
+    const pagesToCrawl: Array<{ url: string; depth: number }> = [{ url: baseUrl, depth: 0 }];
+    const visitedPages = new Set<string>();
+    
+    // Crawl pages
+    while (pagesToCrawl.length > 0 && urlLinks.length < maxFiles) {
+        const current = pagesToCrawl.shift()!;
+        if (visitedPages.has(current.url)) continue;
+        visitedPages.add(current.url);
+        
+        const result = await fetchWithTimeout(current.url, timeout, userAgent);
+        if (!result) continue;
+        
+        crawledPages.push(current.url);
+        
+        // 1. Extract script tags
+        const scriptLinks = extractScriptTags(result.text, current.url);
+        for (const link of scriptLinks) {
+            if (!globalSeenUrls.has(link.url)) {
+                if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
+                    globalSeenUrls.add(link.url);
+                    urlLinks.push(link);
+                }
+            }
+        }
+        
+        // 2. Extract link tags (modulepreload, preload, prefetch)
+        const linkTagLinks = extractLinkTags(result.text, current.url);
+        for (const link of linkTagLinks) {
+            if (!globalSeenUrls.has(link.url)) {
+                if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
+                    globalSeenUrls.add(link.url);
+                    urlLinks.push(link);
+                }
+            }
+        }
+        
+        // 3. Extract from inline scripts
+        if (includeInline) {
+            const inlineScripts = extractInlineScripts(result.text);
+            for (const script of inlineScripts) {
+                const inlineUrl = `inline://${baseUrl}#${script.hash}`;
+                if (!globalSeenUrls.has(inlineUrl)) {
+                    globalSeenUrls.add(inlineUrl);
+                    urlLinks.push({
+                        url: inlineUrl,
+                        type: 'inline',
+                        source: 'inline_script',
+                        size: script.content.length,
+                        hash: script.hash
+                    });
+                }
+                
+                const inlineLinks = extractJsFromContent(script.content, current.url);
+                for (const link of inlineLinks) {
+                    if (!globalSeenUrls.has(link.url)) {
+                        if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
+                            globalSeenUrls.add(link.url);
+                            urlLinks.push(link);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 4. If recursive, add same-origin links to crawl
+        if (recursive && current.depth < maxDepth) {
+            const pageLinks = getSameOriginLinks(result.text, current.url);
+            for (const pageUrl of pageLinks.slice(0, 20)) {
+                if (!visitedPages.has(pageUrl)) {
+                    pagesToCrawl.push({ url: pageUrl, depth: current.depth + 1 });
+                }
+            }
+        }
+    }
+    
+    // 5. Probe SPA manifests
+    if (probeSpaManifests && urlLinks.length < maxFiles) {
+        const manifestUrls = getManifestUrls(baseUrl);
+        for (const manifestUrl of manifestUrls) {
+            const manifestResult = await fetchWithTimeout(manifestUrl, timeout, userAgent);
+            if (manifestResult && manifestResult.contentType.includes('json')) {
+                const manifestLinks = parseManifest(manifestResult.text, manifestUrl);
+                for (const link of manifestLinks) {
+                    if (!globalSeenUrls.has(link.url)) {
+                        if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
+                            globalSeenUrls.add(link.url);
+                            urlLinks.push(link);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 6. Follow sourcemaps
+    if (followSourceMaps && urlLinks.length < maxFiles) {
+        const externalLinks = urlLinks.filter(l => 
+            l.type === 'external' || l.type === 'module' || l.type === 'webpack'
+        ).slice(0, 10);
+        
+        for (const link of externalLinks) {
+            if (urlLinks.length >= maxFiles) break;
+            
+            const jsResult = await fetchWithTimeout(link.url, timeout, userAgent);
+            if (jsResult) {
+                link.size = jsResult.size;
+                
+                const jsLinks = extractJsFromContent(jsResult.text, link.url);
+                for (const jsLink of jsLinks) {
+                    if (!globalSeenUrls.has(jsLink.url)) {
+                        if (!includeSameOriginOnly || isSameOrigin(baseUrl, jsLink.url)) {
+                            globalSeenUrls.add(jsLink.url);
+                            urlLinks.push(jsLink);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return {
+        url: baseUrl,
+        jsLinks: urlLinks.slice(0, maxFiles),
+        crawledPages: recursive ? crawledPages : undefined,
+    };
+}
+
+/**
  * Main execution function
  */
 async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        // Validate input
-        if (!input || !input.url) {
-            return { success: false, error: 'URL is required' };
+        // Build URL list from input (support both url and urls)
+        let targetUrls: string[] = [];
+        
+        if (input.urls && Array.isArray(input.urls) && input.urls.length > 0) {
+            targetUrls = input.urls.filter(u => typeof u === 'string' && u.trim());
+        } else if (input.url && typeof input.url === 'string') {
+            targetUrls = [input.url];
+        }
+        
+        if (targetUrls.length === 0) {
+            return { success: false, error: 'At least one URL is required (use "url" or "urls" parameter)' };
         }
 
-        // Parse config with proper defaults (handle 0 values)
-        const url = input.url;
+        // Parse config
         const timeout = (input.timeout && input.timeout > 0) ? input.timeout : DEFAULT_TIMEOUT;
         const userAgent = input.userAgent || DEFAULT_USER_AGENT;
         const recursive = input.recursive === true;
@@ -556,161 +790,71 @@ async function analyze(input: ToolInput): Promise<ToolOutput> {
         const includeInline = input.includeInline !== false;
         const followSourceMaps = input.followSourceMaps !== false;
         const probeSpaManifests = input.probeSpaManifests !== false;
+        const concurrency = (input.concurrency && input.concurrency > 0) ? input.concurrency : DEFAULT_CONCURRENCY;
         
-        // Validate URL
-        let baseUrl: string;
-        try {
-            baseUrl = new URL(url).href;
-        } catch {
-            return { success: false, error: 'Invalid URL provided' };
-        }
+        // Global deduplication across all URLs
+        const globalSeenUrls = new Set<string>();
+        const allJsLinks: JsLink[] = [];
+        const allCrawledPages: string[] = [];
+        const baseUrls: string[] = [];
         
-        const allLinks: JsLink[] = [];
-        const seenUrls = new Set<string>();
-        const crawledPages: string[] = [];
-        const pagesToCrawl: Array<{ url: string; depth: number }> = [{ url: baseUrl, depth: 0 }];
-        const visitedPages = new Set<string>();
-        
-        // Crawl pages
-        while (pagesToCrawl.length > 0 && allLinks.length < maxFiles) {
-            const current = pagesToCrawl.shift()!;
-            if (visitedPages.has(current.url)) continue;
-            visitedPages.add(current.url);
-            
-            const result = await fetchWithTimeout(current.url, timeout, userAgent);
-            if (!result) continue;
-            
-            crawledPages.push(current.url);
-            
-            // 1. Extract script tags
-            const scriptLinks = extractScriptTags(result.text, current.url);
-            for (const link of scriptLinks) {
-                if (!seenUrls.has(link.url)) {
-                    if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
-                        seenUrls.add(link.url);
-                        allLinks.push(link);
-                    }
-                }
-            }
-            
-            // 2. Extract link tags (modulepreload, preload, prefetch)
-            const linkTagLinks = extractLinkTags(result.text, current.url);
-            for (const link of linkTagLinks) {
-                if (!seenUrls.has(link.url)) {
-                    if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
-                        seenUrls.add(link.url);
-                        allLinks.push(link);
-                    }
-                }
-            }
-            
-            // 3. Extract from inline scripts
-            if (includeInline) {
-                const inlineScripts = extractInlineScripts(result.text);
-                for (const script of inlineScripts) {
-                    // Add inline script as entry
-                    const inlineUrl = `inline://${script.hash}`;
-                    if (!seenUrls.has(inlineUrl)) {
-                        seenUrls.add(inlineUrl);
-                        allLinks.push({
-                            url: inlineUrl,
-                            type: 'inline',
-                            source: 'inline_script',
-                            size: script.content.length,
-                            hash: script.hash
-                        });
-                    }
-                    
-                    // Also extract JS URLs from inline content
-                    const inlineLinks = extractJsFromContent(script.content, current.url);
-                    for (const link of inlineLinks) {
-                        if (!seenUrls.has(link.url)) {
-                            if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
-                                seenUrls.add(link.url);
-                                allLinks.push(link);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // 4. If recursive, add same-origin links to crawl
-            if (recursive && current.depth < maxDepth) {
-                const pageLinks = getSameOriginLinks(result.text, current.url);
-                for (const pageUrl of pageLinks.slice(0, 20)) {
-                    if (!visitedPages.has(pageUrl)) {
-                        pagesToCrawl.push({ url: pageUrl, depth: current.depth + 1 });
-                    }
-                }
-            }
-        }
-        
-        // 5. Probe SPA manifests
-        if (probeSpaManifests && allLinks.length < maxFiles) {
-            const manifestUrls = getManifestUrls(baseUrl);
-            for (const manifestUrl of manifestUrls) {
-                const manifestResult = await fetchWithTimeout(manifestUrl, timeout, userAgent);
-                if (manifestResult && manifestResult.contentType.includes('json')) {
-                    const manifestLinks = parseManifest(manifestResult.text, manifestUrl);
-                    for (const link of manifestLinks) {
-                        if (!seenUrls.has(link.url)) {
-                            if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
-                                seenUrls.add(link.url);
-                                allLinks.push(link);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 6. Optionally fetch external JS to find more imports and sourcemaps
-        if (followSourceMaps && allLinks.length < maxFiles) {
-            const externalLinks = allLinks.filter(l => 
-                l.type === 'external' || l.type === 'module' || l.type === 'webpack'
-            ).slice(0, 10);
-            
-            for (const link of externalLinks) {
-                if (allLinks.length >= maxFiles) break;
+        // Process each URL with concurrency control
+        const results = await executeConcurrently(
+            targetUrls,
+            concurrency,
+            async (targetUrl) => {
+                const urlResult = await scanSingleUrl(
+                    targetUrl,
+                    timeout,
+                    userAgent,
+                    recursive,
+                    maxDepth,
+                    maxFiles,
+                    includeSameOriginOnly,
+                    includeInline,
+                    followSourceMaps,
+                    probeSpaManifests,
+                    globalSeenUrls
+                );
                 
-                const jsResult = await fetchWithTimeout(link.url, timeout, userAgent);
-                if (jsResult) {
-                    link.size = jsResult.size;
-                    
-                    const jsLinks = extractJsFromContent(jsResult.text, link.url);
-                    for (const jsLink of jsLinks) {
-                        if (!seenUrls.has(jsLink.url)) {
-                            if (!includeSameOriginOnly || isSameOrigin(baseUrl, jsLink.url)) {
-                                seenUrls.add(jsLink.url);
-                                allLinks.push(jsLink);
-                            }
-                        }
+                if (urlResult) {
+                    baseUrls.push(urlResult.url);
+                    allJsLinks.push(...urlResult.jsLinks);
+                    if (urlResult.crawledPages) {
+                        allCrawledPages.push(...urlResult.crawledPages);
                     }
+                    return urlResult;
                 }
+                return null;
             }
-        }
+        );
+        
+        // Filter out null results
+        const validResults = results.filter(r => r !== null) as UrlResult[];
         
         // Calculate summary
         const summary = {
-            total: allLinks.length,
-            external: allLinks.filter(l => l.type === 'external').length,
-            inline: allLinks.filter(l => l.type === 'inline').length,
-            modules: allLinks.filter(l => l.type === 'module').length,
-            dynamic: allLinks.filter(l => l.type === 'dynamic').length,
-            sourcemaps: allLinks.filter(l => l.type === 'sourcemap').length,
-            webpack: allLinks.filter(l => l.type === 'webpack').length,
-            manifests: allLinks.filter(l => l.type === 'manifest').length,
-            uniqueDomains: [...new Set(allLinks.filter(l => l.type !== 'inline').map(l => getDomain(l.url)).filter(Boolean))],
-            totalSize: allLinks.reduce((sum, l) => sum + (l.size || 0), 0),
+            total: allJsLinks.length,
+            external: allJsLinks.filter(l => l.type === 'external').length,
+            inline: allJsLinks.filter(l => l.type === 'inline').length,
+            modules: allJsLinks.filter(l => l.type === 'module').length,
+            dynamic: allJsLinks.filter(l => l.type === 'dynamic').length,
+            sourcemaps: allJsLinks.filter(l => l.type === 'sourcemap').length,
+            webpack: allJsLinks.filter(l => l.type === 'webpack').length,
+            manifests: allJsLinks.filter(l => l.type === 'manifest').length,
+            uniqueDomains: [...new Set(allJsLinks.filter(l => l.type !== 'inline').map(l => getDomain(l.url)).filter(Boolean))],
+            totalSize: allJsLinks.reduce((sum, l) => sum + (l.size || 0), 0),
+            urlsScanned: results.length,
         };
         
         return {
             success: true,
             data: {
-                baseUrl,
-                jsLinks: allLinks.slice(0, maxFiles),
+                baseUrls,
+                results: validResults,
+                jsLinks: allJsLinks,
                 summary,
-                crawledPages: recursive ? crawledPages : undefined,
+                crawledPages: recursive ? allCrawledPages : undefined,
             },
         };
     } catch (error: any) {

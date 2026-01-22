@@ -28,7 +28,8 @@ declare const Sentinel: {
 };
 
 interface ToolInput {
-    url: string;
+    url?: string;
+    urls?: string[];
     timeout?: number;
     userAgent?: string;
     maxFileSize?: number;
@@ -37,6 +38,7 @@ interface ToolInput {
     extractDomains?: boolean;
     followImports?: boolean;
     maxFiles?: number;
+    concurrency?: number;
 }
 
 interface StringLiteral {
@@ -81,7 +83,7 @@ interface JsFile {
 interface ToolOutput {
     success: boolean;
     data?: {
-        baseUrl: string;
+        baseUrls: string[];
         files: JsFile[];
         summary: {
             totalFiles: number;
@@ -92,6 +94,7 @@ interface ToolOutput {
             uniqueEndpoints: string[];
             uniqueDomains: string[];
             secretsBySeverity: Record<string, number>;
+            urlsScanned: number;
         };
     };
     error?: string;
@@ -199,11 +202,15 @@ const SKIP_DOMAINS = new Set([
 export function get_input_schema() {
     return {
         type: "object",
-        required: ["url"],
         properties: {
             url: {
                 type: "string",
-                description: "Target URL (HTML page or JavaScript file)"
+                description: "Single target URL (HTML page or JavaScript file, use 'urls' for multiple targets)"
+            },
+            urls: {
+                type: "array",
+                items: { type: "string" },
+                description: "Array of target URLs to analyze (supports batch processing)"
             },
             timeout: {
                 type: "integer",
@@ -245,16 +252,51 @@ export function get_input_schema() {
             },
             maxFiles: {
                 type: "integer",
-                description: "Maximum number of JS files to analyze",
+                description: "Maximum number of JS files to analyze per URL",
                 default: 20,
                 minimum: 1,
                 maximum: 100
+            },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent requests (default: 100)",
+                default: 100,
+                minimum: 1,
+                maximum: 200
             }
         }
     };
 }
 
 globalThis.get_input_schema = get_input_schema;
+
+/**
+ * Execute tasks with concurrency control
+ */
+async function executeConcurrently<T, R>(
+    items: T[],
+    concurrency: number,
+    executor: (item: T) => Promise<R>
+): Promise<R[]> {
+    const results: R[] = [];
+    const executing: Promise<void>[] = [];
+    
+    for (const item of items) {
+        const promise = executor(item).then(result => {
+            results.push(result);
+        });
+        
+        executing.push(promise);
+        
+        if (executing.length >= concurrency) {
+            await Promise.race(executing);
+            executing.splice(executing.findIndex(p => p === promise), 1);
+        }
+    }
+    
+    await Promise.all(executing);
+    return results;
+}
 
 /**
  * Export output schema
@@ -645,21 +687,123 @@ async function analyzeJsFile(
 }
 
 /**
+ * Process a single URL (HTML page or JS file)
+ */
+async function processSingleUrl(
+    baseUrl: string,
+    options: {
+        timeout: number;
+        userAgent: string;
+        maxFileSize: number;
+        extractEndpoints: boolean;
+        extractSecrets: boolean;
+        extractDomains: boolean;
+        followImports: boolean;
+        maxFiles: number;
+        concurrency: number;
+    }
+): Promise<JsFile[]> {
+    const jsUrls: string[] = [];
+    const files: JsFile[] = [];
+    
+    // Check if URL is a JS file or HTML page
+    if (baseUrl.endsWith(".js") || baseUrl.endsWith(".mjs") || baseUrl.endsWith(".ts")) {
+        jsUrls.push(baseUrl);
+    } else {
+        // Fetch HTML page and extract script URLs
+        try {
+            const response = await fetch(baseUrl, {
+                method: "GET",
+                headers: {
+                    "User-Agent": options.userAgent,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+                // @ts-ignore
+                timeout: options.timeout,
+            });
+            
+            if (response.ok) {
+                const html = await response.text();
+                
+                // Analyze inline scripts
+                const inlineContent = extractInlineScripts(html);
+                if (inlineContent.length > 0) {
+                    const { literals, errors } = extractLiterals(inlineContent, "inline.js");
+                    const inlineResult: JsFile = {
+                        url: `${baseUrl}#inline`,
+                        size: inlineContent.length,
+                        literalsCount: literals.length,
+                        endpoints: options.extractEndpoints ? analyzeEndpoints(literals, "inline") : [],
+                        secrets: options.extractSecrets ? analyzeSecrets(literals, "inline") : [],
+                        domains: options.extractDomains ? analyzeDomains(literals, "inline") : [],
+                        parseErrors: errors.length > 0 ? errors : undefined,
+                    };
+                    files.push(inlineResult);
+                }
+                
+                if (options.followImports) {
+                    const scriptUrls = extractScriptUrls(html, baseUrl);
+                    jsUrls.push(...scriptUrls);
+                }
+            }
+        } catch {
+            // If we can't fetch the page, treat URL as JS file
+            jsUrls.push(baseUrl);
+        }
+    }
+    
+    // Limit number of files
+    const urlsToAnalyze = jsUrls.slice(0, options.maxFiles - files.length);
+    
+    // Analyze JS files with concurrency control
+    const jsFileResults = await executeConcurrently(
+        urlsToAnalyze,
+        options.concurrency,
+        async (url) => {
+            return await analyzeJsFile(url, {
+                timeout: options.timeout,
+                userAgent: options.userAgent,
+                maxFileSize: options.maxFileSize,
+                extractEndpoints: options.extractEndpoints,
+                extractSecrets: options.extractSecrets,
+                extractDomains: options.extractDomains,
+            });
+        }
+    );
+    
+    files.push(...jsFileResults);
+    
+    return files;
+}
+
+/**
  * Main analysis function
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!input.url || typeof input.url !== "string") {
+        // Build URL list from input (support both url and urls)
+        let targetUrls: string[] = [];
+        
+        if (input.urls && Array.isArray(input.urls) && input.urls.length > 0) {
+            targetUrls = input.urls.filter(u => typeof u === 'string' && u.trim());
+        } else if (input.url && typeof input.url === "string") {
+            targetUrls = [input.url];
+        }
+        
+        if (targetUrls.length === 0) {
             return {
                 success: false,
-                error: "Invalid input: url parameter is required"
+                error: "At least one URL is required (use 'url' or 'urls' parameter)"
             };
         }
         
-        let baseUrl = input.url;
-        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
-            baseUrl = `https://${baseUrl}`;
-        }
+        // Normalize URLs
+        const baseUrls = targetUrls.map(url => {
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                return `https://${url}`;
+            }
+            return url;
+        });
         
         const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -669,72 +813,29 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const extractDomainsFlag = input.extractDomains !== false;
         const followImports = input.followImports !== false;
         const maxFiles = input.maxFiles || 20;
+        const concurrency = input.concurrency || 100;
         
-        const jsUrls: string[] = [];
-        const files: JsFile[] = [];
-        
-        // Check if URL is a JS file or HTML page
-        if (baseUrl.endsWith(".js") || baseUrl.endsWith(".mjs") || baseUrl.endsWith(".ts")) {
-            jsUrls.push(baseUrl);
-        } else {
-            // Fetch HTML page and extract script URLs
-            try {
-                const response = await fetch(baseUrl, {
-                    method: "GET",
-                    headers: {
-                        "User-Agent": userAgent,
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    },
-                    // @ts-ignore
+        // Process each URL with concurrency control
+        const allFilesArrays = await executeConcurrently(
+            baseUrls,
+            concurrency,
+            async (baseUrl) => {
+                return await processSingleUrl(baseUrl, {
                     timeout,
+                    userAgent,
+                    maxFileSize,
+                    extractEndpoints: extractEndpointsFlag,
+                    extractSecrets: extractSecretsFlag,
+                    extractDomains: extractDomainsFlag,
+                    followImports,
+                    maxFiles,
+                    concurrency,
                 });
-                
-                if (response.ok) {
-                    const html = await response.text();
-                    
-                    // Analyze inline scripts
-                    const inlineContent = extractInlineScripts(html);
-                    if (inlineContent.length > 0) {
-                        const { literals, errors } = extractLiterals(inlineContent, "inline.js");
-                        const inlineResult: JsFile = {
-                            url: `${baseUrl}#inline`,
-                            size: inlineContent.length,
-                            literalsCount: literals.length,
-                            endpoints: extractEndpointsFlag ? analyzeEndpoints(literals, "inline") : [],
-                            secrets: extractSecretsFlag ? analyzeSecrets(literals, "inline") : [],
-                            domains: extractDomainsFlag ? analyzeDomains(literals, "inline") : [],
-                            parseErrors: errors.length > 0 ? errors : undefined,
-                        };
-                        files.push(inlineResult);
-                    }
-                    
-                    if (followImports) {
-                        const scriptUrls = extractScriptUrls(html, baseUrl);
-                        jsUrls.push(...scriptUrls);
-                    }
-                }
-            } catch {
-                // If we can't fetch the page, treat URL as JS file
-                jsUrls.push(baseUrl);
             }
-        }
+        );
         
-        // Limit number of files
-        const urlsToAnalyze = jsUrls.slice(0, maxFiles - files.length);
-        
-        // Analyze JS files
-        for (const url of urlsToAnalyze) {
-            const result = await analyzeJsFile(url, {
-                timeout,
-                userAgent,
-                maxFileSize,
-                extractEndpoints: extractEndpointsFlag,
-                extractSecrets: extractSecretsFlag,
-                extractDomains: extractDomainsFlag,
-            });
-            
-            files.push(result);
-        }
+        // Flatten results
+        const allFiles: JsFile[] = allFilesArrays.flat();
         
         // Build summary
         const allEndpoints: Endpoint[] = [];
@@ -742,7 +843,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const allDomains: Domain[] = [];
         let totalLiterals = 0;
         
-        for (const file of files) {
+        for (const file of allFiles) {
             totalLiterals += file.literalsCount;
             allEndpoints.push(...file.endpoints);
             allSecrets.push(...file.secrets);
@@ -760,10 +861,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         return {
             success: true,
             data: {
-                baseUrl,
-                files,
+                baseUrls,
+                files: allFiles,
                 summary: {
-                    totalFiles: files.length,
+                    totalFiles: allFiles.length,
                     totalLiterals,
                     totalEndpoints: allEndpoints.length,
                     totalSecrets: allSecrets.length,
@@ -771,6 +872,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     uniqueEndpoints,
                     uniqueDomains,
                     secretsBySeverity,
+                    urlsScanned: baseUrls.length,
                 },
             },
         };
