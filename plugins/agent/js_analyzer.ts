@@ -1,5 +1,5 @@
 /**
- * JavaScript Analyzer Tool (AST-based)
+ * JavaScript Analyzer Tool (AST-based via oxc_parser)
  * 
  * @plugin js_analyzer
  * @name JavaScript Analyzer
@@ -8,12 +8,24 @@
  * @category discovery
  * @default_severity info
  * @tags javascript, endpoint, api, discovery, secrets, ast
- * @description Analyze JavaScript files using AST parsing to extract all string literals, then identify API endpoints, secrets, and sensitive data
+ * @description Analyze JavaScript files using AST parsing (oxc_parser) to extract all string literals, then identify API endpoints, secrets, and sensitive data
  */
 
-// Import acorn parser from esm.sh
-// @ts-ignore
-import * as acorn from "https://esm.sh/acorn@8.14.0";
+// Declare Sentinel global API
+declare const Sentinel: {
+    AST: {
+        parse: (code: string, filename?: string) => {
+            success: boolean;
+            literals: Array<{ value: string; line: number; column: number; type: string }>;
+            errors: string[];
+        };
+        extractLiterals: (code: string, options?: { minLength?: number; types?: string[] }) => Array<{ value: string; line: number; column: number; type: string }>;
+        extractUniqueStrings: (code: string, options?: { minLength?: number }) => string[];
+    };
+    Dictionary: {
+        getWords: (idOrName: string, limit?: number) => Promise<string[]>;
+    };
+};
 
 interface ToolInput {
     url: string;
@@ -31,7 +43,7 @@ interface StringLiteral {
     value: string;
     line: number;
     column: number;
-    type: "string" | "template" | "regex";
+    type: string;
 }
 
 interface Endpoint {
@@ -39,7 +51,6 @@ interface Endpoint {
     method?: string;
     source: string;
     line?: number;
-    context?: string;
 }
 
 interface Secret {
@@ -63,6 +74,7 @@ interface JsFile {
     endpoints: Endpoint[];
     secrets: Secret[];
     domains: Domain[];
+    parseErrors?: string[];
     error?: string;
 }
 
@@ -149,7 +161,7 @@ const SECRET_PATTERNS: { name: string; pattern: RegExp; severity: "critical" | "
     { name: "Generic API Key", pattern: /^[a-zA-Z0-9_-]{32,}$/, severity: "low" },
 ];
 
-// Endpoint detection patterns (applied to string literals)
+// Endpoint detection patterns
 const ENDPOINT_PATTERNS: { pattern: RegExp; method?: string }[] = [
     // API paths
     { pattern: /^\/api\/[a-zA-Z0-9\/_-]+$/ },
@@ -245,89 +257,27 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
- * Extract all string literals from AST using acorn
+ * Extract literals from JavaScript code using Sentinel AST API (oxc_parser)
  */
-function extractLiteralsFromAST(code: string): StringLiteral[] {
-    const literals: StringLiteral[] = [];
-    
+function extractLiterals(code: string, filename?: string): { literals: StringLiteral[]; errors: string[] } {
     try {
-        // Parse with acorn
-        const ast = acorn.parse(code, {
-            ecmaVersion: "latest",
-            sourceType: "module",
-            locations: true,
-            allowHashBang: true,
-            allowAwaitOutsideFunction: true,
-            allowImportExportEverywhere: true,
-            allowReserved: true,
-        });
-        
-        // Walk the AST to extract all literals
-        walkAST(ast, (node: any) => {
-            // String literals
-            if (node.type === "Literal" && typeof node.value === "string") {
-                if (node.value.length >= 3) { // Skip very short strings
-                    literals.push({
-                        value: node.value,
-                        line: node.loc?.start?.line || 0,
-                        column: node.loc?.start?.column || 0,
-                        type: "string",
-                    });
-                }
-            }
-            
-            // Template literals
-            if (node.type === "TemplateLiteral") {
-                for (const quasi of node.quasis || []) {
-                    if (quasi.value?.cooked && quasi.value.cooked.length >= 3) {
-                        literals.push({
-                            value: quasi.value.cooked,
-                            line: quasi.loc?.start?.line || 0,
-                            column: quasi.loc?.start?.column || 0,
-                            type: "template",
-                        });
-                    }
-                }
-            }
-            
-            // Regex literals (pattern as string)
-            if (node.type === "Literal" && node.regex) {
-                literals.push({
-                    value: node.regex.pattern,
-                    line: node.loc?.start?.line || 0,
-                    column: node.loc?.start?.column || 0,
-                    type: "regex",
-                });
-            }
-        });
-        
-    } catch (e) {
-        // If AST parsing fails, fall back to regex extraction
-        console.debug(`AST parsing failed, using regex fallback: ${e}`);
-        return extractLiteralsWithRegex(code);
-    }
-    
-    return literals;
-}
-
-/**
- * Simple AST walker
- */
-function walkAST(node: any, callback: (node: any) => void) {
-    if (!node || typeof node !== "object") return;
-    
-    callback(node);
-    
-    for (const key of Object.keys(node)) {
-        const child = node[key];
-        if (Array.isArray(child)) {
-            for (const item of child) {
-                walkAST(item, callback);
-            }
-        } else if (child && typeof child === "object" && child.type) {
-            walkAST(child, callback);
+        // Use Sentinel's AST API powered by oxc_parser
+        if (typeof Sentinel !== "undefined" && Sentinel.AST) {
+            const result = Sentinel.AST.parse(code, filename);
+            return {
+                literals: result.literals,
+                errors: result.errors,
+            };
         }
+    } catch (e) {
+        console.debug(`AST parsing failed: ${e}`);
     }
+    
+    // Fallback to regex extraction if AST API is not available
+    return {
+        literals: extractLiteralsWithRegex(code),
+        errors: ["AST API not available, using regex fallback"],
+    };
 }
 
 /**
@@ -343,7 +293,7 @@ function extractLiteralsWithRegex(code: string): StringLiteral[] {
     
     while ((match = stringPattern.exec(code)) !== null) {
         const raw = match[0];
-        const value = raw.slice(1, -1); // Remove quotes
+        const value = raw.slice(1, -1);
         
         if (value.length >= 3 && !seen.has(value)) {
             seen.add(value);
@@ -372,7 +322,6 @@ function analyzeEndpoints(literals: StringLiteral[], source: string): Endpoint[]
     for (const literal of literals) {
         const value = literal.value.trim();
         
-        // Skip if already seen
         if (seen.has(value)) continue;
         
         // Check against endpoint patterns
@@ -389,12 +338,10 @@ function analyzeEndpoints(literals: StringLiteral[], source: string): Endpoint[]
             }
         }
         
-        // Also check for URL-like strings that might be endpoints
+        // Check for URL-like strings that might be endpoints
         if (!seen.has(value) && value.startsWith("/") && value.length > 1) {
-            // Check if it looks like an API path (has multiple segments, no file extension)
             const segments = value.split("/").filter(Boolean);
             if (segments.length >= 2 && !/\.[a-z]{2,4}$/i.test(value)) {
-                // Skip static resources
                 if (!/\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/i.test(value)) {
                     seen.add(value);
                     endpoints.push({
@@ -408,56 +355,6 @@ function analyzeEndpoints(literals: StringLiteral[], source: string): Endpoint[]
     }
     
     return endpoints;
-}
-
-/**
- * Analyze literals to extract secrets
- */
-function analyzeSecrets(literals: StringLiteral[], source: string): Secret[] {
-    const secrets: Secret[] = [];
-    const seen = new Set<string>();
-    
-    for (const literal of literals) {
-        const value = literal.value.trim();
-        
-        // Skip if too short or too long
-        if (value.length < 8 || value.length > 500) continue;
-        
-        // Skip common false positives
-        if (/^(true|false|null|undefined|function|return|const|let|var|import|export|from|default|class|extends|constructor|this|super|new|delete|typeof|instanceof|void|yield|await|async|static|get|set|if|else|switch|case|break|continue|for|while|do|try|catch|finally|throw|with|debugger)$/i.test(value)) {
-            continue;
-        }
-        
-        // Skip if already seen
-        if (seen.has(value)) continue;
-        
-        // Check against secret patterns
-        for (const { name, pattern, severity } of SECRET_PATTERNS) {
-            if (pattern.test(value)) {
-                // Additional validation for generic patterns
-                if (name === "Generic API Key" || name === "Hex Secret (32+)") {
-                    // Skip if it looks like a hash or common ID
-                    if (/^[0-9a-f]{32}$/i.test(value) && !value.includes("-")) {
-                        // Could be MD5 hash, check entropy
-                        const entropy = calculateEntropy(value);
-                        if (entropy < 3.5) continue; // Low entropy, likely not a secret
-                    }
-                }
-                
-                seen.add(value);
-                secrets.push({
-                    type: name,
-                    value: value.length > 80 ? value.substring(0, 80) + "..." : value,
-                    source,
-                    line: literal.line,
-                    severity,
-                });
-                break;
-            }
-        }
-    }
-    
-    return secrets;
 }
 
 /**
@@ -480,6 +377,53 @@ function calculateEntropy(str: string): number {
 }
 
 /**
+ * Analyze literals to extract secrets
+ */
+function analyzeSecrets(literals: StringLiteral[], source: string): Secret[] {
+    const secrets: Secret[] = [];
+    const seen = new Set<string>();
+    
+    for (const literal of literals) {
+        const value = literal.value.trim();
+        
+        // Skip if too short or too long
+        if (value.length < 8 || value.length > 500) continue;
+        
+        // Skip common false positives
+        if (/^(true|false|null|undefined|function|return|const|let|var|import|export|from|default|class|extends|constructor|this|super|new|delete|typeof|instanceof|void|yield|await|async|static|get|set|if|else|switch|case|break|continue|for|while|do|try|catch|finally|throw|with|debugger)$/i.test(value)) {
+            continue;
+        }
+        
+        if (seen.has(value)) continue;
+        
+        // Check against secret patterns
+        for (const { name, pattern, severity } of SECRET_PATTERNS) {
+            if (pattern.test(value)) {
+                // Additional validation for generic patterns
+                if (name === "Generic API Key" || name === "Hex Secret (32+)") {
+                    if (/^[0-9a-f]{32}$/i.test(value) && !value.includes("-")) {
+                        const entropy = calculateEntropy(value);
+                        if (entropy < 3.5) continue;
+                    }
+                }
+                
+                seen.add(value);
+                secrets.push({
+                    type: name,
+                    value: value.length > 80 ? value.substring(0, 80) + "..." : value,
+                    source,
+                    line: literal.line,
+                    severity,
+                });
+                break;
+            }
+        }
+    }
+    
+    return secrets;
+}
+
+/**
  * Analyze literals to extract domains
  */
 function analyzeDomains(literals: StringLiteral[], source: string): Domain[] {
@@ -489,18 +433,21 @@ function analyzeDomains(literals: StringLiteral[], source: string): Domain[] {
     for (const literal of literals) {
         const value = literal.value.trim();
         
-        // Check for URL pattern
         const match = value.match(DOMAIN_PATTERN);
         if (match) {
             const domain = match[1].toLowerCase();
             
             // Skip common CDN/analytics domains
             if (SKIP_DOMAINS.has(domain)) continue;
+            let skip = false;
             for (const skipDomain of SKIP_DOMAINS) {
-                if (domain.endsWith(`.${skipDomain}`)) continue;
+                if (domain.endsWith(`.${skipDomain}`)) {
+                    skip = true;
+                    break;
+                }
             }
+            if (skip) continue;
             
-            // Skip if already seen
             if (seen.has(domain)) continue;
             seen.add(domain);
             
@@ -526,12 +473,10 @@ function extractScriptUrls(html: string, baseUrl: string): string[] {
     while ((match = regex.exec(html)) !== null) {
         let src = match[1];
         
-        // Skip inline scripts and data URIs
         if (src.startsWith("data:") || src.startsWith("javascript:")) {
             continue;
         }
         
-        // Resolve relative URLs
         try {
             if (src.startsWith("//")) {
                 src = `https:${src}`;
@@ -610,7 +555,6 @@ async function analyzeJsFile(
             return result;
         }
         
-        // Check content length
         const contentLength = parseInt(response.headers.get("content-length") || "0", 10);
         if (contentLength > options.maxFileSize) {
             result.error = `File too large: ${contentLength} bytes`;
@@ -620,17 +564,21 @@ async function analyzeJsFile(
         const content = await response.text();
         result.size = content.length;
         
-        // Check actual size
         if (content.length > options.maxFileSize) {
             result.error = `File too large: ${content.length} bytes`;
             return result;
         }
         
-        // Extract literals using AST
-        const literals = extractLiteralsFromAST(content);
+        // Extract literals using oxc_parser AST
+        const filename = url.split("/").pop() || "script.js";
+        const { literals, errors } = extractLiterals(content, filename);
         result.literalsCount = literals.length;
         
-        const source = url.split("/").pop() || url;
+        if (errors.length > 0) {
+            result.parseErrors = errors;
+        }
+        
+        const source = filename;
         
         // Analyze literals
         if (options.extractEndpoints) {
@@ -657,7 +605,6 @@ async function analyzeJsFile(
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        // Validate input
         if (!input.url || typeof input.url !== "string") {
             return {
                 success: false,
@@ -683,7 +630,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const files: JsFile[] = [];
         
         // Check if URL is a JS file or HTML page
-        if (baseUrl.endsWith(".js") || baseUrl.endsWith(".mjs")) {
+        if (baseUrl.endsWith(".js") || baseUrl.endsWith(".mjs") || baseUrl.endsWith(".ts")) {
             jsUrls.push(baseUrl);
         } else {
             // Fetch HTML page and extract script URLs
@@ -704,14 +651,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     // Analyze inline scripts
                     const inlineContent = extractInlineScripts(html);
                     if (inlineContent.length > 0) {
-                        const inlineLiterals = extractLiteralsFromAST(inlineContent);
+                        const { literals, errors } = extractLiterals(inlineContent, "inline.js");
                         const inlineResult: JsFile = {
                             url: `${baseUrl}#inline`,
                             size: inlineContent.length,
-                            literalsCount: inlineLiterals.length,
-                            endpoints: extractEndpointsFlag ? analyzeEndpoints(inlineLiterals, "inline") : [],
-                            secrets: extractSecretsFlag ? analyzeSecrets(inlineLiterals, "inline") : [],
-                            domains: extractDomainsFlag ? analyzeDomains(inlineLiterals, "inline") : [],
+                            literalsCount: literals.length,
+                            endpoints: extractEndpointsFlag ? analyzeEndpoints(literals, "inline") : [],
+                            secrets: extractSecretsFlag ? analyzeSecrets(literals, "inline") : [],
+                            domains: extractDomainsFlag ? analyzeDomains(literals, "inline") : [],
+                            parseErrors: errors.length > 0 ? errors : undefined,
                         };
                         files.push(inlineResult);
                     }
