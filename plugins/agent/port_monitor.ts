@@ -237,6 +237,51 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                host: { type: "string" },
+                                success: { type: "boolean" },
+                                snapshot: { type: "object" },
+                                newPorts: { type: "array" },
+                                closedPorts: { type: "array" }
+                            }
+                        },
+                        description: "Port scan results"
+                    },
+                    changeEvents: { type: "array", description: "Change events detected" },
+                    snapshots: { type: "object", description: "Port snapshots by host" },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            totalOpenPorts: { type: "integer" },
+                            newPortsOpened: { type: "integer" },
+                            portsClosed: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Check if a single port is open via HTTP probe
  */
 async function checkPort(host: string, port: number, timeout: number, detectService: boolean): Promise<PortInfo> {

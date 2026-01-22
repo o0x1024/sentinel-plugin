@@ -432,6 +432,47 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    url: { type: "string", description: "Target URL" },
+                    technologies: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                name: { type: "string", description: "Technology name" },
+                                category: { type: "string", description: "Technology category" },
+                                version: { type: "string" },
+                                confidence: { type: "integer" }
+                            }
+                        },
+                        description: "Detected technologies"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            total: { type: "integer" },
+                            byCategory: { type: "object" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Parse cookies from Set-Cookie header
  */
 function parseCookies(setCookieHeaders: string[]): Record<string, string> {

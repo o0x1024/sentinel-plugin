@@ -176,6 +176,51 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    targets: { type: "array", items: { type: "string" }, description: "Original target list" },
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string", description: "Probed URL" },
+                                alive: { type: "boolean" },
+                                statusCode: { type: "integer" },
+                                title: { type: "string" },
+                                contentLength: { type: "integer" },
+                                server: { type: "string" },
+                                technologies: { type: "array", items: { type: "string" } }
+                            }
+                        },
+                        description: "Probe results for alive hosts"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            total: { type: "integer" },
+                            alive: { type: "integer" },
+                            dead: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Extract title from HTML content
  */
 function extractTitle(html: string): string | undefined {

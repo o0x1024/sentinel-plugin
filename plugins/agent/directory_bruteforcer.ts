@@ -223,6 +223,47 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    baseUrl: { type: "string", description: "Base URL scanned" },
+                    discovered: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string" },
+                                path: { type: "string" },
+                                statusCode: { type: "integer" },
+                                contentLength: { type: "integer" }
+                            }
+                        },
+                        description: "Discovered paths"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalRequests: { type: "integer" },
+                            discovered: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Build URL from base and path
  */
 function buildUrl(baseUrl: string, path: string): string {

@@ -89,6 +89,46 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string" },
+                                vulnerable: { type: "boolean" },
+                                commandOutput: { type: "string" }
+                            }
+                        },
+                        description: "Scan results"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            total: { type: "integer" },
+                            vulnerable: { type: "integer" },
+                            scanned: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Generate exploit payload
  * @param command Command to execute
  * @returns Multipart/form-data request body with payload

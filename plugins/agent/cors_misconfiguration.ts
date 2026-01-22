@@ -135,6 +135,49 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    url: { type: "string", description: "Target URL" },
+                    tests: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                origin: { type: "string" },
+                                testType: { type: "string" },
+                                vulnerable: { type: "boolean" },
+                                severity: { type: "string" },
+                                evidence: { type: "string" }
+                            }
+                        },
+                        description: "CORS test results"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTests: { type: "integer" },
+                            vulnerableCount: { type: "integer" },
+                            bySeverity: { type: "object" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Extract domain from URL
  */
 function extractDomain(url: string): string {

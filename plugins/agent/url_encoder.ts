@@ -63,6 +63,30 @@ export function get_input_schema() {
 // 绑定到 globalThis
 globalThis.get_input_schema = get_input_schema;
 
+/**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    input: { type: "string", description: "Original input text" },
+                    output: { type: "string", description: "Encoded/decoded result" },
+                    mode: { type: "string", description: "encode or decode" },
+                    encoding: { type: "string", description: "Encoding type used" }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
 interface ToolOutput {
   success: boolean;
   data?: {

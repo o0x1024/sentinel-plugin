@@ -58,6 +58,31 @@ export function get_input_schema() {
 // 绑定到 globalThis
 globalThis.get_input_schema = get_input_schema;
 
+/**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    input: { type: "string", description: "Original input text" },
+                    hash: { type: "string", description: "Calculated hash value" },
+                    algorithm: { type: "string", description: "Hash algorithm used" },
+                    format: { type: "string", description: "Output format (hex/base64)" },
+                    isHmac: { type: "boolean" }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
 interface ToolOutput {
   success: boolean;
   data?: {

@@ -253,6 +253,50 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    url: { type: "string", description: "Target URL" },
+                    method: { type: "string" },
+                    tests: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                parameter: { type: "string" },
+                                payload: { type: "string" },
+                                payloadType: { type: "string" },
+                                vulnerable: { type: "boolean" },
+                                evidence: { type: "string" }
+                            }
+                        },
+                        description: "SSRF test results"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTests: { type: "integer" },
+                            vulnerableCount: { type: "integer" },
+                            vulnerableParameters: { type: "array", items: { type: "string" } }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Parse URL and extract parameters
  */
 function parseUrl(url: string): { baseUrl: string; params: Record<string, string> } {

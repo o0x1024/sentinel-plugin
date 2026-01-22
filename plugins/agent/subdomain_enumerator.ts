@@ -109,6 +109,46 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    domain: { type: "string", description: "Target domain" },
+                    subdomains: { 
+                        type: "array", 
+                        items: { type: "string" },
+                        description: "List of discovered subdomains"
+                    },
+                    sourceResults: { 
+                        type: "array",
+                        description: "Results from each data source"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalUnique: { type: "integer" },
+                            totalFound: { type: "integer" },
+                            sourcesQueried: { type: "integer" },
+                            sourcesSucceeded: { type: "integer" },
+                            sourcesFailed: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Extract subdomains from text using regex
  */
 function extractSubdomains(text: string, domain: string): string[] {

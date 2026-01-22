@@ -257,6 +257,50 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    baseUrl: { type: "string", description: "Base URL analyzed" },
+                    files: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string" },
+                                endpoints: { type: "array" },
+                                secrets: { type: "array" },
+                                domains: { type: "array" }
+                            }
+                        },
+                        description: "Analyzed JS files"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalFiles: { type: "integer" },
+                            totalEndpoints: { type: "integer" },
+                            totalSecrets: { type: "integer" },
+                            uniqueEndpoints: { type: "array", items: { type: "string" } },
+                            uniqueDomains: { type: "array", items: { type: "string" } }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Extract literals from JavaScript code using Sentinel AST API (oxc_parser)
  */
 function extractLiterals(code: string, filename?: string): { literals: StringLiteral[]; errors: string[] } {

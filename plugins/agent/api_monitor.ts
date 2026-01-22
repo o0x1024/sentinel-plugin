@@ -310,6 +310,51 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                baseUrl: { type: "string" },
+                                success: { type: "boolean" },
+                                snapshot: { type: "object" },
+                                addedEndpoints: { type: "array" },
+                                removedEndpoints: { type: "array" }
+                            }
+                        },
+                        description: "API monitoring results"
+                    },
+                    changeEvents: { type: "array", description: "Change events detected" },
+                    snapshots: { type: "object", description: "API snapshots by URL" },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            totalEndpoints: { type: "integer" },
+                            addedEndpoints: { type: "integer" },
+                            removedEndpoints: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Main analysis function
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {

@@ -516,6 +516,51 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    subdomains: { type: "array", items: { type: "string" }, description: "Checked subdomains" },
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                subdomain: { type: "string" },
+                                vulnerable: { type: "boolean" },
+                                riskLevel: { type: "string" },
+                                service: { type: "string" },
+                                cname: { type: "string" },
+                                evidence: { type: "string" }
+                            }
+                        },
+                        description: "Takeover check results"
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            total: { type: "integer" },
+                            vulnerable: { type: "integer" },
+                            byRiskLevel: { type: "object" },
+                            byService: { type: "object" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Resolve CNAME for a subdomain using DNS-over-HTTPS
  */
 async function resolveCname(subdomain: string, timeout: number): Promise<string | null> {

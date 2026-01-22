@@ -206,6 +206,51 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string" },
+                                success: { type: "boolean" },
+                                snapshot: { type: "object" },
+                                changed: { type: "boolean" },
+                                changeType: { type: "string" }
+                            }
+                        },
+                        description: "Content check results"
+                    },
+                    changeEvents: { type: "array", description: "Change events detected" },
+                    snapshots: { type: "object", description: "Content snapshots by URL" },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            contentChanges: { type: "integer" },
+                            statusChanges: { type: "integer" },
+                            newPages: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Main analysis function
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {

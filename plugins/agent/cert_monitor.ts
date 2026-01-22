@@ -167,6 +167,50 @@ export function get_input_schema() {
 globalThis.get_input_schema = get_input_schema;
 
 /**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                domain: { type: "string" },
+                                success: { type: "boolean" },
+                                certInfo: { type: "object" },
+                                daysUntilExpiry: { type: "integer" }
+                            }
+                        },
+                        description: "Certificate check results"
+                    },
+                    changeEvents: { type: "array", description: "Change events detected" },
+                    snapshots: { type: "object", description: "Certificate snapshots by domain" },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            certificateChanges: { type: "integer" },
+                            expiringCertificates: { type: "integer" },
+                            expiredCertificates: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+globalThis.get_output_schema = get_output_schema;
+
+/**
  * Parse domain from URL
  */
 function parseDomain(target: string): string {
