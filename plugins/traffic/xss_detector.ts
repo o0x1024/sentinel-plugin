@@ -8,7 +8,7 @@
  * @category xss
  * @default_severity high
  * @tags xss, cross-site-scripting, security, owasp, active
- * @description Detects Cross-Site Scripting (XSS) vulnerabilities with passive analysis and active payload verification
+ * @description Detects Cross-Site Scripting (XSS) vulnerabilities with traffic analysis and active payload verification
  */
 
 interface RequestContext {
@@ -47,6 +47,21 @@ declare const SecurityUtils: {
 };
 
 declare function sleep(ms: number): Promise<void>;
+
+// 全局速率限制器（防止过于频繁的请求）
+const GLOBAL_RATE_LIMITER = {
+  lastRequestTime: 0,
+  minInterval: 200, // 最小间隔200ms
+  
+  async wait(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastRequestTime;
+    if (elapsed < this.minInterval) {
+      await sleep(this.minInterval - elapsed);
+    }
+    this.lastRequestTime = Date.now();
+  }
+};
 
 function bytesToString(bytes: number[]): string {
   try {
@@ -284,6 +299,8 @@ async function verifyXss(
   
   for (const { payload, type, context } of payloads) {
     try {
+      await GLOBAL_RATE_LIMITER.wait(); // 速率限制
+      
       const testUrl = buildUrlWithPayload(baseUrl, paramName, payload);
       
       const response = await fetch(testUrl, {
@@ -364,7 +381,8 @@ function checkSecurityHeaders(headers: Record<string, string>): string[] {
 }
 
 // Main entry point
-export async function scan_transaction(transaction: HttpTransaction): Promise<void> {
+export async function scan_transaction(transaction: HttpTransaction): Promise<any[]> {
+  const findings: any[] = [];
   const { request, response } = transaction;
   
   // Skip non-applicable methods
@@ -399,7 +417,7 @@ export async function scan_transaction(transaction: HttpTransaction): Promise<vo
   if (response?.headers) {
     const missingHeaders = checkSecurityHeaders(response.headers);
     if (missingHeaders.includes('content-security-policy')) {
-      Sentinel.emitFinding({
+      findings.push({
         title: 'Missing Content-Security-Policy Header',
         description: `The response lacks a Content-Security-Policy header, which helps prevent XSS attacks by restricting script sources.`,
         severity: 'medium',
@@ -415,7 +433,6 @@ export async function scan_transaction(transaction: HttpTransaction): Promise<vo
     }
   }
   
-  // Passive check: Look for existing XSS patterns in response
   if (response?.body) {
     const responseBody = bytesToString(response.body);
     
@@ -431,7 +448,7 @@ export async function scan_transaction(transaction: HttpTransaction): Promise<vo
             const context = responseBody.substring(contextStart, contextEnd);
             
             if (/<script|on\w+=|javascript:/i.test(context)) {
-              Sentinel.emitFinding({
+              findings.push({
                 title: 'Potential XSS via Parameter Reflection',
                 description: `Parameter "${paramName}" is reflected in response near potentially dangerous HTML context.`,
                 severity: 'medium',
@@ -476,7 +493,7 @@ export async function scan_transaction(transaction: HttpTransaction): Promise<vo
     );
     
     if (result.vulnerable) {
-      Sentinel.emitFinding({
+      findings.push({
         title: `XSS Vulnerability Confirmed (${result.type})`,
         description: `Parameter "${paramName}" (${location}) is vulnerable to ${result.type} Cross-Site Scripting.\n\nPayload: ${result.payload}\nContext: ${result.context}`,
         severity: 'high',
@@ -498,6 +515,7 @@ export async function scan_transaction(transaction: HttpTransaction): Promise<vo
   }
   
   Sentinel.log('info', `XSS scan completed: ${request.url}`);
+  return findings;
 }
 
 // Required: bind to globalThis

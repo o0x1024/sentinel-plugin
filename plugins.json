@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2024-12-23",
+  "updated_at": "2026-01-22",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -85,6 +85,126 @@
       "default_severity": "info",
       "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_enumerator.ts"
+    },
+    {
+      "id": "http_prober",
+      "name": "HTTP Prober",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Probe HTTP/HTTPS endpoints to check if they are alive, collect response info including status code, title, content length, headers, and technologies",
+      "default_severity": "info",
+      "tags": ["http", "probe", "alive", "discovery", "web"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/http_prober.ts"
+    },
+    {
+      "id": "tech_fingerprinter",
+      "name": "Technology Fingerprinter",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Identify technologies, frameworks, CMS, and libraries used by web applications through HTTP headers, HTML content, cookies, and JavaScript analysis",
+      "default_severity": "info",
+      "tags": ["fingerprint", "technology", "wappalyzer", "detection", "web"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/tech_fingerprinter.ts"
+    },
+    {
+      "id": "directory_bruteforcer",
+      "name": "Directory Bruteforcer",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "discovery",
+      "description": "Discover hidden directories, files, and endpoints on web servers using wordlist-based brute forcing",
+      "default_severity": "info",
+      "tags": ["directory", "bruteforce", "discovery", "fuzzing", "web"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/directory_bruteforcer.ts"
+    },
+    {
+      "id": "js_analyzer",
+      "name": "JavaScript Analyzer",
+      "version": "2.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "discovery",
+      "description": "Analyze JavaScript files using AST parsing (acorn) to extract all string literals, then identify API endpoints, secrets, and sensitive data with high accuracy",
+      "default_severity": "info",
+      "tags": ["javascript", "endpoint", "api", "discovery", "secrets", "ast"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/js_analyzer.ts"
+    },
+    {
+      "id": "ssrf_detector",
+      "name": "SSRF Detector",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "vuln",
+      "description": "Detect Server-Side Request Forgery (SSRF) vulnerabilities by testing URL parameters with various payloads",
+      "default_severity": "high",
+      "tags": ["ssrf", "vulnerability", "security", "web"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/ssrf_detector.ts"
+    },
+    {
+      "id": "subdomain_takeover",
+      "name": "Subdomain Takeover Detector",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "vuln",
+      "description": "Detect potential subdomain takeover vulnerabilities by checking DNS records and service fingerprints",
+      "default_severity": "high",
+      "tags": ["subdomain", "takeover", "dns", "vulnerability", "security"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_takeover.ts"
+    },
+    {
+      "id": "cors_misconfiguration",
+      "name": "CORS Misconfiguration Detector",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "vuln",
+      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access",
+      "default_severity": "medium",
+      "tags": ["cors", "vulnerability", "security", "web", "headers"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cors_misconfiguration.ts"
+    },
+    {
+      "id": "open_redirect_detector",
+      "name": "Open Redirect Detector",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "vuln",
+      "description": "Detect open redirect vulnerabilities by testing URL parameters with various redirect payloads",
+      "default_severity": "medium",
+      "tags": ["redirect", "vulnerability", "security", "web", "phishing"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/open_redirect_detector.ts"
+    },
+    {
+      "id": "xss_scanner",
+      "name": "XSS Scanner",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "vuln",
+      "description": "Active XSS vulnerability scanner that tests URL parameters, form fields, and headers with various payloads including reflected, DOM-based, and filter bypass techniques",
+      "default_severity": "high",
+      "tags": ["xss", "cross-site-scripting", "vulnerability", "security", "web", "owasp"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/xss_scanner.ts"
+    },
+    {
+      "id": "sql_injection_scanner",
+      "name": "SQL Injection Scanner",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "vuln",
+      "description": "Active SQL injection vulnerability scanner that tests parameters with error-based, blind boolean, time-based, and UNION-based techniques for MySQL, PostgreSQL, MSSQL, Oracle, and SQLite",
+      "default_severity": "critical",
+      "tags": ["sqli", "sql-injection", "vulnerability", "security", "web", "owasp", "database"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sql_injection_scanner.ts"
     }
   ]
 }

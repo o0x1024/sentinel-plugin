@@ -387,7 +387,8 @@ function checkResponseHeaders(headers: Record<string, string>): SensitivePattern
 }
 
 // Main scan function
-export function scan_transaction(transaction: HttpTransaction): void {
+export function scan_transaction(transaction: HttpTransaction): Promise<any[]> {
+  const findings: any[] = [];
   const { request, response } = transaction;
   
   if (!response?.body) {
@@ -451,7 +452,7 @@ export function scan_transaction(transaction: HttpTransaction): void {
   if (response.headers) {
     const headerFindings = checkResponseHeaders(response.headers);
     for (const finding of headerFindings) {
-      Sentinel.emitFinding({
+      findings.push({
         title: finding.name,
         description: finding.description,
         severity: finding.severity,
@@ -489,7 +490,7 @@ export function scan_transaction(transaction: HttpTransaction): void {
       return m;
     });
     
-    Sentinel.emitFinding({
+    findings.push({
       title: `Sensitive Information: ${name}`,
       description: `${pattern.description}\n\nFound ${matches.length} occurrence(s) in the response body.`,
       severity: pattern.severity,
@@ -522,6 +523,7 @@ function getRemediation(category: string): string {
     default:
       return 'Review and remove sensitive information from responses.';
   }
+  return findings;
 }
 
 // Required: bind to globalThis
