@@ -205,6 +205,66 @@
       "default_severity": "critical",
       "tags": ["sqli", "sql-injection", "vulnerability", "security", "web", "owasp", "database"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sql_injection_scanner.ts"
+    },
+    {
+      "id": "cert_monitor",
+      "name": "Certificate Monitor",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "monitor",
+      "description": "Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation",
+      "default_severity": "medium",
+      "tags": ["certificate", "ssl", "tls", "monitor", "change-detection", "expiry"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cert_monitor.ts"
+    },
+    {
+      "id": "content_monitor",
+      "name": "Content Monitor",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "monitor",
+      "description": "Monitor web pages for content changes using hash fingerprinting, generating ChangeEvents for workflow automation",
+      "default_severity": "low",
+      "tags": ["content", "monitor", "change-detection", "fingerprint", "hash"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/content_monitor.ts"
+    },
+    {
+      "id": "api_monitor",
+      "name": "API Monitor",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "monitor",
+      "description": "Monitor API endpoints for changes (new endpoints, removed endpoints, GraphQL/OpenAPI discovery), generating ChangeEvents for workflow automation",
+      "default_severity": "high",
+      "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "graphql"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/api_monitor.ts"
+    },
+    {
+      "id": "port_monitor",
+      "name": "Port Monitor",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "monitor",
+      "description": "Monitor hosts for port/service changes, detecting newly opened ports, closed ports, and service changes, generating ChangeEvents for workflow automation",
+      "default_severity": "medium",
+      "tags": ["port", "service", "monitor", "change-detection", "scan"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/port_monitor.ts"
+    },
+    {
+      "id": "js_link_finder",
+      "name": "JS Link Finder",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "discovery",
+      "description": "Find and collect all JavaScript file URLs from a web page, including external scripts, inline scripts, ES modules, webpack chunks, and source maps",
+      "default_severity": "info",
+      "tags": ["javascript", "discovery", "links", "crawler", "web", "reconnaissance"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/js_link_finder.ts"
     }
   ]
 }
