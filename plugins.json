@@ -125,7 +125,7 @@
     {
       "id": "js_analyzer",
       "name": "JavaScript Analyzer",
-      "version": "2.0.0",
+      "version": "3.0.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "discovery",
@@ -257,7 +257,7 @@
     {
       "id": "js_link_finder",
       "name": "JS Link Finder",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "discovery",
