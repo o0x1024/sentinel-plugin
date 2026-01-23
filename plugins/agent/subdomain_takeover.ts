@@ -815,10 +815,19 @@ async function runWithConcurrency<T>(
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         // Validate input
-        if (!input.subdomains || !Array.isArray(input.subdomains) || input.subdomains.length === 0) {
+        if (!input.subdomains || !Array.isArray(input.subdomains)) {
             return {
                 success: false,
-                error: "Invalid input: subdomains array is required and must not be empty"
+                error: "Invalid input: subdomains array is required"
+            };
+        }
+        
+        // Filter out empty strings
+        const validSubdomains = input.subdomains.filter(s => typeof s === 'string' && s.trim().length > 0);
+        if (validSubdomains.length === 0) {
+            return {
+                success: false,
+                error: "Invalid input: subdomains array must contain at least one non-empty string"
             };
         }
         
@@ -829,7 +838,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         
         // Create check tasks
-        const tasks = input.subdomains.map(subdomain => () => checkSubdomain(subdomain, {
+        const tasks = validSubdomains.map(subdomain => () => checkSubdomain(subdomain, {
             timeout,
             userAgent,
             checkCname,

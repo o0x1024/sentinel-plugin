@@ -785,9 +785,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let targetUrls: string[] = [];
         
         if (input.urls && Array.isArray(input.urls) && input.urls.length > 0) {
-            targetUrls = input.urls.filter(u => typeof u === 'string' && u.trim());
-        } else if (input.url && typeof input.url === "string") {
-            targetUrls = [input.url];
+            targetUrls = input.urls.filter(u => typeof u === 'string' && u.trim().length > 0);
+        }
+        
+        if (targetUrls.length === 0 && input.url && typeof input.url === "string" && input.url.trim().length > 0) {
+            targetUrls = [input.url.trim()];
         }
         
         if (targetUrls.length === 0) {

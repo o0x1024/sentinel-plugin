@@ -1,6 +1,6 @@
 {
   "version": "2.0.0",
-  "updated_at": "2026-01-22",
+  "updated_at": "2026-01-23",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -77,13 +77,13 @@
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Enumerate subdomains using multiple data sources (crt.sh, HackerTarget, RapidDNS, AlienVault, VirusTotal, URLScan, Anubis, DNSDumpster, Sublist3r, CertSpotter)",
+      "description": "Comprehensive subdomain enumeration using 52 data sources including certificate transparency (crt.sh, Censys, CertSpotter), threat intelligence (VirusTotal, AlienVault, ThreatMiner, RiskIQ), datasets (SecurityTrails, Shodan, BeVigil, BinaryEdge, FullHunt), search engines (GitHub, FOFA, Hunter, Quake, ZoomEye), and passive DNS sources. Supports API authentication for premium sources.",
       "default_severity": "info",
-      "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint"],
+      "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint", "certificate-transparency", "threat-intelligence", "passive-dns", "api"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_enumerator.ts"
     },
     {

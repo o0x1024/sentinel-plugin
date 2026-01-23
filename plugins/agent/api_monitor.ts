@@ -359,10 +359,19 @@ globalThis.get_output_schema = get_output_schema;
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!input.targets || !Array.isArray(input.targets) || input.targets.length === 0) {
+        if (!input.targets || !Array.isArray(input.targets)) {
             return {
                 success: false,
                 error: "Invalid input: targets array is required"
+            };
+        }
+        
+        // Filter out empty strings
+        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        if (validTargets.length === 0) {
+            return {
+                success: false,
+                error: "Invalid input: targets array must contain at least one non-empty string"
             };
         }
         
@@ -384,7 +393,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let removedEndpointsCount = 0;
         let apiChanges = 0;
         
-        for (const target of input.targets) {
+        for (const target of validTargets) {
             let baseUrl = target;
             if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
                 baseUrl = `https://${baseUrl}`;

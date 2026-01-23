@@ -393,10 +393,19 @@ async function scanHost(
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!input.targets || !Array.isArray(input.targets) || input.targets.length === 0) {
+        if (!input.targets || !Array.isArray(input.targets)) {
             return {
                 success: false,
                 error: "Invalid input: targets array is required"
+            };
+        }
+        
+        // Filter out empty strings
+        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        if (validTargets.length === 0) {
+            return {
+                success: false,
+                error: "Invalid input: targets array must contain at least one non-empty string"
             };
         }
         
@@ -417,7 +426,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let portsClosed = 0;
         let serviceChangesCount = 0;
         
-        for (const target of input.targets) {
+        for (const target of validTargets) {
             // Parse host from target (could be IP, hostname, or URL)
             let host = target;
             try {

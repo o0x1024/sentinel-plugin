@@ -324,14 +324,23 @@ async function runInBatches<T>(
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         // Validate input
-        if (!input || !input.targets || !Array.isArray(input.targets) || input.targets.length === 0) {
+        if (!input || !input.targets || !Array.isArray(input.targets)) {
             return {
                 success: false,
-                error: "Invalid input: targets parameter is required and must be a non-empty array"
+                error: "Invalid input: targets parameter is required and must be an array"
+            };
+        }
+        
+        // Filter out empty strings
+        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        if (validTargets.length === 0) {
+            return {
+                success: false,
+                error: "Invalid input: targets array must contain at least one non-empty string"
             };
         }
 
-        const targets = input.targets;
+        const targets = validTargets;
         const command = input.command || 'id';
         const timeout = input.timeout || 5000;
         const detectOnly = input.detectOnly || false;
