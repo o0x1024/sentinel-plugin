@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.3.0",
   "updated_at": "2026-03-23",
   "plugins": [
     {
@@ -87,6 +87,30 @@
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_enumerator.ts"
     },
     {
+      "id": "dns_resolver",
+      "name": "DNS Resolver",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Resolve DNS records for domains and URLs, producing typed surface graph artifacts including domains, IPs, DNS relations, and DNS evidence for ASM workflows.",
+      "default_severity": "info",
+      "tags": ["dns", "resolver", "mapping", "domain", "asm", "surface"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/dns_resolver.ts"
+    },
+    {
+      "id": "cidr_mapper",
+      "name": "CIDR Mapper",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Expand IPv4 CIDR ranges and IP targets into typed IP and host assets for ASM and network surface mapping workflows.",
+      "default_severity": "info",
+      "tags": ["cidr", "ip", "network", "asm", "surface"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cidr_mapper.ts"
+    },
+    {
       "id": "http_prober",
       "name": "HTTP Prober",
       "version": "1.1.0",
@@ -109,6 +133,30 @@
       "default_severity": "info",
       "tags": ["fingerprint", "technology", "wappalyzer", "detection", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/tech_fingerprinter.ts"
+    },
+    {
+      "id": "favicon_fingerprinter",
+      "name": "Favicon Fingerprinter",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Fetch favicons from web targets and emit favicon fingerprint and evidence artifacts for ASM and network surface mapping workflows.",
+      "default_severity": "info",
+      "tags": ["favicon", "fingerprint", "web", "asm", "surface"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/favicon_fingerprinter.ts"
+    },
+    {
+      "id": "service_fingerprinter",
+      "name": "Service Fingerprinter",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Fingerprint exposed network services from host/port targets, producing service, fingerprint, evidence, and relation artifacts for ASM and network asset mapping.",
+      "default_severity": "info",
+      "tags": ["service", "fingerprint", "banner", "port", "asm", "network"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_fingerprinter.ts"
     },
     {
       "id": "directory_bruteforcer",
