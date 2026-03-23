@@ -46,6 +46,7 @@ interface ToolOutput {
             sourcesSucceeded: number;
             sourcesFailed: number;
         };
+        surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
@@ -274,6 +275,10 @@ export function get_output_schema() {
                             sourcesSucceeded: { type: "integer" },
                             sourcesFailed: { type: "integer" }
                         }
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Typed network surface artifacts for surface graph ingestion"
                     }
                 }
             },
@@ -2321,6 +2326,24 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     sourcesQueried: sources.length,
                     sourcesSucceeded,
                     sourcesFailed
+                },
+                surface_artifacts: {
+                    domains: finalSubdomains.map(subdomain => ({
+                        fqdn: subdomain,
+                        root_domain: domain,
+                        main_domain: domain,
+                        source: "subdomain_enumerator",
+                        confidence: 0.8,
+                    })),
+                    relations: finalSubdomains.map(subdomain => ({
+                        from_type: "domain",
+                        from_key: domain,
+                        to_type: "domain",
+                        to_key: subdomain,
+                        relation_type: "contains_subdomain",
+                        source: "subdomain_enumerator",
+                        confidence: 0.8,
+                    })),
                 }
             }
         };

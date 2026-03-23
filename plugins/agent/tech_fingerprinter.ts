@@ -35,6 +35,7 @@ interface ToolOutput {
             total: number;
             byCategory: Record<string, string[]>;
         };
+        surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
@@ -462,6 +463,10 @@ export function get_output_schema() {
                             total: { type: "integer" },
                             byCategory: { type: "object" }
                         }
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Typed network surface artifacts for surface graph ingestion"
                     }
                 }
             },
@@ -736,6 +741,34 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 summary: {
                     total: technologies.length,
                     byCategory,
+                },
+                surface_artifacts: {
+                    fingerprints: technologies.map(tech => ({
+                        asset_type: "web",
+                        asset_key: url,
+                        fingerprint_type: "technology",
+                        fingerprint_key: tech.category,
+                        fingerprint_value: tech.name,
+                        version: tech.version,
+                        confidence: tech.confidence,
+                        evidence: tech.evidence,
+                        source: "tech_fingerprinter",
+                        web_key: url,
+                    })),
+                    evidences: technologies.flatMap(tech => tech.evidence.length ? [{
+                        asset_type: "web",
+                        asset_key: url,
+                        evidence_type: "technology_detection",
+                        title: `Technology Detection: ${tech.name}`,
+                        content_text: tech.evidence.join("\n"),
+                        content_json: {
+                            technology: tech.name,
+                            category: tech.category,
+                            version: tech.version,
+                            evidence: tech.evidence,
+                        },
+                        source: "tech_fingerprinter",
+                    }] : []),
                 },
             },
         };

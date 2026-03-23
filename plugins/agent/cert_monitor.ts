@@ -78,6 +78,7 @@ interface ToolOutput {
             expiringCertificates: number;
             expiredCertificates: number;
         };
+        surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
@@ -200,6 +201,10 @@ export function get_output_schema() {
                             expiringCertificates: { type: "integer" },
                             expiredCertificates: { type: "integer" }
                         }
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Typed network surface artifacts for surface graph ingestion"
                     }
                 }
             },
@@ -514,6 +519,72 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     certificateChanges,
                     expiringCertificates,
                     expiredCertificates,
+                },
+                surface_artifacts: {
+                    certificates: certificates.map(cert => ({
+                        sha256: cert.fingerprint,
+                        issuer: cert.issuer,
+                        subject: cert.subject,
+                        san_list: cert.san,
+                        valid_from: cert.valid_from,
+                        valid_to: cert.valid_to,
+                        protocol: cert.tls_version,
+                        hostname: cert.hostname,
+                        self_signed_flag: cert.issuer === cert.subject,
+                        related_domains: Array.from(new Set([cert.domain, ...cert.san])),
+                        risk_status: !cert.is_valid ? "expired" : "valid",
+                        source: "cert_monitor",
+                        confidence: 0.98,
+                    })),
+                    domains: [...discoveredSubdomains].sort().map(domain => ({
+                        fqdn: domain,
+                        root_domain: domain.split(".").slice(-2).join("."),
+                        source: "cert_monitor",
+                        confidence: 0.7,
+                    })),
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "domain",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "cert_monitor",
+                        metadata: event.metadata,
+                    })),
+                    evidences: certificates.map(cert => ({
+                        asset_type: "certificate",
+                        asset_key: cert.fingerprint,
+                        evidence_type: "certificate_snapshot",
+                        title: `Certificate Snapshot: ${cert.hostname}`,
+                        content_text: `${cert.subject} | ${cert.issuer} | ${cert.valid_to}`,
+                        content_json: {
+                            hostname: cert.hostname,
+                            domain: cert.domain,
+                            subject: cert.subject,
+                            issuer: cert.issuer,
+                            fingerprint: cert.fingerprint,
+                            valid_from: cert.valid_from,
+                            valid_to: cert.valid_to,
+                            san: cert.san,
+                            tls_version: cert.tls_version,
+                        },
+                        source: "cert_monitor",
+                    })),
+                    relations: certificates.flatMap(cert =>
+                        Array.from(new Set([cert.domain, ...cert.san])).map(domain => ({
+                            from_type: "domain",
+                            from_key: domain,
+                            to_type: "certificate",
+                            to_key: cert.fingerprint,
+                            relation_type: "covered_by_certificate",
+                            source: "cert_monitor",
+                            confidence: 0.9,
+                        })),
+                    ),
                 },
             },
         };

@@ -75,6 +75,7 @@ interface ToolOutput {
             portsClosed: number;
             serviceChanges: number;
         };
+        surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
@@ -129,6 +130,10 @@ function generateId(): string {
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
     });
+}
+
+function isIpLiteral(value: string): boolean {
+    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
 // Calculate risk score
@@ -271,6 +276,10 @@ export function get_output_schema() {
                             newPortsOpened: { type: "integer" },
                             portsClosed: { type: "integer" }
                         }
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Typed network surface artifacts for surface graph ingestion"
                     }
                 }
             },
@@ -613,6 +622,83 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     newPortsOpened,
                     portsClosed,
                     serviceChanges: serviceChangesCount,
+                },
+                surface_artifacts: {
+                    ips: [...new Set(results
+                        .map(result => result.host)
+                        .filter(host => isIpLiteral(host))
+                    )].map(ipAddress => ({
+                        ip_address: ipAddress,
+                        ip_version: ipAddress.includes(":") ? "IPv6" : "IPv4",
+                        source: "port_monitor",
+                        confidence: 0.95,
+                    })),
+                    hosts: results.map(result => ({
+                        hostname: result.host,
+                        fqdn: isIpLiteral(result.host) ? undefined : result.host,
+                        ip_addresses: isIpLiteral(result.host) ? [result.host] : undefined,
+                        source: "port_monitor",
+                        confidence: 0.95,
+                    })),
+                    ports: results.flatMap(result =>
+                        (result.snapshot?.openPorts || []).map(portInfo => ({
+                            host_key: result.host,
+                            ip_or_host: result.host,
+                            port: portInfo.port,
+                            transport_protocol: portInfo.protocol,
+                            state: portInfo.state,
+                            source: "port_monitor",
+                            confidence: 0.95,
+                        }))
+                    ),
+                    services: results.flatMap(result =>
+                        (result.snapshot?.openPorts || []).map(portInfo => ({
+                            host_key: result.host,
+                            ip_or_host: result.host,
+                            port: portInfo.port,
+                            transport_protocol: portInfo.protocol,
+                            protocol_name: portInfo.service || PORT_SERVICES[portInfo.port] || "unknown",
+                            application_service_name: portInfo.service || PORT_SERVICES[portInfo.port] || "unknown",
+                            banner: portInfo.banner,
+                            source: "port_monitor",
+                            confidence: 0.9,
+                        }))
+                    ),
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "host",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "port_monitor",
+                        metadata: event.metadata,
+                    })),
+                    evidences: results
+                        .filter(result => result.snapshot)
+                        .map(result => ({
+                            asset_type: "host",
+                            asset_key: result.host,
+                            evidence_type: "port_snapshot",
+                            title: `Port Snapshot: ${result.host}`,
+                            content_text: `${result.snapshot?.openPorts.length || 0} open ports`,
+                            content_json: result.snapshot,
+                            source: "port_monitor",
+                        })),
+                    relations: results.flatMap(result =>
+                        (result.snapshot?.openPorts || []).map(portInfo => ({
+                            from_type: "host",
+                            from_key: result.host,
+                            to_type: "service",
+                            to_key: `${result.host}:${portInfo.port}/${portInfo.protocol}`,
+                            relation_type: "hosts_service",
+                            source: "port_monitor",
+                            confidence: 0.95,
+                        }))
+                    ),
                 },
             },
         };

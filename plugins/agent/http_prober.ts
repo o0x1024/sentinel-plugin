@@ -52,11 +52,16 @@ interface ToolOutput {
             dead: number;
             byStatusCode: Record<string, number>;
         };
+        surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
 
 const DEFAULT_PORTS = [80, 443, 8080, 8443];
+
+function isIpLiteral(value: string): boolean {
+    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
+}
 
 const TECH_SIGNATURES: Record<string, { header?: string; pattern: RegExp }[]> = {
     "nginx": [
@@ -210,6 +215,10 @@ export function get_output_schema() {
                             alive: { type: "integer" },
                             dead: { type: "integer" }
                         }
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Typed network surface artifacts for surface graph ingestion"
                     }
                 }
             },
@@ -458,6 +467,86 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         // Calculate summary
         const aliveResults = results.filter(r => r.alive);
         const deadResults = results.filter(r => !r.alive);
+        const surfaceDomains = [...new Set(aliveResults
+            .map(result => new URL(result.url).hostname)
+            .filter(hostname => hostname.includes(".") && !isIpLiteral(hostname))
+        )].map(hostname => ({
+            fqdn: hostname,
+            main_domain: hostname.split(".").slice(-2).join("."),
+            root_domain: hostname.split(".").slice(-2).join("."),
+            source: "http_prober",
+            confidence: 0.9,
+        }));
+        const surfaceIps = [...new Set(aliveResults
+            .map(result => new URL(result.url).hostname)
+            .filter(hostname => isIpLiteral(hostname))
+        )].map(ipAddress => ({
+            ip_address: ipAddress,
+            ip_version: ipAddress.includes(":") ? "IPv6" : "IPv4",
+            source: "http_prober",
+            confidence: 0.9,
+        }));
+        const surfaceHosts = aliveResults.map(result => {
+            const parsed = new URL(result.url);
+            return {
+                hostname: parsed.hostname,
+                fqdn: parsed.hostname,
+                ip_addresses: isIpLiteral(parsed.hostname) ? [parsed.hostname] : undefined,
+                source: "http_prober",
+                confidence: 0.95,
+            };
+        });
+        const surfaceServices = aliveResults.map(result => {
+            const parsed = new URL(result.url);
+            const protocol = parsed.protocol.replace(":", "");
+            return {
+                host_key: parsed.hostname,
+                ip_or_host: parsed.hostname,
+                port: Number(parsed.port || (protocol === "https" ? 443 : 80)),
+                transport_protocol: "tcp",
+                protocol_name: protocol.toUpperCase(),
+                application_service_name: protocol.toUpperCase(),
+                source: "http_prober",
+                confidence: 0.95,
+            };
+        });
+        const surfaceWebs = aliveResults.map(result => {
+            const parsed = new URL(result.url);
+            return {
+                canonical_url: result.url,
+                scheme: parsed.protocol.replace(":", ""),
+                hostname: parsed.hostname,
+                port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
+                site_title: result.title,
+                http_status_code: result.statusCode,
+                server_header: result.server,
+                response_headers: result.headers,
+                source: "http_prober",
+                confidence: 0.95,
+            };
+        });
+        const surfaceEvidences = aliveResults.map(result => {
+            const parsed = new URL(result.url);
+            return {
+                asset_type: "web",
+                asset_key: result.url,
+                evidence_type: "http_probe",
+                title: `HTTP Probe: ${parsed.hostname}`,
+                content_text: `${result.statusCode || "unknown"} ${result.title || ""}`.trim(),
+                content_json: {
+                    url: result.url,
+                    status_code: result.statusCode,
+                    title: result.title,
+                    server: result.server,
+                    headers: result.headers,
+                    content_type: result.contentType,
+                    response_time: result.responseTime,
+                    technologies: result.technologies,
+                    redirect_url: result.redirectUrl,
+                },
+                source: "http_prober",
+            };
+        });
         
         const byStatusCode: Record<string, number> = {};
         for (const result of aliveResults) {
@@ -475,6 +564,64 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     alive: aliveResults.length,
                     dead: deadResults.length,
                     byStatusCode,
+                },
+                surface_artifacts: {
+                    domains: surfaceDomains,
+                    ips: surfaceIps,
+                    hosts: surfaceHosts,
+                    services: surfaceServices,
+                    webs: surfaceWebs,
+                    evidences: surfaceEvidences,
+                    relations: aliveResults.flatMap(result => {
+                        const parsed = new URL(result.url);
+                        const protocol = parsed.protocol.replace(":", "");
+                        const port = Number(parsed.port || (protocol === "https" ? 443 : 80));
+                        const serviceKey = `${parsed.hostname}:${port}/${protocol}`;
+                        const relations = [
+                            {
+                                from_type: "host",
+                                from_key: parsed.hostname,
+                                to_type: "service",
+                                to_key: serviceKey,
+                                relation_type: "hosts_service",
+                                source: "http_prober",
+                                confidence: 0.95,
+                            },
+                            {
+                                from_type: "service",
+                                from_key: serviceKey,
+                                to_type: "web",
+                                to_key: result.url,
+                                relation_type: "exposes_web",
+                                source: "http_prober",
+                                confidence: 0.95,
+                            },
+                        ];
+
+                        if (isIpLiteral(parsed.hostname)) {
+                            relations.unshift({
+                                from_type: "ip",
+                                from_key: parsed.hostname,
+                                to_type: "host",
+                                to_key: parsed.hostname,
+                                relation_type: "identifies_host",
+                                source: "http_prober",
+                                confidence: 0.9,
+                            });
+                        } else {
+                            relations.unshift({
+                                from_type: "domain",
+                                from_key: parsed.hostname,
+                                to_type: "host",
+                                to_key: parsed.hostname,
+                                relation_type: "resolves_to_host",
+                                source: "http_prober",
+                                confidence: 0.9,
+                            });
+                        }
+
+                        return relations;
+                    }),
                 },
             },
         };
