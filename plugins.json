@@ -1,6 +1,6 @@
 {
-  "version": "2.0.0",
-  "updated_at": "2026-01-23",
+  "version": "2.1.0",
+  "updated_at": "2026-03-23",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -77,7 +77,7 @@
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
@@ -89,7 +89,7 @@
     {
       "id": "http_prober",
       "name": "HTTP Prober",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
@@ -101,7 +101,7 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
@@ -209,7 +209,7 @@
     {
       "id": "cert_monitor",
       "name": "Certificate Monitor",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
@@ -245,7 +245,7 @@
     {
       "id": "port_monitor",
       "name": "Port Monitor",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",

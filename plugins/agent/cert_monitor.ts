@@ -3,7 +3,7 @@
  * 
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium

@@ -3,7 +3,7 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium

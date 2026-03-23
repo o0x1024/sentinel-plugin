@@ -3,7 +3,7 @@
  * 
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category recon
  * @default_severity info
