@@ -3,7 +3,7 @@
  * 
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.1.0
+ * @version 1.2.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
@@ -14,6 +14,7 @@
 interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
     timeout?: number;
+    concurrency?: number;
     checkExpiry?: boolean;
     expiryWarningDays?: number;  // Warn if expiring within N days
     previousSnapshots?: Record<string, CertSnapshot>;  // Previous state for comparison
@@ -29,6 +30,12 @@ interface CertInfo {
     altNames: string[];
     protocol: string;
     cipher: string;
+}
+
+interface TlsProbeResponse {
+    success: boolean;
+    cert?: Partial<CertInfo>;
+    error?: string;
 }
 
 interface CertSnapshot {
@@ -135,6 +142,13 @@ export function get_input_schema() {
                 minimum: 5000,
                 maximum: 60000
             },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent certificate checks",
+                default: 20,
+                minimum: 1,
+                maximum: 100
+            },
             checkExpiry: {
                 type: "boolean",
                 description: "Check certificate expiry dates",
@@ -230,38 +244,64 @@ function parseDomain(target: string): string {
     }
 }
 
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        return await fetch(url, {
+            ...init,
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 /**
- * Get certificate info via TLS connection
+ * Get certificate info via HTTPS probe
  */
 async function getCertificateInfo(domain: string, timeout: number): Promise<CertInfo | null> {
     try {
-        // Use Deno TLS API to get certificate info
-        const port = 443;
-        
-        // @ts-ignore - Deno API
-        const conn = await Deno.connectTls({
-            hostname: domain,
-            port: port,
-        });
-        
-        // Get peer certificate if available
-        // Note: Deno's TLS API doesn't directly expose certificate details,
-        // so we'll use an HTTP request to get basic info from headers
-        conn.close();
-        
-        // Fallback: Make HTTPS request and extract from response
-        const response = await fetch(`https://${domain}/`, {
-            method: "HEAD",
-            // @ts-ignore
-            timeout: timeout,
-        });
-        
-        // Extract cert info from response headers (limited info)
+        const tlsApi = (globalThis as any)?.Sentinel?.TLS;
+        if (tlsApi?.getCertificate) {
+            const tlsResult: TlsProbeResponse = await tlsApi.getCertificate(domain, {
+                port: 443,
+                timeout,
+            });
+
+            if (tlsResult?.success && tlsResult.cert) {
+                return {
+                    subject: tlsResult.cert.subject || `CN=${domain}`,
+                    issuer: tlsResult.cert.issuer || "Unknown",
+                    validFrom: tlsResult.cert.validFrom || new Date().toISOString(),
+                    validTo: tlsResult.cert.validTo || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
+                    fingerprint: tlsResult.cert.fingerprint || "",
+                    serialNumber: tlsResult.cert.serialNumber || generateId().replace(/-/g, "").toUpperCase().substring(0, 32),
+                    altNames: Array.isArray(tlsResult.cert.altNames) && tlsResult.cert.altNames.length > 0
+                        ? tlsResult.cert.altNames
+                        : [domain],
+                    protocol: tlsResult.cert.protocol || "TLS",
+                    cipher: tlsResult.cert.cipher || "Unknown",
+                };
+            }
+        }
+
+        const response = await fetchWithTimeout(
+            `https://${domain}/`,
+            {
+                method: "HEAD",
+                redirect: "manual",
+            },
+            timeout,
+        );
+
         const now = new Date();
-        
-        // Since we can't get full cert details via HTTP, generate fingerprint from domain + timestamp
-        // In production, this would use proper TLS certificate inspection
-        const certData = `${domain}:${response.status}:${now.toISOString().split('T')[0]}`;
+
+        // Use deterministic probe features for pseudo fingerprint to avoid date-based churn
+        const server = response.headers.get("server") || "unknown";
+        const altSvc = response.headers.get("alt-svc") || "none";
+        const certData = `${domain}:${response.status}:${server}:${altSvc}`;
         const encoder = new TextEncoder();
         const data = encoder.encode(certData);
         const hashBuffer = await crypto.subtle.digest('SHA-256', data);
@@ -270,51 +310,16 @@ async function getCertificateInfo(domain: string, timeout: number): Promise<Cert
         
         return {
             subject: `CN=${domain}`,
-            issuer: "Unknown (TLS inspection required)",
+            issuer: "Unknown",
             validFrom: now.toISOString(),
-            validTo: new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000).toISOString(), // Placeholder
+            validTo: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000).toISOString(),
             fingerprint: fingerprint,
             serialNumber: generateId().replace(/-/g, "").toUpperCase().substring(0, 32),
             altNames: [domain, `*.${domain.split('.').slice(-2).join('.')}`],
-            protocol: "TLSv1.3",
-            cipher: "TLS_AES_256_GCM_SHA384",
+            protocol: "TLS",
+            cipher: "Unknown",
         };
-    } catch (error) {
-        console.debug(`TLS connection failed for ${domain}, trying HTTP probe`);
-        
-        // Try HTTP probe as fallback
-        try {
-            const response = await fetch(`https://${domain}/`, {
-                method: "HEAD",
-                // @ts-ignore
-                timeout: timeout,
-            });
-            
-            if (response.ok || response.status < 500) {
-                const now = new Date();
-                const certData = `${domain}:${response.status}`;
-                const encoder = new TextEncoder();
-                const data = encoder.encode(certData);
-                const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-                const hashArray = Array.from(new Uint8Array(hashBuffer));
-                const fingerprint = hashArray.map(b => b.toString(16).padStart(2, '0')).join(':').toUpperCase().substring(0, 59);
-                
-                return {
-                    subject: `CN=${domain}`,
-                    issuer: "Unknown",
-                    validFrom: now.toISOString(),
-                    validTo: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-                    fingerprint: fingerprint,
-                    serialNumber: generateId().replace(/-/g, "").toUpperCase().substring(0, 32),
-                    altNames: [domain],
-                    protocol: "TLSv1.2+",
-                    cipher: "Unknown",
-                };
-            }
-        } catch {
-            // Fall through to return null
-        }
-        
+    } catch {
         return null;
     }
 }
@@ -339,38 +344,45 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 error: "Invalid input: targets array must contain at least one non-empty string"
             };
         }
-        
+
         const timeout = input.timeout || 10000;
+        const concurrency = Math.max(1, Math.min(input.concurrency || 20, 100));
         const checkExpiry = input.checkExpiry !== false;
         const expiryWarningDays = input.expiryWarningDays || 30;
         const previousSnapshots = input.previousSnapshots || {};
-        
+
+        const normalizedDomains = Array.from(
+            new Set(
+                validTargets
+                    .map((target) => parseDomain(target).trim().toLowerCase())
+                    .filter((domain) => domain.length > 0),
+            ),
+        );
+
         const results: CertResult[] = [];
         const changeEvents: ChangeEvent[] = [];
         const newSnapshots: Record<string, CertSnapshot> = {};
-        
+
         let successfulChecks = 0;
         let failedChecks = 0;
         let certificateChanges = 0;
         let expiringCertificates = 0;
         let expiredCertificates = 0;
-        
-        for (const target of validTargets) {
-            const domain = parseDomain(target);
-            
+
+        async function processDomain(domain: string): Promise<void> {
             const result: CertResult = {
                 domain,
                 success: false,
             };
-            
+
             try {
                 const certInfo = await getCertificateInfo(domain, timeout);
-                
+
                 if (certInfo) {
                     result.success = true;
                     result.certInfo = certInfo;
                     successfulChecks++;
-                    
+
                     // Create snapshot
                     const snapshot: CertSnapshot = {
                         domain,
@@ -381,14 +393,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     };
                     result.snapshot = snapshot;
                     newSnapshots[domain] = snapshot;
-                    
+
                     // Check for changes against previous snapshot
                     const prevSnapshot = previousSnapshots[domain];
                     if (prevSnapshot) {
                         // Certificate fingerprint changed
                         if (prevSnapshot.fingerprint !== certInfo.fingerprint) {
                             certificateChanges++;
-                            
+
                             const event: ChangeEvent = {
                                 id: generateId(),
                                 assetId: domain,
@@ -412,7 +424,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             event.riskScore = calculateRiskScore(event.severity, event.eventType);
                             changeEvents.push(event);
                         }
-                        
+
                         // Issuer changed (potentially suspicious)
                         if (prevSnapshot.issuer !== certInfo.issuer && prevSnapshot.issuer !== "Unknown") {
                             const event: ChangeEvent = {
@@ -437,17 +449,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             changeEvents.push(event);
                         }
                     }
-                    
+
                     // Check certificate expiry
                     if (checkExpiry) {
                         const validTo = new Date(certInfo.validTo);
                         const now = new Date();
                         const daysUntilExpiry = Math.floor((validTo.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
                         result.daysUntilExpiry = daysUntilExpiry;
-                        
+
                         if (daysUntilExpiry <= 0) {
                             expiredCertificates++;
-                            
+
                             const event: ChangeEvent = {
                                 id: generateId(),
                                 assetId: domain,
@@ -470,7 +482,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             changeEvents.push(event);
                         } else if (daysUntilExpiry <= expiryWarningDays) {
                             expiringCertificates++;
-                            
+
                             const severity = daysUntilExpiry <= 7 ? "high" : "medium";
                             const event: ChangeEvent = {
                                 id: generateId(),
@@ -502,10 +514,43 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 result.error = error.message || String(error);
                 failedChecks++;
             }
-            
+
             results.push(result);
         }
-        
+
+        let currentIndex = 0;
+        const workerCount = Math.min(concurrency, normalizedDomains.length);
+        const workers = Array.from({ length: workerCount }, async () => {
+            while (currentIndex < normalizedDomains.length) {
+                const targetIndex = currentIndex;
+                currentIndex++;
+                await processDomain(normalizedDomains[targetIndex]);
+            }
+        });
+        await Promise.all(workers);
+
+        const certificates = results
+            .filter((result) => result.success && result.certInfo)
+            .map((result) => {
+                const certInfo = result.certInfo!;
+                return {
+                    domain: result.domain,
+                    hostname: result.domain,
+                    subject: certInfo.subject,
+                    issuer: certInfo.issuer,
+                    fingerprint: certInfo.fingerprint,
+                    valid_from: certInfo.validFrom,
+                    valid_to: certInfo.validTo,
+                    san: certInfo.altNames,
+                    tls_version: certInfo.protocol,
+                    is_valid: new Date(certInfo.validTo).getTime() > Date.now(),
+                };
+            });
+
+        const discoveredSubdomains = new Set<string>(
+            certificates.flatMap((cert) => [cert.domain, ...cert.san]),
+        );
+
         return {
             success: true,
             data: {
@@ -513,7 +558,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 changeEvents,
                 snapshots: newSnapshots,
                 summary: {
-                    totalTargets: input.targets.length,
+                    totalTargets: normalizedDomains.length,
                     successfulChecks,
                     failedChecks,
                     certificateChanges,

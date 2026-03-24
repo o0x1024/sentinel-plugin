@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tombkeeper Quote Analysis"
+  short_description: "整理与分析 tombkeeper 语录的主题母题与表达手法"
+  default_prompt: "Use $tombkeeper-quote-analysis to analyze a tombkeeper quote or cluster of posts and extract themes, reasoning moves, and safe original takeaways."

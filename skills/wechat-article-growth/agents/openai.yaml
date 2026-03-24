@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat Article Growth"
+  short_description: "拆解微信公众号高阅读高赞文章共性并生成写作策略框架"
+  default_prompt: "Use $wechat-article-growth to analyze a WeChat official account topic and propose a high-read, high-like article strategy."

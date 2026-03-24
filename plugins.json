@@ -125,14 +125,38 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "1.1.0",
+      "version": "2.0.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Identify technologies, frameworks, CMS, and libraries used by web applications through HTTP headers, HTML content, cookies, and JavaScript analysis",
+      "description": "Identify web technologies using dictionary-driven fingerprint rules with structured matchers and version extraction",
       "default_severity": "info",
-      "tags": ["fingerprint", "technology", "wappalyzer", "detection", "web"],
+      "tags": ["fingerprint", "technology", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/tech_fingerprinter.ts"
+    },
+    {
+      "id": "sensitive_file_scanner",
+      "name": "Sensitive File Scanner",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "risk",
+      "description": "Scan web targets for exposed sensitive files using structured dictionary rules",
+      "default_severity": "medium",
+      "tags": ["risk", "exposure", "file", "dictionary", "web"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sensitive_file_scanner.ts"
+    },
+    {
+      "id": "risk_scanner",
+      "name": "Risk Scanner",
+      "version": "2.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "risk",
+      "description": "Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, and structured evidence",
+      "default_severity": "medium",
+      "tags": ["risk", "poc", "verification", "dictionary", "web"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/risk_scanner.ts"
     },
     {
       "id": "favicon_fingerprinter",
