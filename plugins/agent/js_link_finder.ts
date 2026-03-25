@@ -67,7 +67,7 @@ interface ToolOutput {
 /**
  * Input schema for agent
  */
-function get_input_schema() {
+export function get_input_schema() {
     return {
         type: "object",
         properties: {
@@ -127,7 +127,7 @@ function get_input_schema() {
 /**
  * Output schema for agent
  */
-function get_output_schema() {
+export function get_output_schema() {
     return {
         type: "object",
         properties: {
@@ -782,7 +782,7 @@ async function scanSingleUrl(
 /**
  * Main execution function
  */
-async function analyze(input: ToolInput): Promise<ToolOutput> {
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         // Build URL list from input (support both url and urls)
         let targetUrls: string[] = [];

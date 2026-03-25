@@ -130,21 +130,109 @@ const MAX_CONCURRENCY = 20;
 export function get_input_schema() {
     return {
         type: "object",
+        required: [],
         properties: {
-            url: { type: "string" },
-            base_url: { type: "string" },
-            targets: { type: "array", items: { type: "string" } },
-            technologies: { type: "array", items: { type: ["string", "object"] } },
-            fingerprints: { type: "array", items: { type: "string" } },
-            dictionaryId: { type: "string" },
-            dictionaryEntries: { type: "array" },
-            variables: { type: "object" },
-            safe_mode: { type: "boolean", default: true },
-            maxRules: { type: "integer", default: 20, minimum: 1, maximum: 200 },
-            timeout: { type: "integer", default: 8000, minimum: 1000, maximum: 60000 },
-            userAgent: { type: "string", default: "Sentinel-Risk-Scanner/2.0" },
-            concurrency: { type: "integer", default: DEFAULT_CONCURRENCY, minimum: 1, maximum: MAX_CONCURRENCY },
-            stopOnFirstHit: { type: "boolean", default: false },
+            url: {
+                type: "string",
+                description: "Single target URL to verify with dictionary-driven risk rules"
+            },
+            base_url: {
+                type: "string",
+                description: "Base URL alias for a single target"
+            },
+            targets: {
+                type: "array",
+                items: { type: "string" },
+                description: "List of target URLs or hostnames to verify"
+            },
+            technologies: {
+                type: "array",
+                description: "Observed technologies used to scope matching rules",
+                items: {
+                    anyOf: [
+                        { type: "string" },
+                        {
+                            type: "object",
+                            properties: {
+                                name: {
+                                    type: "string",
+                                    description: "Technology name"
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            fingerprints: {
+                type: "array",
+                items: { type: "string" },
+                description: "Observed fingerprint names used for rule filtering"
+            },
+            dictionaryId: {
+                type: "string",
+                description: "Structured dictionary ID or name used to load verification rules"
+            },
+            dictionaryEntries: {
+                type: "array",
+                description: "Inline rule entries that override dictionary loading",
+                items: {
+                    type: "object",
+                    required: ["word"],
+                    properties: {
+                        word: {
+                            type: "string",
+                            description: "Rule identifier"
+                        },
+                        category: {
+                            type: "string",
+                            description: "Rule category used for normalized finding type"
+                        },
+                        metadata: {
+                            description: "Rule metadata object or JSON string with requests, matchers and finding fields"
+                        }
+                    }
+                }
+            },
+            variables: {
+                type: "object",
+                description: "Variables injected into rule templates and request paths"
+            },
+            safe_mode: {
+                type: "boolean",
+                description: "Skip rules explicitly marked as unsafe",
+                default: true
+            },
+            maxRules: {
+                type: "integer",
+                description: "Maximum number of applicable rules to execute",
+                default: 20,
+                minimum: 1,
+                maximum: 200
+            },
+            timeout: {
+                type: "integer",
+                description: "Request timeout in milliseconds",
+                default: 8000,
+                minimum: 1000,
+                maximum: 60000
+            },
+            userAgent: {
+                type: "string",
+                description: "User-Agent header used for outbound requests",
+                default: "Sentinel-Risk-Scanner/2.0"
+            },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent rule executions",
+                default: DEFAULT_CONCURRENCY,
+                minimum: 1,
+                maximum: MAX_CONCURRENCY
+            },
+            stopOnFirstHit: {
+                type: "boolean",
+                description: "Stop executing more rules after the first positive finding",
+                default: false
+            }
         },
     };
 }
@@ -153,9 +241,62 @@ export function get_output_schema() {
     return {
         type: "object",
         properties: {
-            success: { type: "boolean" },
-            data: { type: "object" },
-            error: { type: "string" },
+            success: {
+                type: "boolean",
+                description: "Whether the risk verification run completed successfully"
+            },
+            data: {
+                type: "object",
+                properties: {
+                    findings: {
+                        type: "array",
+                        description: "Matched risk findings produced by the executed rules",
+                        items: {
+                            type: "object",
+                            properties: {
+                                title: { type: "string" },
+                                severity: { type: "string" },
+                                url: { type: "string" },
+                                description: { type: "string" },
+                                impact: { type: "string" },
+                                remediation: { type: "string" },
+                                cwe: { type: "string" }
+                            }
+                        }
+                    },
+                    evidence: {
+                        type: "array",
+                        description: "Structured execution evidence captured during rule evaluation"
+                    },
+                    summary: {
+                        type: "object",
+                        description: "High-level execution summary",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            executedRules: { type: "integer" },
+                            matchedRules: { type: "integer" }
+                        }
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Normalized findings and evidences prepared for upper-layer ingestion",
+                        properties: {
+                            findings: {
+                                type: "array",
+                                description: "Normalized vulnerability findings"
+                            },
+                            evidences: {
+                                type: "array",
+                                description: "Normalized evidence records"
+                            }
+                        }
+                    }
+                }
+            },
+            error: {
+                type: "string",
+                description: "Error message if the risk verification run fails"
+            },
         },
     };
 }
@@ -616,6 +757,10 @@ async function executeRule(target: string, rule: RuleEntry, input: ToolInput): P
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
+        if (!input || typeof input !== "object") {
+            return { success: false, error: "Invalid input: expected an object payload" };
+        }
+
         const safeMode = getInputBoolean(input, "safe_mode", "safe_mode", true);
         const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
         const timeout = getInputNumber(input, "timeout", "timeout_ms", 8000);

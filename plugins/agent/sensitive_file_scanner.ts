@@ -73,16 +73,72 @@ const FALLBACK_RULES: RuleEntry[] = [
 export function get_input_schema() {
     return {
         type: "object",
+        required: [],
         properties: {
-            url: { type: "string" },
-            base_url: { type: "string" },
-            targets: { type: "array", items: { type: "string" } },
-            dictionaryId: { type: "string" },
-            dictionaryEntries: { type: "array" },
-            timeout: { type: "integer", default: 8000, minimum: 1000, maximum: 60000 },
-            userAgent: { type: "string", default: "Sentinel-Sensitive-File-Scanner/1.0" },
-            concurrency: { type: "integer", default: 8, minimum: 1, maximum: 50 },
-            maxTargets: { type: "integer", default: 10, minimum: 1, maximum: 100 },
+            url: {
+                type: "string",
+                description: "Single target URL to scan for exposed sensitive files"
+            },
+            base_url: {
+                type: "string",
+                description: "Base URL alias for a single target"
+            },
+            targets: {
+                type: "array",
+                items: { type: "string" },
+                description: "List of target URLs or hostnames to scan"
+            },
+            dictionaryId: {
+                type: "string",
+                description: "Structured dictionary ID or name used to resolve sensitive file rules"
+            },
+            dictionaryEntries: {
+                type: "array",
+                description: "Inline sensitive file rules that override dictionary loading",
+                items: {
+                    type: "object",
+                    required: ["word"],
+                    properties: {
+                        word: {
+                            type: "string",
+                            description: "Rule key or relative path to probe"
+                        },
+                        category: {
+                            type: "string",
+                            description: "Rule category used for normalized finding type"
+                        },
+                        metadata: {
+                            description: "Rule metadata object or JSON string with path, matchers, severity and tags"
+                        }
+                    }
+                }
+            },
+            timeout: {
+                type: "integer",
+                description: "Request timeout in milliseconds",
+                default: 8000,
+                minimum: 1000,
+                maximum: 60000
+            },
+            userAgent: {
+                type: "string",
+                description: "User-Agent header used when requesting candidate files",
+                default: "Sentinel-Sensitive-File-Scanner/1.0"
+            },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent file probes",
+                default: 8,
+                minimum: 1,
+                maximum: 50
+            },
+            maxTargets: {
+                type: "integer",
+                description: "Maximum number of normalized targets to scan",
+                default: 10,
+                minimum: 1,
+                maximum: 100
+            },
         },
     };
 }
@@ -91,9 +147,58 @@ export function get_output_schema() {
     return {
         type: "object",
         properties: {
-            success: { type: "boolean" },
-            data: { type: "object" },
-            error: { type: "string" },
+            success: {
+                type: "boolean",
+                description: "Whether the scan completed successfully"
+            },
+            data: {
+                type: "object",
+                properties: {
+                    findings: {
+                        type: "array",
+                        description: "Sensitive file exposure findings discovered during scanning",
+                        items: {
+                            type: "object",
+                            properties: {
+                                title: { type: "string" },
+                                severity: { type: "string" },
+                                url: { type: "string" },
+                                description: { type: "string" },
+                                evidence: { type: "string" },
+                                cwe: { type: "string" },
+                                remediation: { type: "string" },
+                                tags: {
+                                    type: "array",
+                                    items: { type: "string" }
+                                }
+                            }
+                        }
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            scannedRules: { type: "integer" },
+                            findings: { type: "integer" }
+                        },
+                        description: "High-level scan summary"
+                    },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Normalized findings prepared for surface graph and upper-layer ingestion",
+                        properties: {
+                            findings: {
+                                type: "array",
+                                description: "Normalized vulnerability findings"
+                            }
+                        }
+                    }
+                }
+            },
+            error: {
+                type: "string",
+                description: "Error message if the scan fails"
+            },
         },
     };
 }
@@ -192,6 +297,10 @@ function matcherHit(body: string, matcher: any): boolean {
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
+        if (!input || typeof input !== "object") {
+            return { success: false, error: "Invalid input: expected an object payload" };
+        }
+
         const timeout = Number(input.timeout || 8000);
         const userAgent = input.userAgent || "Sentinel-Sensitive-File-Scanner/1.0";
         const concurrency = Math.max(1, Math.min(Number(input.concurrency || 8), 50));
