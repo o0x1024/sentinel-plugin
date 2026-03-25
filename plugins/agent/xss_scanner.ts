@@ -3,7 +3,7 @@
  * 
  * @plugin xss_scanner
  * @name XSS Scanner
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity high
@@ -68,6 +68,9 @@ interface ToolOutput {
     };
     error?: string;
 }
+
+const DEFAULT_CONCURRENCY = 5;
+const MAX_CONCURRENCY = 10;
 
 // XSS payload categories
 const XSS_PAYLOADS: Record<string, { payload: string; type: string; context: string }[]> = {
@@ -194,9 +197,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent requests",
-                default: 5,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 20
+                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -551,8 +554,16 @@ async function loadPayloads(
     if (testDom !== false) {
         payloads.push(...XSS_PAYLOADS.dom_based);
     }
-    
-    return payloads;
+
+    const uniquePayloads = new Map<string, { payload: string; type: string; context: string }>();
+    for (const payload of payloads) {
+        const key = `${payload.type}:${payload.context}:${payload.payload}`;
+        if (!uniquePayloads.has(key)) {
+            uniquePayloads.set(key, payload);
+        }
+    }
+
+    return Array.from(uniquePayloads.values());
 }
 
 /**
@@ -577,7 +588,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const method = (input.method || "GET").toUpperCase();
         const timeout = input.timeout || 10000;
-        const concurrency = input.concurrency || 5;
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const contentType = input.contentType || "application/x-www-form-urlencoded";
         
@@ -601,6 +612,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const tests: XssTest[] = [];
         const vulnerableParams = new Set<string>();
+        const compromisedParams = new Set<string>();
         let missingHeaders: string[] = [];
         
         // Generate marker for this scan
@@ -615,6 +627,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             
             for (const { payload: basePayload, type, context } of payloads) {
                 tasks.push(async () => {
+                    if (compromisedParams.has(paramName)) {
+                        return null;
+                    }
+
                     const payload = basePayload.replace(/alert\(1\)/g, `alert('${marker}')`);
                     const testStart = performance.now();
                     
@@ -667,7 +683,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         
                         if (reflection.reflected && !reflection.encoded) {
                             const dangerous = hasDangerousPatterns(body, marker);
-                            
+                            compromisedParams.add(paramName);
                             return {
                                 parameter: paramName,
                                 location,

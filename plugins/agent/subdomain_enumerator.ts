@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.1.0
+ * @version 2.2.0
  * @author Sentinel Team
  * @category recon
  * @default_severity info
@@ -39,17 +39,23 @@ interface ToolOutput {
         domain: string;
         subdomains: string[];
         sourceResults: SourceResult[];
+        skippedSources?: string[];
         summary: {
             totalUnique: number;
             totalFound: number;
             sourcesQueried: number;
             sourcesSucceeded: number;
             sourcesFailed: number;
+            sourcesSkipped: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
+
+type FetchWithTimeoutInit = RequestInit & {
+    timeout?: number;
+};
 
 // Available data sources
 const AVAILABLE_SOURCES = [
@@ -116,6 +122,28 @@ const AVAILABLE_SOURCES = [
 
 type DataSource = typeof AVAILABLE_SOURCES[number];
 
+const DEFAULT_CONCURRENCY = 8;
+const MAX_CONCURRENCY = 12;
+const DEFAULT_TIMEOUT = 20000;
+const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+const SOURCE_PRIORITY: Partial<Record<DataSource, number>> = {
+    certspotter: 1,
+    crtsh: 2,
+    rapiddns: 3,
+    anubis: 4,
+    alienvault: 5,
+    threatminer: 6,
+    urlscan: 7,
+    cdx: 8,
+    archive: 9,
+    netcraft: 10,
+    dnsgrep: 11,
+    sitedossier: 12,
+    robtex: 13,
+    virustotal: 14,
+};
+
 // API configuration interface
 interface ApiConfig {
     // Certificate sources
@@ -158,6 +186,34 @@ interface ApiConfig {
     zoomeye_token?: string;
 }
 
+const SOURCE_REQUIRED_CONFIG: Partial<Record<DataSource, Array<keyof ApiConfig>>> = {
+    censys: ["censys_id", "censys_secret"],
+    racent: ["racent_token"],
+    bevigil: ["bevigil_token"],
+    binaryedge: ["binaryedge_token"],
+    chinaz_api: ["chinaz_token"],
+    circl: ["circl_user", "circl_pass"],
+    cloudflare: ["cloudflare_token"],
+    dnsdb: ["dnsdb_token"],
+    fullhunt: ["fullhunt_token"],
+    ipv4info: ["ipv4info_token"],
+    passivedns: ["passivedns_token", "passivedns_addr"],
+    securitytrails: ["securitytrails_token"],
+    spyse: ["spyse_token"],
+    windvane: ["windvane_token"],
+    virustotal_api: ["virustotal_token"],
+    riskiq: ["riskiq_user", "riskiq_key"],
+    threatbook: ["threatbook_token"],
+    bing_api: ["bing_token"],
+    fofa: ["fofa_email", "fofa_key"],
+    github: ["github_token"],
+    google_api: ["google_key", "google_cx"],
+    hunter: ["hunter_token"],
+    quake: ["quake_token"],
+    shodan: ["shodan_token"],
+    zoomeye: ["zoomeye_token"],
+};
+
 /**
  * Export input schema
  */
@@ -179,14 +235,14 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent requests",
-                default: 5,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 10
+                maximum: MAX_CONCURRENCY
             },
             timeout: {
                 type: "integer",
                 description: "Request timeout in milliseconds",
-                default: 30000,
+                default: DEFAULT_TIMEOUT,
                 minimum: 5000,
                 maximum: 120000
             },
@@ -273,8 +329,14 @@ export function get_output_schema() {
                             totalFound: { type: "integer" },
                             sourcesQueried: { type: "integer" },
                             sourcesSucceeded: { type: "integer" },
-                            sourcesFailed: { type: "integer" }
+                            sourcesFailed: { type: "integer" },
+                            sourcesSkipped: { type: "integer" }
                         }
+                    },
+                    skippedSources: {
+                        type: "array",
+                        items: { type: "string" },
+                        description: "Sources skipped by default because required API credentials were not configured"
                     },
                     surface_artifacts: {
                         type: "object",
@@ -288,6 +350,124 @@ export function get_output_schema() {
 }
 
 globalThis.get_output_schema = get_output_schema;
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfter(value: string | null): number | null {
+    if (!value) return null;
+
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return seconds * 1000;
+    }
+
+    const retryAt = Date.parse(value);
+    if (Number.isNaN(retryAt)) {
+        return null;
+    }
+
+    return Math.max(0, retryAt - Date.now());
+}
+
+function isRetryableMethod(method: string): boolean {
+    return method === "GET" || method === "HEAD" || method === "OPTIONS";
+}
+
+function isRetryableError(error: any): boolean {
+    const message = String(error?.message || error || "").toLowerCase();
+    return message.includes("timeout")
+        || message.includes("network")
+        || message.includes("fetch")
+        || message.includes("socket")
+        || message.includes("connection");
+}
+
+async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
+    const nativeFetch = globalThis.fetch.bind(globalThis);
+    const timeout = Math.max(1000, Math.min(Number(init.timeout || DEFAULT_TIMEOUT), 120000));
+    const method = String(init.method || "GET").toUpperCase();
+    const maxAttempts = isRetryableMethod(method) ? 2 : 1;
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        const upstreamSignal = init.signal;
+        const abortListener = () => controller.abort();
+
+        if (upstreamSignal) {
+            if (upstreamSignal.aborted) {
+                controller.abort();
+            } else {
+                upstreamSignal.addEventListener("abort", abortListener, { once: true });
+            }
+        }
+
+        try {
+            const requestInit: RequestInit = {
+                ...init,
+                signal: controller.signal,
+            };
+            delete (requestInit as FetchWithTimeoutInit).timeout;
+
+            const response = await nativeFetch(input, requestInit);
+            if (attempt < maxAttempts && RETRYABLE_STATUSES.has(response.status)) {
+                const retryDelay = parseRetryAfter(response.headers.get("retry-after")) ?? (300 * attempt);
+                try {
+                    await response.arrayBuffer();
+                } catch {
+                    // Ignore body drain failures before retry.
+                }
+                await sleep(Math.min(retryDelay, 2000));
+                continue;
+            }
+
+            return response;
+        } catch (error: any) {
+            lastError = error;
+            const timedOut = controller.signal.aborted && !(upstreamSignal?.aborted);
+            if (attempt >= maxAttempts || !(timedOut || isRetryableError(error))) {
+                if (timedOut) {
+                    throw new Error(`Request timeout after ${timeout}ms`);
+                }
+                throw error;
+            }
+            await sleep(300 * attempt);
+        } finally {
+            clearTimeout(timeoutId);
+            if (upstreamSignal) {
+                upstreamSignal.removeEventListener("abort", abortListener);
+            }
+        }
+    }
+
+    throw lastError ?? new Error("Request failed");
+}
+
+function hasRequiredApiConfig(source: DataSource, apiConfig?: ApiConfig): boolean {
+    const keys = SOURCE_REQUIRED_CONFIG[source];
+    if (!keys || keys.length === 0) {
+        return true;
+    }
+
+    return keys.every((key) => {
+        const value = apiConfig?.[key];
+        return typeof value === "string" && value.trim().length > 0;
+    });
+}
+
+function prioritizeSources(sources: DataSource[]): DataSource[] {
+    return [...sources].sort((left, right) => {
+        const leftScore = SOURCE_PRIORITY[left] ?? 100;
+        const rightScore = SOURCE_PRIORITY[right] ?? 100;
+        if (leftScore !== rightScore) {
+            return leftScore - rightScore;
+        }
+        return left.localeCompare(right);
+    });
+}
 
 /**
  * Extract subdomains from text using regex
@@ -2218,32 +2398,19 @@ async function runWithConcurrency<T>(
     tasks: (() => Promise<T>)[],
     concurrency: number
 ): Promise<T[]> {
-    const results: T[] = [];
-    const executing: Promise<void>[] = [];
-    
-    for (const task of tasks) {
-        const p = task().then(result => {
-            results.push(result);
-        });
-        executing.push(p);
-        
-        if (executing.length >= concurrency) {
-            await Promise.race(executing);
-            // Remove completed promises
-            for (let i = executing.length - 1; i >= 0; i--) {
-                // Check if promise is settled by racing with resolved promise
-                const settled = await Promise.race([
-                    executing[i].then(() => true).catch(() => true),
-                    Promise.resolve(false)
-                ]);
-                if (settled) {
-                    executing.splice(i, 1);
-                }
-            }
+    const results: T[] = new Array(tasks.length);
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    let currentIndex = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (currentIndex < tasks.length) {
+            const taskIndex = currentIndex;
+            currentIndex++;
+            results[taskIndex] = await tasks[taskIndex]();
         }
-    }
-    
-    await Promise.all(executing);
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -2270,13 +2437,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = input.timeout || 30000;
-        const concurrency = input.concurrency || 20;
+        const timeout = Math.max(5000, Math.min(input.timeout || DEFAULT_TIMEOUT, 120000));
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const removeDuplicates = input.removeDuplicates !== false;
+        const requestedSources = Array.isArray(input.sources) && input.sources.length > 0;
+        const skippedSources: DataSource[] = [];
         
         // Determine sources to query
         let sources: DataSource[] = [...AVAILABLE_SOURCES];
-        if (input.sources && Array.isArray(input.sources) && input.sources.length > 0) {
+        if (requestedSources) {
             sources = input.sources.filter(s => 
                 AVAILABLE_SOURCES.includes(s as DataSource)
             ) as DataSource[];
@@ -2288,6 +2457,18 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 };
             }
         }
+
+        if (!requestedSources) {
+            sources = sources.filter((source) => {
+                if (hasRequiredApiConfig(source, input.apiConfig)) {
+                    return true;
+                }
+                skippedSources.push(source);
+                return false;
+            });
+        }
+
+        sources = prioritizeSources(sources);
         
         // Create tasks
         const tasks = sources.map(source => () => querySource(source, domain, timeout, input.apiConfig));
@@ -2320,12 +2501,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 domain,
                 subdomains: finalSubdomains,
                 sourceResults: sourceResults.sort((a, b) => b.count - a.count),
+                skippedSources,
                 summary: {
                     totalUnique: new Set(allSubdomains).size,
                     totalFound: allSubdomains.length,
                     sourcesQueried: sources.length,
                     sourcesSucceeded,
-                    sourcesFailed
+                    sourcesFailed,
+                    sourcesSkipped: skippedSources.length
                 },
                 surface_artifacts: {
                     domains: finalSubdomains.map(subdomain => ({

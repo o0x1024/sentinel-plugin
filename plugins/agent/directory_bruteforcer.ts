@@ -3,7 +3,7 @@
  * 
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category discovery
  * @default_severity info
@@ -62,6 +62,9 @@ interface ToolOutput {
     };
     error?: string;
 }
+
+const DEFAULT_CONCURRENCY = 12;
+const MAX_CONCURRENCY = 40;
 
 // Fallback wordlists (used when dictionary is not available)
 const FALLBACK_WORDLISTS: Record<string, string[]> = {
@@ -168,9 +171,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent requests",
-                default: 20,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 100
+                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -380,19 +383,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const timeout = input.timeout || 10000;
-        const concurrency = input.concurrency || 20;
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const followRedirects = input.followRedirects === true;
         const statusCodes = input.statusCodes || [200, 201, 204, 301, 302, 307, 308, 401, 403];
         const excludeStatusCodes = input.excludeStatusCodes || [];
         const excludeLength = input.excludeLength || [];
-        const extensions = input.extensions || [];
+        const extensions = [...new Set((input.extensions || []).map((ext) => ext.trim()).filter(Boolean))];
         
         // Build wordlist
         let words: string[] = [];
         if (input.customWordlist && input.customWordlist.length > 0) {
             // Use custom wordlist provided in input
-            words = input.customWordlist;
+            words = input.customWordlist.map((word) => String(word).trim()).filter(Boolean);
         } else if (input.dictionaryId) {
             // Load from specified dictionary
             words = await loadDictionaryById(input.dictionaryId);
@@ -419,7 +422,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Deduplicate
-        words = [...new Set(words)];
+        words = [...new Set(words.map((word) => String(word).trim()).filter(Boolean))];
         
         // Build paths with extensions
         const paths: string[] = [];
@@ -430,9 +433,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 paths.push(`${word}${e}`);
             }
         }
+        const uniquePaths = [...new Set(paths)].sort((left, right) => left.length - right.length || left.localeCompare(right));
         
         // Create probe tasks
-        const tasks = paths.map(path => () => probePath(baseUrl, path, {
+        const tasks = uniquePaths.map(path => () => probePath(baseUrl, path, {
             timeout,
             userAgent,
             followRedirects,
@@ -477,7 +481,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 baseUrl,
                 discovered,
                 summary: {
-                    totalRequests: paths.length,
+                    totalRequests: uniquePaths.length,
                     discovered: discovered.length,
                     byStatusCode,
                     scanTime,

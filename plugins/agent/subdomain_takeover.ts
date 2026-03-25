@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity high
@@ -46,6 +46,9 @@ interface ToolOutput {
     };
     error?: string;
 }
+
+const DEFAULT_CONCURRENCY = 8;
+const MAX_CONCURRENCY = 20;
 
 // Service fingerprints for subdomain takeover detection
 interface ServiceFingerprint {
@@ -491,9 +494,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent checks",
-                default: 10,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 50
+                maximum: MAX_CONCURRENCY
             },
             checkCname: {
                 type: "boolean",
@@ -635,15 +638,31 @@ async function checkResolution(subdomain: string, timeout: number): Promise<bool
 /**
  * Check HTTP response for takeover fingerprints
  */
-async function checkHttpFingerprint(
-    subdomain: string,
+function matchHttpFingerprint(
+    body: string,
     service: ServiceFingerprint,
-    options: { timeout: number; userAgent: string }
-): Promise<{ matches: boolean; evidence?: string; status?: number; body?: string }> {
+): { matches: boolean; evidence?: string } {
     if (!service.httpFingerprints || service.httpFingerprints.length === 0) {
         return { matches: false };
     }
-    
+
+    for (const fingerprint of service.httpFingerprints) {
+        if (fingerprint.test(body)) {
+            const match = body.match(fingerprint);
+            return {
+                matches: true,
+                evidence: match ? match[0].substring(0, 100) : "Fingerprint matched",
+            };
+        }
+    }
+
+    return { matches: false };
+}
+
+async function fetchHttpEvidence(
+    subdomain: string,
+    options: { timeout: number; userAgent: string }
+): Promise<{ matches: boolean; evidence?: string; status?: number; body?: string }> {
     // Try both HTTP and HTTPS
     for (const protocol of ["https", "http"]) {
         try {
@@ -659,20 +678,11 @@ async function checkHttpFingerprint(
             });
             
             const body = await response.text();
-            
-            for (const fingerprint of service.httpFingerprints) {
-                if (fingerprint.test(body)) {
-                    const match = body.match(fingerprint);
-                    return {
-                        matches: true,
-                        evidence: match ? match[0].substring(0, 100) : "Fingerprint matched",
-                        status: response.status,
-                        body: body.substring(0, 500),
-                    };
-                }
-            }
-            
-            return { matches: false, status: response.status };
+            return {
+                matches: false,
+                status: response.status,
+                body: body.substring(0, 5000),
+            };
         } catch {
             // Continue to next protocol
         }
@@ -738,17 +748,19 @@ async function checkSubdomain(
         
         // Step 4: Check HTTP fingerprint
         if (options.checkHttp && matchedService) {
-            const httpResult = await checkHttpFingerprint(subdomain, matchedService, {
+            const httpResult = await fetchHttpEvidence(subdomain, {
                 timeout: options.timeout,
                 userAgent: options.userAgent,
             });
-            
-            if (httpResult.matches) {
+
+            const bodyToMatch = httpResult.body || "";
+            const fingerprintMatch = matchHttpFingerprint(bodyToMatch, matchedService);
+            if (fingerprintMatch.matches) {
                 result.vulnerable = true;
                 result.riskLevel = matchedService.riskLevel;
-                result.evidence = httpResult.evidence;
+                result.evidence = fingerprintMatch.evidence;
                 result.httpStatus = httpResult.status;
-                result.httpBody = httpResult.body;
+                result.httpBody = bodyToMatch.substring(0, 500);
                 return result;
             }
             
@@ -757,22 +769,26 @@ async function checkSubdomain(
         
         // Step 5: Even without CNAME, check HTTP for common fingerprints
         if (options.checkHttp && !matchedService) {
+            const httpResult = await fetchHttpEvidence(subdomain, {
+                timeout: options.timeout,
+                userAgent: options.userAgent,
+            });
+
+            const bodyToMatch = httpResult.body || "";
             for (const service of SERVICE_FINGERPRINTS) {
-                const httpResult = await checkHttpFingerprint(subdomain, service, {
-                    timeout: options.timeout,
-                    userAgent: options.userAgent,
-                });
-                
-                if (httpResult.matches) {
+                const fingerprintMatch = matchHttpFingerprint(bodyToMatch, service);
+                if (fingerprintMatch.matches) {
                     result.vulnerable = true;
                     result.riskLevel = service.riskLevel;
                     result.service = service.name;
-                    result.evidence = httpResult.evidence;
+                    result.evidence = fingerprintMatch.evidence;
                     result.httpStatus = httpResult.status;
-                    result.httpBody = httpResult.body;
+                    result.httpBody = bodyToMatch.substring(0, 500);
                     return result;
                 }
             }
+
+            result.httpStatus = httpResult.status;
         }
         
         return result;
@@ -823,7 +839,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Filter out empty strings
-        const validSubdomains = input.subdomains.filter(s => typeof s === 'string' && s.trim().length > 0);
+        const validSubdomains = [...new Set(input.subdomains.filter(s => typeof s === 'string' && s.trim().length > 0))];
         if (validSubdomains.length === 0) {
             return {
                 success: false,
@@ -832,7 +848,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const timeout = input.timeout || 10000;
-        const concurrency = input.concurrency || 10;
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const checkCname = input.checkCname !== false;
         const checkHttp = input.checkHttp !== false;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";

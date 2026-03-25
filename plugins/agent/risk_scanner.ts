@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.1.0
+ * @version 2.2.0
  * @author Sentinel Team
  * @category risk
  * @default_severity medium
@@ -124,6 +124,9 @@ const FALLBACK_RULES: RuleEntry[] = [
     },
 ];
 
+const DEFAULT_CONCURRENCY = 4;
+const MAX_CONCURRENCY = 20;
+
 export function get_input_schema() {
     return {
         type: "object",
@@ -140,7 +143,7 @@ export function get_input_schema() {
             maxRules: { type: "integer", default: 20, minimum: 1, maximum: 200 },
             timeout: { type: "integer", default: 8000, minimum: 1000, maximum: 60000 },
             userAgent: { type: "string", default: "Sentinel-Risk-Scanner/2.0" },
-            concurrency: { type: "integer", default: 5, minimum: 1, maximum: 50 },
+            concurrency: { type: "integer", default: DEFAULT_CONCURRENCY, minimum: 1, maximum: MAX_CONCURRENCY },
             stopOnFirstHit: { type: "boolean", default: false },
         },
     };
@@ -328,24 +331,50 @@ function evaluatePreconditions(preconditions: any[], context: Record<string, any
     return preconditions.every(condition => evaluateCondition(condition, context));
 }
 
-function ruleApplies(rule: RuleEntry, input: ToolInput, targetContext: Record<string, any>): boolean {
-    const metadata = parseMetadata(rule.metadata);
-    if (metadata.enabled === false) return false;
-
-    const scope = metadata.match_scope || {};
-    const expectedFingerprints = asArray(scope.fingerprints).map(item => String(item).toLowerCase());
-    const observed = [
+function getObservedFingerprints(input: ToolInput): string[] {
+    return [
         ...asArray(input.fingerprints),
         ...asArray(input.technologies).map(item => typeof item === "string" ? item : item?.name || ""),
     ]
         .filter(Boolean)
         .map(item => String(item).toLowerCase());
+}
 
-    if (expectedFingerprints.length > 0 && !expectedFingerprints.some(item => observed.includes(item))) {
+function ruleMatchesFingerprintScope(rule: RuleEntry, observedFingerprints: string[]): boolean {
+    const metadata = parseMetadata(rule.metadata);
+    if (metadata.enabled === false) return false;
+
+    const scope = metadata.match_scope || {};
+    const expectedFingerprints = asArray(scope.fingerprints).map(item => String(item).toLowerCase());
+
+    if (expectedFingerprints.length > 0 && !expectedFingerprints.some(item => observedFingerprints.includes(item))) {
         return false;
     }
 
-    return evaluatePreconditions(asArray(metadata.preconditions), targetContext);
+    return true;
+}
+
+function ruleApplies(rule: RuleEntry, input: ToolInput, targetContext: Record<string, any>): boolean {
+    if (!ruleMatchesFingerprintScope(rule, getObservedFingerprints(input))) {
+        return false;
+    }
+
+    return evaluatePreconditions(asArray(parseMetadata(rule.metadata).preconditions), targetContext);
+}
+
+function dedupeRules(rules: RuleEntry[]): RuleEntry[] {
+    const seen = new Set<string>();
+    const deduped: RuleEntry[] = [];
+
+    for (const rule of rules) {
+        const metadata = parseMetadata(rule.metadata);
+        const ruleId = String(rule.word || metadata.name || "").trim().toLowerCase();
+        if (!ruleId || seen.has(ruleId)) continue;
+        seen.add(ruleId);
+        deduped.push({ ...rule, metadata });
+    }
+
+    return deduped;
 }
 
 async function loadStructuredDictionary(idOrName: string): Promise<RuleEntry[]> {
@@ -591,7 +620,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
         const timeout = getInputNumber(input, "timeout", "timeout_ms", 8000);
         const userAgent = getInputString(input, "userAgent", "user_agent", "Sentinel-Risk-Scanner/2.0");
-        const concurrency = Math.max(1, Math.min(getInputNumber(input, "concurrency", "concurrency", 5), 50));
+        const concurrency = Math.max(1, Math.min(getInputNumber(input, "concurrency", "concurrency", DEFAULT_CONCURRENCY), MAX_CONCURRENCY));
         const stopOnFirstHit = getInputBoolean(input, "stopOnFirstHit", "stop_on_first_hit", false);
         const normalizedInput: ToolInput = {
             ...input,
@@ -613,13 +642,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return { success: false, error: "At least one target URL is required" };
         }
 
-        const allRules = await loadRules(normalizedInput);
+        const observedFingerprints = getObservedFingerprints(normalizedInput);
+        const allRules = dedupeRules(await loadRules(normalizedInput));
         const rules = allRules
             .filter(rule => {
                 const metadata = parseMetadata(rule.metadata);
                 if (metadata.enabled === false) return false;
                 if (safeMode && metadata.safe_mode === false) return false;
-                return true;
+                return ruleMatchesFingerprintScope(rule, observedFingerprints);
             })
             .slice(0, maxRules);
 
@@ -635,9 +665,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         let stopRequested = false;
+        let executedRuleCount = 0;
         await runWithConcurrency(
             scanTasks.map(({ target, rule }) => async () => {
                 if (stopRequested) return;
+                executedRuleCount += 1;
 
                 const result = await executeRule(target, rule, normalizedInput);
                 if (result.evidence) evidence.push(result.evidence);
@@ -668,7 +700,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 evidence,
                 summary: {
                     totalTargets: targets.length,
-                    executedRules: rules.length,
+                    executedRules: executedRuleCount,
                     matchedRules: findings.length,
                 },
                 surface_artifacts: {

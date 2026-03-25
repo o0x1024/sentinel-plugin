@@ -3,7 +3,7 @@
  * 
  * @plugin open_redirect_detector
  * @name Open Redirect Detector
- * @version 1.1.0
+ * @version 1.2.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity medium
@@ -163,6 +163,9 @@ const REDIRECT_PARAM_NAMES = [
     "u", "r", "l", "q",
 ];
 
+const DEFAULT_CONCURRENCY = 6;
+const MAX_CONCURRENCY = 20;
+
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
     let index = 0;
@@ -219,9 +222,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent redirect test cases",
-                default: 8,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 40
+                maximum: MAX_CONCURRENCY
             },
             followRedirects: {
                 type: "boolean",
@@ -334,7 +337,7 @@ function extractDomain(url: string): string {
  */
 function identifyRedirectParams(params: Record<string, string>, testAll: boolean): string[] {
     if (testAll) {
-        return Object.keys(params);
+        return [...new Set(Object.keys(params))];
     }
     
     const redirectParams: string[] = [];
@@ -355,7 +358,21 @@ function identifyRedirectParams(params: Record<string, string>, testAll: boolean
         }
     }
     
-    return redirectParams;
+    return [...new Set(redirectParams)];
+}
+
+function dedupeTypedPayloads(payloads: { payload: string; type: string }[]): { payload: string; type: string }[] {
+    const seen = new Set<string>();
+    const deduped: { payload: string; type: string }[] = [];
+
+    for (const payloadEntry of payloads) {
+        const payload = String(payloadEntry.payload || "").trim();
+        if (!payload || seen.has(payload)) continue;
+        seen.add(payload);
+        deduped.push({ payload, type: payloadEntry.type });
+    }
+
+    return deduped;
 }
 
 /**
@@ -400,7 +417,18 @@ function generatePayloads(targetDomain: string): { payload: string; type: string
         payloads.push({ payload: p.payload, type: "special" });
     }
     
-    return payloads;
+    return dedupeTypedPayloads(payloads);
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeout: number): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 /**
@@ -466,13 +494,11 @@ async function testPayload(
     };
     
     try {
-        const response = await fetch(testUrl, {
+        const response = await fetchWithTimeout(testUrl, {
             method: options.method,
             headers: options.headers,
             redirect: options.followRedirects ? "follow" : "manual",
-            // @ts-ignore
-            timeout: options.timeout,
-        });
+        }, options.timeout);
         
         result.responseCode = response.status;
         
@@ -546,7 +572,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || 8, 40));
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const followRedirects = input.followRedirects === true;
         const testAllParams = input.testAllParams === true;
         const originalDomain = extractDomain(input.url);
@@ -583,13 +609,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const payloads = generatePayloads(targetDomain);
         
         // Run tests
-        const tests: RedirectTest[] = [];
-        
-        const payloadTasks: Array<() => Promise<RedirectTest>> = [];
+        const compromisedParams = new Set<string>();
+        const payloadTasks: Array<() => Promise<RedirectTest | null>> = [];
         for (const param of paramsToTest) {
             for (const { payload, type } of payloads) {
                 payloadTasks.push(async () => {
-                    return await testPayload(
+                    if (compromisedParams.has(param)) return null;
+
+                    const result = await testPayload(
                         baseUrl,
                         params,
                         param,
@@ -597,10 +624,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         type,
                         { method, headers, timeout, followRedirects, originalDomain }
                     );
+
+                    if (result.vulnerable) {
+                        compromisedParams.add(param);
+                    }
+
+                    return result;
                 });
             }
         }
-        tests.push(...await runWithConcurrency(payloadTasks, concurrency));
+        const tests = (await runWithConcurrency(payloadTasks, concurrency))
+            .filter((test): test is RedirectTest => Boolean(test));
         
         // Build summary
         const vulnerableTests = tests.filter(t => t.vulnerable);

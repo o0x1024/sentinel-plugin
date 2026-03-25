@@ -3,7 +3,7 @@
  * 
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 2.0.0
+ * @version 3.1.0
  * @author Sentinel Team
  * @category discovery
  * @default_severity info
@@ -196,6 +196,10 @@ const SKIP_DOMAINS = new Set([
     "w3.org", "schema.org", "mozilla.org", "npmjs.com", "github.com",
 ]);
 
+const DEFAULT_CONCURRENCY = 20;
+const MAX_CONCURRENCY = 50;
+const MAX_FILE_ANALYSIS_CONCURRENCY = 8;
+
 /**
  * Export input schema
  */
@@ -259,10 +263,10 @@ export function get_input_schema() {
             },
             concurrency: {
                 type: "integer",
-                description: "Number of concurrent requests (default: 100)",
-                default: 100,
+                description: "Number of concurrent requests (default: 20, max: 50)",
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 200
+                maximum: MAX_CONCURRENCY
             }
         }
     };
@@ -278,23 +282,19 @@ async function executeConcurrently<T, R>(
     concurrency: number,
     executor: (item: T) => Promise<R>
 ): Promise<R[]> {
-    const results: R[] = [];
-    const executing: Promise<void>[] = [];
-    
-    for (const item of items) {
-        const promise = executor(item).then(result => {
-            results.push(result);
-        });
-        
-        executing.push(promise);
-        
-        if (executing.length >= concurrency) {
-            await Promise.race(executing);
-            executing.splice(executing.findIndex(p => p === promise), 1);
+    const results: R[] = new Array(items.length);
+    const workerCount = Math.max(1, Math.min(concurrency, items.length || 1));
+    let index = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < items.length) {
+            const currentIndex = index;
+            index++;
+            results[currentIndex] = await executor(items[currentIndex]);
         }
-    }
-    
-    await Promise.all(executing);
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -753,12 +753,12 @@ async function processSingleUrl(
     }
     
     // Limit number of files
-    const urlsToAnalyze = jsUrls.slice(0, options.maxFiles - files.length);
+    const urlsToAnalyze = [...new Set(jsUrls)].slice(0, options.maxFiles - files.length);
     
     // Analyze JS files with concurrency control
     const jsFileResults = await executeConcurrently(
         urlsToAnalyze,
-        options.concurrency,
+        Math.min(options.concurrency, MAX_FILE_ANALYSIS_CONCURRENCY),
         async (url) => {
             return await analyzeJsFile(url, {
                 timeout: options.timeout,
@@ -800,12 +800,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Normalize URLs
-        const baseUrls = targetUrls.map(url => {
+        const baseUrls = [...new Set(targetUrls.map(url => {
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
                 return `https://${url}`;
             }
             return url;
-        });
+        }))];
         
         const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -815,7 +815,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const extractDomainsFlag = input.extractDomains !== false;
         const followImports = input.followImports !== false;
         const maxFiles = input.maxFiles || 20;
-        const concurrency = input.concurrency || 100;
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         
         // Process each URL with concurrency control
         const allFilesArrays = await executeConcurrently(

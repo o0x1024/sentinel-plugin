@@ -3,7 +3,7 @@
  * 
  * @plugin ssrf_detector
  * @name SSRF Detector
- * @version 1.1.0
+ * @version 1.2.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity high
@@ -185,6 +185,9 @@ const SSRF_INDICATORS = [
     /Network is unreachable/i,
 ];
 
+const DEFAULT_CONCURRENCY = 6;
+const MAX_CONCURRENCY = 16;
+
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
     let index = 0;
@@ -245,9 +248,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent SSRF test cases",
-                default: 8,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 40
+                maximum: MAX_CONCURRENCY
             },
             callbackUrl: {
                 type: "string",
@@ -391,7 +394,37 @@ function identifyUrlParams(params: Record<string, string>): string[] {
         }
     }
     
-    return urlParams;
+    return [...new Set(urlParams)];
+}
+
+function dedupeTypedPayloads(payloads: { payload: string; type: string }[]): { payload: string; type: string }[] {
+    const seen = new Set<string>();
+    const deduped: { payload: string; type: string }[] = [];
+
+    for (const payloadEntry of payloads) {
+        const payload = String(payloadEntry.payload || "").trim();
+        if (!payload || seen.has(payload)) continue;
+        seen.add(payload);
+        deduped.push({ payload, type: payloadEntry.type });
+    }
+
+    return deduped;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeout: number): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+
+    try {
+        return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function hasStrongSsrfEvidence(test: SsrfTest): boolean {
+    if (!test.vulnerable || typeof test.evidence !== "string") return false;
+    return !test.evidence.toLowerCase().startsWith("slow response");
 }
 
 /**
@@ -414,13 +447,11 @@ async function testPayload(
     const startTime = performance.now();
     
     try {
-        const response = await fetch(testUrl, {
+        const response = await fetchWithTimeout(testUrl, {
             method: options.method,
             headers: options.headers,
             redirect: "follow",
-            // @ts-ignore
-            timeout: options.timeout,
-        });
+        }, options.timeout);
         
         const responseTime = Math.round(performance.now() - startTime);
         const responseText = await response.text();
@@ -482,7 +513,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || 8, 40));
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const testInternal = input.testInternal !== false;
         const testCloud = input.testCloud !== false;
         const testProtocols = input.testProtocols !== false;
@@ -555,14 +586,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             payloadsToTest.push({ payload: input.callbackUrl, type: "callback" });
         }
         
-        // Run tests
-        const tests: SsrfTest[] = [];
-        
-        const payloadTasks: Array<() => Promise<SsrfTest>> = [];
+        const dedupedPayloads = dedupeTypedPayloads(payloadsToTest);
+        const compromisedParams = new Set<string>();
+        const payloadTasks: Array<() => Promise<SsrfTest | null>> = [];
         for (const param of urlParamsToTest) {
-            for (const { payload, type } of payloadsToTest) {
+            for (const { payload, type } of dedupedPayloads) {
                 payloadTasks.push(async () => {
-                    return await testPayload(
+                    if (compromisedParams.has(param)) return null;
+
+                    const result = await testPayload(
                         baseUrl,
                         params,
                         param,
@@ -570,10 +602,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         type,
                         { method, headers, timeout }
                     );
+
+                    if (hasStrongSsrfEvidence(result)) {
+                        compromisedParams.add(param);
+                    }
+
+                    return result;
                 });
             }
         }
-        tests.push(...await runWithConcurrency(payloadTasks, concurrency));
+        const tests = (await runWithConcurrency(payloadTasks, concurrency))
+            .filter((test): test is SsrfTest => Boolean(test));
         
         // Build summary
         const vulnerableTests = tests.filter(t => t.vulnerable);

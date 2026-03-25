@@ -3,7 +3,7 @@
  * 
  * @plugin sql_injection_scanner
  * @name SQL Injection Scanner
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity critical
@@ -72,6 +72,10 @@ interface ToolOutput {
     };
     error?: string;
 }
+
+const DEFAULT_CONCURRENCY = 3;
+const MAX_CONCURRENCY = 8;
+const MAX_BASELINE_CONCURRENCY = 4;
 
 // SQL error patterns by database type
 const SQL_ERROR_PATTERNS: Record<string, RegExp[]> = {
@@ -313,9 +317,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent requests",
-                default: 3,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 10
+                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -653,8 +657,16 @@ async function loadPayloads(
     if (testUnion !== false) {
         payloads.push(...filterByDb(SQLI_PAYLOADS.union_based));
     }
-    
-    return payloads;
+
+    const uniquePayloads = new Map<string, { payload: string; technique: string; dbType?: string }>();
+    for (const payload of payloads) {
+        const key = `${payload.technique}:${payload.dbType || "generic"}:${payload.payload}`;
+        if (!uniquePayloads.has(key)) {
+            uniquePayloads.set(key, payload);
+        }
+    }
+
+    return Array.from(uniquePayloads.values());
 }
 
 /**
@@ -679,7 +691,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const method = (input.method || "GET").toUpperCase();
         const timeout = input.timeout || 15000;
-        const concurrency = input.concurrency || 3;
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const contentType = input.contentType || "application/x-www-form-urlencoded";
         const timeThreshold = input.timeThreshold || 5000;
@@ -708,45 +720,50 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const tests: SqliTest[] = [];
         const vulnerableParams = new Set<string>();
         const detectedDbTypes = new Set<string>();
+        const compromisedParams = new Set<string>();
         
         // Get baseline response for each parameter
         const baselines = new Map<string, { body: string; time: number }>();
-        
-        for (const [paramName, { value, location }] of params) {
-            try {
-                let testUrl = baseUrl;
-                let testBody = input.body;
-                
-                if (location === "query" || location === "provided") {
-                    testUrl = buildTestUrl(baseUrl, paramName, value);
+
+        await runWithConcurrency(
+            Array.from(params.entries()).map(([paramName, { value, location }]) => async () => {
+                try {
+                    let testUrl = baseUrl;
+                    let testBody = input.body;
+
+                    if (location === "query" || location === "provided") {
+                        testUrl = buildTestUrl(baseUrl, paramName, value);
+                    }
+
+                    const headers: Record<string, string> = {
+                        "User-Agent": userAgent,
+                        "Accept": "*/*",
+                        ...input.headers,
+                    };
+
+                    if (method !== "GET" && testBody) {
+                        headers["Content-Type"] = contentType;
+                    }
+
+                    const startReq = performance.now();
+                    const response = await fetch(testUrl, {
+                        method,
+                        headers,
+                        body: method !== "GET" ? testBody : undefined,
+                        // @ts-ignore
+                        timeout,
+                    });
+                    const baselineTime = Math.round(performance.now() - startReq);
+                    const body = await response.text();
+
+                    baselines.set(paramName, { body, time: baselineTime });
+                } catch {
+                    // Ignore baseline errors
                 }
-                
-                const headers: Record<string, string> = {
-                    "User-Agent": userAgent,
-                    "Accept": "*/*",
-                    ...input.headers,
-                };
-                
-                if (method !== "GET" && testBody) {
-                    headers["Content-Type"] = contentType;
-                }
-                
-                const startReq = performance.now();
-                const response = await fetch(testUrl, {
-                    method,
-                    headers,
-                    body: method !== "GET" ? testBody : undefined,
-                    // @ts-ignore
-                    timeout,
-                });
-                const baselineTime = Math.round(performance.now() - startReq);
-                const body = await response.text();
-                
-                baselines.set(paramName, { body, time: baselineTime });
-            } catch {
-                // Ignore baseline errors
-            }
-        }
+                return null;
+            }),
+            Math.min(concurrency, MAX_BASELINE_CONCURRENCY),
+        );
         
         // Create test tasks
         const tasks: (() => Promise<SqliTest | null>)[] = [];
@@ -756,6 +773,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             
             for (const { payload, technique, dbType } of payloads) {
                 tasks.push(async () => {
+                    if (compromisedParams.has(paramName)) {
+                        return null;
+                    }
+
                     const testStart = performance.now();
                     
                     try {
@@ -796,6 +817,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         if (technique === "error" || technique === "custom" || technique === "dictionary") {
                             const errorResult = detectSqlError(body);
                             if (errorResult.detected) {
+                                compromisedParams.add(paramName);
                                 return {
                                     parameter: paramName,
                                     location,
@@ -816,6 +838,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         if (technique === "time-based" && baseline) {
                             const timeDiff = responseTime - baseline.time;
                             if (timeDiff >= timeThreshold - 1000) {
+                                compromisedParams.add(paramName);
                                 return {
                                     parameter: paramName,
                                     location,
@@ -848,6 +871,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     } catch (e: any) {
                         // Timeout might indicate time-based SQLi
                         if (technique === "time-based" && e.message?.includes("timeout")) {
+                            compromisedParams.add(paramName);
                             return {
                                 parameter: paramName,
                                 location,

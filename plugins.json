@@ -1,6 +1,6 @@
 {
-  "version": "2.3.0",
-  "updated_at": "2026-03-23",
+  "version": "2.3.4",
+  "updated_at": "2026-03-25",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -77,11 +77,11 @@
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Comprehensive subdomain enumeration using 52 data sources including certificate transparency (crt.sh, Censys, CertSpotter), threat intelligence (VirusTotal, AlienVault, ThreatMiner, RiskIQ), datasets (SecurityTrails, Shodan, BeVigil, BinaryEdge, FullHunt), search engines (GitHub, FOFA, Hunter, Quake, ZoomEye), and passive DNS sources. Supports API authentication for premium sources.",
+      "description": "Comprehensive subdomain enumeration using 50 data sources with effective request timeouts, lightweight retry handling for transient failures, worker-pool concurrency, and automatic skipping of unconfigured premium sources in default mode.",
       "default_severity": "info",
       "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint", "certificate-transparency", "threat-intelligence", "passive-dns", "api"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_enumerator.ts"
@@ -149,11 +149,11 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
-      "description": "Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, structured evidence, and configurable concurrent target-rule scanning",
+      "description": "Execute safe dictionary-driven verification rules with deduplicated rule loading, fingerprint-scope prefiltering, bounded concurrent target-rule scanning, and corrected executed-task accounting",
       "default_severity": "medium",
       "tags": ["risk", "poc", "verification", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/risk_scanner.ts"
@@ -185,11 +185,11 @@
     {
       "id": "directory_bruteforcer",
       "name": "Directory Bruteforcer",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "discovery",
-      "description": "Discover hidden directories, files, and endpoints on web servers using wordlist-based brute forcing",
+      "description": "Discover hidden directories, files, and endpoints on web servers with deduplicated word/path queues, normalized extension handling, and bounded request concurrency",
       "default_severity": "info",
       "tags": ["directory", "bruteforce", "discovery", "fuzzing", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/directory_bruteforcer.ts"
@@ -197,11 +197,11 @@
     {
       "id": "js_analyzer",
       "name": "JavaScript Analyzer",
-      "version": "3.0.0",
+      "version": "3.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "discovery",
-      "description": "Analyze JavaScript files using AST parsing (acorn) to extract all string literals, then identify API endpoints, secrets, and sensitive data with high accuracy",
+      "description": "Analyze JavaScript files using AST parsing to extract literals, API endpoints, secrets, and domains with lower default concurrency, deduplicated target queues, and bounded nested file-analysis concurrency",
       "default_severity": "info",
       "tags": ["javascript", "endpoint", "api", "discovery", "secrets", "ast"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/js_analyzer.ts"
@@ -209,11 +209,11 @@
     {
       "id": "ssrf_detector",
       "name": "SSRF Detector",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect Server-Side Request Forgery (SSRF) vulnerabilities by testing URL parameters with various payloads using configurable concurrent test execution",
+      "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, real abortable request timeouts, and strong-signal parameter early stop under bounded concurrency",
       "default_severity": "high",
       "tags": ["ssrf", "vulnerability", "security", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/ssrf_detector.ts"
@@ -221,11 +221,11 @@
     {
       "id": "subdomain_takeover",
       "name": "Subdomain Takeover Detector",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect potential subdomain takeover vulnerabilities by checking DNS records and service fingerprints",
+      "description": "Detect potential subdomain takeover vulnerabilities with deduplicated targets, bounded concurrency, and single-fetch HTTP fingerprint evaluation instead of repeated per-service probing",
       "default_severity": "high",
       "tags": ["subdomain", "takeover", "dns", "vulnerability", "security"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_takeover.ts"
@@ -245,11 +245,11 @@
     {
       "id": "open_redirect_detector",
       "name": "Open Redirect Detector",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect open redirect vulnerabilities by testing URL parameters with various redirect payloads using configurable concurrent test execution",
+      "description": "Detect open redirects with deduplicated payloads, abortable request timeouts, bounded concurrency, and parameter-level early stop after confirmed redirect findings",
       "default_severity": "medium",
       "tags": ["redirect", "vulnerability", "security", "web", "phishing"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/open_redirect_detector.ts"
@@ -257,11 +257,11 @@
     {
       "id": "xss_scanner",
       "name": "XSS Scanner",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Active XSS vulnerability scanner that tests URL parameters, form fields, and headers with various payloads including reflected, DOM-based, and filter bypass techniques",
+      "description": "Active XSS vulnerability scanner with deduplicated payload sets, bounded concurrency, and parameter-level early stop after a reflected hit to cut redundant requests",
       "default_severity": "high",
       "tags": ["xss", "cross-site-scripting", "vulnerability", "security", "web", "owasp"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/xss_scanner.ts"
@@ -269,11 +269,11 @@
     {
       "id": "sql_injection_scanner",
       "name": "SQL Injection Scanner",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Active SQL injection vulnerability scanner that tests parameters with error-based, blind boolean, time-based, and UNION-based techniques for MySQL, PostgreSQL, MSSQL, Oracle, and SQLite",
+      "description": "Active SQL injection scanner with concurrent baseline collection, deduplicated payload sets, bounded concurrency, and parameter-level early stop after a confirmed signal",
       "default_severity": "critical",
       "tags": ["sqli", "sql-injection", "vulnerability", "security", "web", "owasp", "database"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sql_injection_scanner.ts"
@@ -317,11 +317,11 @@
     {
       "id": "port_monitor",
       "name": "Port Monitor",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
-      "description": "Monitor hosts for port/service changes, detecting newly opened ports, closed ports, and service changes, generating ChangeEvents for workflow automation",
+      "description": "Monitor hosts for port/service changes with deduplicated target/port queues, fixed worker-pool concurrency, and bounded multi-target scanning",
       "default_severity": "medium",
       "tags": ["port", "service", "monitor", "change-detection", "scan"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/port_monitor.ts"
@@ -329,11 +329,11 @@
     {
       "id": "js_link_finder",
       "name": "JS Link Finder",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "discovery",
-      "description": "Find and collect all JavaScript file URLs from a web page, including external scripts, inline scripts, ES modules, webpack chunks, and source maps",
+      "description": "Find and collect JavaScript file URLs from web pages with lower default concurrency, worker-pool scheduling, deduplicated targets, and bounded manifest/source-map follow-up fetching",
       "default_severity": "info",
       "tags": ["javascript", "discovery", "links", "crawler", "web", "reconnaissance"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/js_link_finder.ts"

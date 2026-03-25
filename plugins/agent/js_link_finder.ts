@@ -3,7 +3,7 @@
  * 
  * @plugin js_link_finder
  * @name JS Link Finder
- * @version 2.0.0
+ * @version 2.1.0
  * @author Sentinel Team
  * @category discovery
  * @default_severity info
@@ -118,7 +118,7 @@ function get_input_schema() {
             },
             concurrency: {
                 type: "number",
-                description: "Number of concurrent requests (default: 100)"
+                description: "Number of concurrent requests (default: 24, max: 50)"
             }
         }
     };
@@ -177,7 +177,10 @@ function get_output_schema() {
 const DEFAULT_TIMEOUT = 15000;
 const DEFAULT_MAX_FILES = 100;
 const DEFAULT_MAX_DEPTH = 2;
-const DEFAULT_CONCURRENCY = 100;
+const DEFAULT_CONCURRENCY = 24;
+const MAX_CONCURRENCY = 50;
+const DEFAULT_MANIFEST_CONCURRENCY = 3;
+const DEFAULT_SOURCE_ANALYSIS_CONCURRENCY = 4;
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /**
@@ -188,23 +191,19 @@ async function executeConcurrently<T, R>(
     concurrency: number,
     executor: (item: T) => Promise<R>
 ): Promise<R[]> {
-    const results: R[] = [];
-    const executing: Promise<void>[] = [];
-    
-    for (const item of items) {
-        const promise = executor(item).then(result => {
-            results.push(result);
-        });
-        
-        executing.push(promise);
-        
-        if (executing.length >= concurrency) {
-            await Promise.race(executing);
-            executing.splice(executing.findIndex(p => p === promise), 1);
+    const results: R[] = new Array(items.length);
+    const workerCount = Math.max(1, Math.min(concurrency, items.length || 1));
+    let index = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < items.length) {
+            const currentIndex = index;
+            index++;
+            results[currentIndex] = await executor(items[currentIndex]);
         }
-    }
-    
-    await Promise.all(executing);
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -713,11 +712,20 @@ async function scanSingleUrl(
     // 5. Probe SPA manifests
     if (probeSpaManifests && urlLinks.length < maxFiles) {
         const manifestUrls = getManifestUrls(baseUrl);
-        for (const manifestUrl of manifestUrls) {
-            const manifestResult = await fetchWithTimeout(manifestUrl, timeout, userAgent);
+        const manifestResults = await executeConcurrently(
+            manifestUrls,
+            Math.min(DEFAULT_MANIFEST_CONCURRENCY, manifestUrls.length || 1),
+            async (manifestUrl) => ({
+                manifestUrl,
+                manifestResult: await fetchWithTimeout(manifestUrl, timeout, userAgent),
+            })
+        );
+
+        for (const { manifestUrl, manifestResult } of manifestResults) {
             if (manifestResult && manifestResult.contentType.includes('json')) {
                 const manifestLinks = parseManifest(manifestResult.text, manifestUrl);
                 for (const link of manifestLinks) {
+                    if (urlLinks.length >= maxFiles) break;
                     if (!globalSeenUrls.has(link.url)) {
                         if (!includeSameOriginOnly || isSameOrigin(baseUrl, link.url)) {
                             globalSeenUrls.add(link.url);
@@ -734,16 +742,25 @@ async function scanSingleUrl(
         const externalLinks = urlLinks.filter(l => 
             l.type === 'external' || l.type === 'module' || l.type === 'webpack'
         ).slice(0, 10);
-        
-        for (const link of externalLinks) {
+
+        const externalResults = await executeConcurrently(
+            externalLinks,
+            Math.min(DEFAULT_SOURCE_ANALYSIS_CONCURRENCY, externalLinks.length || 1),
+            async (link) => ({
+                link,
+                jsResult: await fetchWithTimeout(link.url, timeout, userAgent),
+            })
+        );
+
+        for (const { link, jsResult } of externalResults) {
             if (urlLinks.length >= maxFiles) break;
-            
-            const jsResult = await fetchWithTimeout(link.url, timeout, userAgent);
+
             if (jsResult) {
                 link.size = jsResult.size;
-                
+
                 const jsLinks = extractJsFromContent(jsResult.text, link.url);
                 for (const jsLink of jsLinks) {
+                    if (urlLinks.length >= maxFiles) break;
                     if (!globalSeenUrls.has(jsLink.url)) {
                         if (!includeSameOriginOnly || isSameOrigin(baseUrl, jsLink.url)) {
                             globalSeenUrls.add(jsLink.url);
@@ -783,6 +800,7 @@ async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         // Parse config
+        targetUrls = [...new Set(targetUrls)];
         const timeout = (input.timeout && input.timeout > 0) ? input.timeout : DEFAULT_TIMEOUT;
         const userAgent = input.userAgent || DEFAULT_USER_AGENT;
         const recursive = input.recursive === true;
@@ -792,7 +810,13 @@ async function analyze(input: ToolInput): Promise<ToolOutput> {
         const includeInline = input.includeInline !== false;
         const followSourceMaps = input.followSourceMaps !== false;
         const probeSpaManifests = input.probeSpaManifests !== false;
-        const concurrency = (input.concurrency && input.concurrency > 0) ? input.concurrency : DEFAULT_CONCURRENCY;
+        const concurrency = Math.max(
+            1,
+            Math.min(
+                (input.concurrency && input.concurrency > 0) ? input.concurrency : DEFAULT_CONCURRENCY,
+                MAX_CONCURRENCY
+            )
+        );
         
         // Global deduplication across all URLs
         const globalSeenUrls = new Set<string>();

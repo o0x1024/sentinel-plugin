@@ -3,7 +3,7 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.1.0
+ * @version 1.2.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
@@ -123,6 +123,10 @@ const HIGH_RISK_PORTS = new Set([
     21, 22, 23, 25, 135, 139, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 27017
 ]);
 
+const DEFAULT_CONCURRENCY = 10;
+const MAX_CONCURRENCY = 30;
+const MAX_TARGET_CONCURRENCY = 4;
+
 // Generate UUID
 function generateId(): string {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -169,28 +173,19 @@ async function runWithConcurrency<T>(
     tasks: (() => Promise<T>)[],
     concurrency: number
 ): Promise<T[]> {
-    const results: T[] = [];
-    const executing: Promise<void>[] = [];
-    
-    for (const task of tasks) {
-        const p = task().then(result => {
-            results.push(result);
-        });
-        executing.push(p);
-        
-        if (executing.length >= concurrency) {
-            await Promise.race(executing);
-            // Remove completed promises
-            for (let i = executing.length - 1; i >= 0; i--) {
-                // @ts-ignore - check if promise is settled
-                if (executing[i].settled) {
-                    executing.splice(i, 1);
-                }
-            }
+    const results: T[] = new Array(tasks.length);
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    let index = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const currentIndex = index;
+            index++;
+            results[currentIndex] = await tasks[currentIndex]();
         }
-    }
-    
-    await Promise.all(executing);
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -222,9 +217,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent port checks",
-                default: 10,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 50
+                maximum: MAX_CONCURRENCY
             },
             detectService: {
                 type: "boolean",
@@ -410,7 +405,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Filter out empty strings
-        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        const validTargets = [...new Set(input.targets.filter(t => typeof t === 'string' && t.trim().length > 0))];
         if (validTargets.length === 0) {
             return {
                 success: false,
@@ -418,9 +413,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const ports = input.ports || COMMON_PORTS;
+        const ports = [...new Set(input.ports || COMMON_PORTS)].sort((left, right) => left - right);
         const timeout = input.timeout || 3000;
-        const concurrency = input.concurrency || 10;
+        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
+        const targetConcurrency = Math.max(1, Math.min(MAX_TARGET_CONCURRENCY, validTargets.length, concurrency));
         const detectService = input.detectService !== false;
         const previousSnapshots = input.previousSnapshots || {};
         
@@ -435,7 +431,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let portsClosed = 0;
         let serviceChangesCount = 0;
         
-        for (const target of validTargets) {
+        await runWithConcurrency(validTargets.map((target) => async () => {
             // Parse host from target (could be IP, hostname, or URL)
             let host = target;
             try {
@@ -606,7 +602,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             
             results.push(result);
-        }
+            return null;
+        }), targetConcurrency);
         
         return {
             success: true,
