@@ -3,7 +3,7 @@
  * 
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity high
@@ -26,6 +26,7 @@ interface ToolInput {
     targets: string[];  // Base URLs or JS files to analyze
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     crawlDepth?: number;
     includeGraphQL?: boolean;
     includeOpenAPI?: boolean;
@@ -98,6 +99,20 @@ function generateId(): string {
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
     });
+}
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
 }
 
 // API endpoint patterns
@@ -282,6 +297,13 @@ export function get_input_schema() {
                 type: "string",
                 description: "Custom User-Agent header"
             },
+            concurrency: {
+                type: "integer",
+                description: "Number of targets to scan concurrently",
+                default: 5,
+                minimum: 1,
+                maximum: 20
+            },
             crawlDepth: {
                 type: "integer",
                 description: "Depth to crawl for JS files",
@@ -377,6 +399,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const concurrency = Math.max(1, Math.min(input.concurrency || 5, 20));
         const crawlDepth = input.crawlDepth ?? 1;
         const includeGraphQL = input.includeGraphQL !== false;
         const includeOpenAPI = input.includeOpenAPI !== false;
@@ -393,7 +416,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let removedEndpointsCount = 0;
         let apiChanges = 0;
         
-        for (const target of validTargets) {
+        const targetTasks = validTargets.map((target) => async () => {
             let baseUrl = target;
             if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
                 baseUrl = `https://${baseUrl}`;
@@ -424,7 +447,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     result.error = `HTTP ${response.status}`;
                     failedChecks++;
                     results.push(result);
-                    continue;
+                    return;
                 }
                 
                 const html = await response.text();
@@ -443,92 +466,104 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 // Extract and analyze external JS files
                 if (crawlDepth > 0) {
                     const scriptUrls = extractScriptUrls(html, baseUrl);
-                    for (const scriptUrl of scriptUrls.slice(0, 20)) {
-                        try {
-                            const jsResponse = await fetch(scriptUrl, {
-                                method: "GET",
-                                headers: { "User-Agent": userAgent },
-                                // @ts-ignore
-                                timeout,
-                            });
-                            
-                            if (jsResponse.ok) {
-                                const jsContent = await jsResponse.text();
-                                const source = scriptUrl.split("/").pop() || scriptUrl;
-                                const endpoints = extractApisFromJs(jsContent, source);
-                                allEndpoints.push(...endpoints);
+                    await runWithConcurrency(
+                        scriptUrls.slice(0, 20).map((scriptUrl) => async () => {
+                            try {
+                                const jsResponse = await fetch(scriptUrl, {
+                                    method: "GET",
+                                    headers: { "User-Agent": userAgent },
+                                    // @ts-ignore
+                                    timeout,
+                                });
+
+                                if (jsResponse.ok) {
+                                    const jsContent = await jsResponse.text();
+                                    const source = scriptUrl.split("/").pop() || scriptUrl;
+                                    const endpoints = extractApisFromJs(jsContent, source);
+                                    allEndpoints.push(...endpoints);
+                                }
+                            } catch {
+                                // Skip failed JS files
                             }
-                        } catch {
-                            // Skip failed JS files
-                        }
-                    }
+                        }),
+                        concurrency,
+                    );
                 }
                 
                 // Check common API paths
                 const urlObj = new URL(baseUrl);
-                for (const path of COMMON_API_PATHS) {
-                    try {
-                        const apiUrl = `${urlObj.origin}${path}`;
-                        const apiResponse = await fetch(apiUrl, {
-                            method: "GET",
-                            headers: {
-                                "User-Agent": userAgent,
-                                "Accept": "application/json,*/*",
-                            },
-                            // @ts-ignore
-                            timeout: 5000,
-                        });
-                        
-                        if (apiResponse.ok) {
-                            allEndpoints.push({
-                                path,
-                                source: "probe",
-                            });
-                            
-                            // Check for OpenAPI spec
-                            if (includeOpenAPI && (path.includes("swagger") || path.includes("openapi"))) {
-                                const specContent = await apiResponse.text();
-                                if (specContent.includes("openapi") || specContent.includes("swagger")) {
-                                    openApiSpec = apiUrl;
-                                }
-                            }
-                        }
-                    } catch {
-                        // Path doesn't exist
-                    }
-                }
-                
-                // Check GraphQL
-                if (includeGraphQL) {
-                    for (const gqlPath of ["/graphql", "/gql", "/api/graphql"]) {
+                await runWithConcurrency(
+                    COMMON_API_PATHS.map((path) => async () => {
                         try {
-                            const gqlUrl = `${urlObj.origin}${gqlPath}`;
-                            const gqlResponse = await fetch(gqlUrl, {
-                                method: "POST",
+                            const apiUrl = `${urlObj.origin}${path}`;
+                            const apiResponse = await fetch(apiUrl, {
+                                method: "GET",
                                 headers: {
                                     "User-Agent": userAgent,
-                                    "Content-Type": "application/json",
+                                    "Accept": "application/json,*/*",
                                 },
-                                body: JSON.stringify({ query: "{ __typename }" }),
                                 // @ts-ignore
                                 timeout: 5000,
                             });
-                            
-                            if (gqlResponse.ok) {
-                                const gqlResult = await gqlResponse.text();
-                                if (gqlResult.includes("__typename") || gqlResult.includes("data")) {
-                                    graphqlEndpoint = gqlPath;
-                                    allEndpoints.push({
-                                        path: gqlPath,
-                                        method: "POST",
-                                        source: "graphql-probe",
-                                    });
-                                    break;
+
+                            if (apiResponse.ok) {
+                                allEndpoints.push({
+                                    path,
+                                    source: "probe",
+                                });
+
+                                if (includeOpenAPI && !openApiSpec && (path.includes("swagger") || path.includes("openapi"))) {
+                                    const specContent = await apiResponse.text();
+                                    if (specContent.includes("openapi") || specContent.includes("swagger")) {
+                                        openApiSpec = apiUrl;
+                                    }
                                 }
                             }
                         } catch {
-                            // GraphQL not available
+                            // Path doesn't exist
                         }
+                    }),
+                    concurrency,
+                );
+                
+                // Check GraphQL
+                if (includeGraphQL) {
+                    const graphqlMatches = await runWithConcurrency(
+                        ["/graphql", "/gql", "/api/graphql"].map((gqlPath) => async () => {
+                            try {
+                                const gqlUrl = `${urlObj.origin}${gqlPath}`;
+                                const gqlResponse = await fetch(gqlUrl, {
+                                    method: "POST",
+                                    headers: {
+                                        "User-Agent": userAgent,
+                                        "Content-Type": "application/json",
+                                    },
+                                    body: JSON.stringify({ query: "{ __typename }" }),
+                                    // @ts-ignore
+                                    timeout: 5000,
+                                });
+
+                                if (!gqlResponse.ok) return null;
+                                const gqlResult = await gqlResponse.text();
+                                if (gqlResult.includes("__typename") || gqlResult.includes("data")) {
+                                    return gqlPath;
+                                }
+                            } catch {
+                                // GraphQL not available
+                            }
+                            return null;
+                        }),
+                        concurrency,
+                    );
+
+                    const discoveredGraphql = graphqlMatches.find((value): value is string => Boolean(value));
+                    if (discoveredGraphql) {
+                        graphqlEndpoint = discoveredGraphql;
+                        allEndpoints.push({
+                            path: discoveredGraphql,
+                            method: "POST",
+                            source: "graphql-probe",
+                        });
                     }
                 }
                 
@@ -693,7 +728,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             
             results.push(result);
-        }
+        });
+
+        await runWithConcurrency(targetTasks, concurrency);
         
         return {
             success: true,

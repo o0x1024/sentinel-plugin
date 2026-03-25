@@ -3,7 +3,7 @@
  * 
  * @plugin ssrf_detector
  * @name SSRF Detector
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity high
@@ -19,6 +19,7 @@ interface ToolInput {
     body?: string;
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     callbackUrl?: string;
     testInternal?: boolean;
     testCloud?: boolean;
@@ -184,6 +185,20 @@ const SSRF_INDICATORS = [
     /Network is unreachable/i,
 ];
 
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
 /**
  * Export input schema
  */
@@ -226,6 +241,13 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
+            },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent SSRF test cases",
+                default: 8,
+                minimum: 1,
+                maximum: 40
             },
             callbackUrl: {
                 type: "string",
@@ -460,6 +482,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const concurrency = Math.max(1, Math.min(input.concurrency || 8, 40));
         const testInternal = input.testInternal !== false;
         const testCloud = input.testCloud !== false;
         const testProtocols = input.testProtocols !== false;
@@ -535,24 +558,22 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         // Run tests
         const tests: SsrfTest[] = [];
         
+        const payloadTasks: Array<() => Promise<SsrfTest>> = [];
         for (const param of urlParamsToTest) {
             for (const { payload, type } of payloadsToTest) {
-                const result = await testPayload(
-                    baseUrl,
-                    params,
-                    param,
-                    payload,
-                    type,
-                    { method, headers, timeout }
-                );
-                tests.push(result);
-                
-                // If we found a vulnerability, we can reduce testing
-                if (result.vulnerable) {
-                    // Still test a few more payloads to gather evidence
-                }
+                payloadTasks.push(async () => {
+                    return await testPayload(
+                        baseUrl,
+                        params,
+                        param,
+                        payload,
+                        type,
+                        { method, headers, timeout }
+                    );
+                });
             }
         }
+        tests.push(...await runWithConcurrency(payloadTasks, concurrency));
         
         // Build summary
         const vulnerableTests = tests.filter(t => t.vulnerable);

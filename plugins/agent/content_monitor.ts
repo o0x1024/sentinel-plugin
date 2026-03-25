@@ -3,7 +3,7 @@
  * 
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity low
@@ -15,6 +15,7 @@ interface ToolInput {
     targets: string[];  // List of URLs to monitor
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     includeHeaders?: boolean;
     excludePatterns?: string[];  // Patterns to exclude from hash (e.g., timestamps)
     previousSnapshots?: Record<string, ContentSnapshot>;
@@ -80,6 +81,20 @@ function generateId(): string {
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
     });
+}
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
 }
 
 // Calculate content hash
@@ -185,6 +200,13 @@ export function get_input_schema() {
                 type: "string",
                 description: "Custom User-Agent header"
             },
+            concurrency: {
+                type: "integer",
+                description: "Number of targets to monitor concurrently",
+                default: 5,
+                minimum: 1,
+                maximum: 20
+            },
             includeHeaders: {
                 type: "boolean",
                 description: "Include response headers in snapshot",
@@ -273,6 +295,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const concurrency = Math.max(1, Math.min(input.concurrency || 5, 20));
         const includeHeaders = input.includeHeaders || false;
         const excludePatterns = input.excludePatterns || [];
         const previousSnapshots = input.previousSnapshots || {};
@@ -287,7 +310,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let statusChanges = 0;
         let newPages = 0;
         
-        for (const target of validTargets) {
+        const targetTasks = validTargets.map((target) => async () => {
             let url = target;
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
                 url = `https://${url}`;
@@ -471,7 +494,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             
             results.push(result);
-        }
+        });
+
+        await runWithConcurrency(targetTasks, concurrency);
         
         return {
             success: true,

@@ -3,7 +3,7 @@
  * 
  * @plugin open_redirect_detector
  * @name Open Redirect Detector
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity medium
@@ -18,6 +18,7 @@ interface ToolInput {
     headers?: Record<string, string>;
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     followRedirects?: boolean;
     targetDomain?: string;
     testAllParams?: boolean;
@@ -162,6 +163,20 @@ const REDIRECT_PARAM_NAMES = [
     "u", "r", "l", "q",
 ];
 
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
 /**
  * Export input schema
  */
@@ -200,6 +215,13 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
+            },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent redirect test cases",
+                default: 8,
+                minimum: 1,
+                maximum: 40
             },
             followRedirects: {
                 type: "boolean",
@@ -524,6 +546,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const concurrency = Math.max(1, Math.min(input.concurrency || 8, 40));
         const followRedirects = input.followRedirects === true;
         const testAllParams = input.testAllParams === true;
         const originalDomain = extractDomain(input.url);
@@ -562,24 +585,22 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         // Run tests
         const tests: RedirectTest[] = [];
         
+        const payloadTasks: Array<() => Promise<RedirectTest>> = [];
         for (const param of paramsToTest) {
             for (const { payload, type } of payloads) {
-                const result = await testPayload(
-                    baseUrl,
-                    params,
-                    param,
-                    payload,
-                    type,
-                    { method, headers, timeout, followRedirects, originalDomain }
-                );
-                tests.push(result);
-                
-                // If we found a high severity vulnerability, we can skip some tests
-                if (result.vulnerable && result.severity === "high") {
-                    // Still test a few more to gather evidence
-                }
+                payloadTasks.push(async () => {
+                    return await testPayload(
+                        baseUrl,
+                        params,
+                        param,
+                        payload,
+                        type,
+                        { method, headers, timeout, followRedirects, originalDomain }
+                    );
+                });
             }
         }
+        tests.push(...await runWithConcurrency(payloadTasks, concurrency));
         
         // Build summary
         const vulnerableTests = tests.filter(t => t.vulnerable);

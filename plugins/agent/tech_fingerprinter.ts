@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.0.0
+ * @version 2.1.0
  * @author Sentinel Team
  * @category recon
  * @default_severity info
@@ -27,6 +27,7 @@ interface ToolInput {
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     maxTargets?: number;
 }
 
@@ -151,6 +152,7 @@ export function get_input_schema() {
             dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
             timeout: { type: "integer", default: 10000, minimum: 1000, maximum: 60000 },
             userAgent: { type: "string", default: "Sentinel-Tech-Fingerprinter/2.0" },
+            concurrency: { type: "integer", default: 5, minimum: 1, maximum: 20 },
             maxTargets: { type: "integer", default: 20, minimum: 1, maximum: 200 },
         },
     };
@@ -177,6 +179,20 @@ export function get_output_schema() {
 
 globalThis.get_input_schema = get_input_schema;
 globalThis.get_output_schema = get_output_schema;
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
 
 function normalizeTarget(raw?: string): string | null {
     if (!raw || typeof raw !== "string") return null;
@@ -320,6 +336,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         const timeout = Number(input.timeout || 10000);
         const userAgent = input.userAgent || "Sentinel-Tech-Fingerprinter/2.0";
+        const concurrency = Math.max(1, Math.min(Number(input.concurrency || 5), 20));
         const targets = Array.from(new Set([
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
@@ -334,51 +351,54 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const results: PerTargetResult[] = [];
         const fingerprints: any[] = [];
 
-        for (const target of targets) {
-            try {
-                const response = await fetchWithTimeout(target, timeout, userAgent);
-                const body = await response.text();
-                const headers: Record<string, string> = {};
-                response.headers.forEach((value, key) => { headers[String(key).toLowerCase()] = value; });
-                const ctx = {
-                    status: response.status,
-                    headers,
-                    body,
-                    title: parseTitle(body),
-                };
+        await runWithConcurrency(
+            targets.map((target) => async () => {
+                try {
+                    const response = await fetchWithTimeout(target, timeout, userAgent);
+                    const body = await response.text();
+                    const headers: Record<string, string> = {};
+                    response.headers.forEach((value, key) => { headers[String(key).toLowerCase()] = value; });
+                    const ctx = {
+                        status: response.status,
+                        headers,
+                        body,
+                        title: parseTitle(body),
+                    };
 
-                const technologies = rules
-                    .filter(rule => ruleMatched(ctx, parseMetadata(rule.metadata)))
-                    .map(rule => {
-                        const metadata = parseMetadata(rule.metadata);
-                        const tech = {
-                            name: metadata.name || rule.word,
-                            category: rule.category || "technology",
-                            version: extractVersion(ctx, metadata),
-                            confidence: Math.round(Number(metadata.confidence || 0.8) * 100),
-                            evidence: [`matched:${rule.word}`],
-                        };
+                    const technologies = rules
+                        .filter(rule => ruleMatched(ctx, parseMetadata(rule.metadata)))
+                        .map(rule => {
+                            const metadata = parseMetadata(rule.metadata);
+                            const tech = {
+                                name: metadata.name || rule.word,
+                                category: rule.category || "technology",
+                                version: extractVersion(ctx, metadata),
+                                confidence: Math.round(Number(metadata.confidence || 0.8) * 100),
+                                evidence: [`matched:${rule.word}`],
+                            };
 
-                        fingerprints.push({
-                            asset_type: "web",
-                            asset_key: target,
-                            fingerprint_type: "technology",
-                            fingerprint_key: rule.word,
-                            fingerprint_value: tech.name,
-                            version: tech.version,
-                            confidence: tech.confidence,
-                            source: "tech_fingerprinter",
-                            web_key: target,
+                            fingerprints.push({
+                                asset_type: "web",
+                                asset_key: target,
+                                fingerprint_type: "technology",
+                                fingerprint_key: rule.word,
+                                fingerprint_value: tech.name,
+                                version: tech.version,
+                                confidence: tech.confidence,
+                                source: "tech_fingerprinter",
+                                web_key: target,
+                            });
+
+                            return tech;
                         });
 
-                        return tech;
-                    });
-
-                results.push({ url: target, technologies });
-            } catch {
-                results.push({ url: target, technologies: [] });
-            }
-        }
+                    results.push({ url: target, technologies });
+                } catch {
+                    results.push({ url: target, technologies: [] });
+                }
+            }),
+            concurrency,
+        );
 
         return {
             success: true,

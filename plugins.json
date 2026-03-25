@@ -125,11 +125,11 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Identify web technologies using dictionary-driven fingerprint rules with structured matchers and version extraction",
+      "description": "Identify web technologies using dictionary-driven fingerprint rules with structured matchers, version extraction, and configurable concurrent target scanning",
       "default_severity": "info",
       "tags": ["fingerprint", "technology", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/tech_fingerprinter.ts"
@@ -137,11 +137,11 @@
     {
       "id": "sensitive_file_scanner",
       "name": "Sensitive File Scanner",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
-      "description": "Scan web targets for exposed sensitive files using structured dictionary rules",
+      "description": "Scan web targets for exposed sensitive files using structured dictionary rules with configurable concurrent target-rule scanning",
       "default_severity": "medium",
       "tags": ["risk", "exposure", "file", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sensitive_file_scanner.ts"
@@ -149,11 +149,11 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
-      "description": "Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, and structured evidence",
+      "description": "Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, structured evidence, and configurable concurrent target-rule scanning",
       "default_severity": "medium",
       "tags": ["risk", "poc", "verification", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/risk_scanner.ts"
@@ -209,11 +209,11 @@
     {
       "id": "ssrf_detector",
       "name": "SSRF Detector",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect Server-Side Request Forgery (SSRF) vulnerabilities by testing URL parameters with various payloads",
+      "description": "Detect Server-Side Request Forgery (SSRF) vulnerabilities by testing URL parameters with various payloads using configurable concurrent test execution",
       "default_severity": "high",
       "tags": ["ssrf", "vulnerability", "security", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/ssrf_detector.ts"
@@ -233,11 +233,11 @@
     {
       "id": "cors_misconfiguration",
       "name": "CORS Misconfiguration Detector",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access",
+      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with configurable concurrent origin testing",
       "default_severity": "medium",
       "tags": ["cors", "vulnerability", "security", "web", "headers"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cors_misconfiguration.ts"
@@ -245,11 +245,11 @@
     {
       "id": "open_redirect_detector",
       "name": "Open Redirect Detector",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect open redirect vulnerabilities by testing URL parameters with various redirect payloads",
+      "description": "Detect open redirect vulnerabilities by testing URL parameters with various redirect payloads using configurable concurrent test execution",
       "default_severity": "medium",
       "tags": ["redirect", "vulnerability", "security", "web", "phishing"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/open_redirect_detector.ts"
@@ -293,11 +293,11 @@
     {
       "id": "content_monitor",
       "name": "Content Monitor",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
-      "description": "Monitor web pages for content changes using hash fingerprinting, generating ChangeEvents for workflow automation",
+      "description": "Monitor web pages for content changes using hash fingerprinting, generating ChangeEvents for workflow automation with configurable concurrent target scanning",
       "default_severity": "low",
       "tags": ["content", "monitor", "change-detection", "fingerprint", "hash"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/content_monitor.ts"
@@ -305,11 +305,11 @@
     {
       "id": "api_monitor",
       "name": "API Monitor",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
-      "description": "Monitor API endpoints for changes (new endpoints, removed endpoints, GraphQL/OpenAPI discovery), generating ChangeEvents for workflow automation",
+      "description": "Monitor API endpoints for changes (new endpoints, removed endpoints, GraphQL/OpenAPI discovery), generating ChangeEvents for workflow automation with configurable concurrent scanning",
       "default_severity": "high",
       "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "graphql"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/api_monitor.ts"

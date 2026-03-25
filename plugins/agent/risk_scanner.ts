@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.0.0
+ * @version 2.1.0
  * @author Sentinel Team
  * @category risk
  * @default_severity medium
@@ -31,6 +31,7 @@ interface ToolInput {
     maxRules?: number;
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     stopOnFirstHit?: boolean;
     variables?: Record<string, any>;
 }
@@ -139,6 +140,7 @@ export function get_input_schema() {
             maxRules: { type: "integer", default: 20, minimum: 1, maximum: 200 },
             timeout: { type: "integer", default: 8000, minimum: 1000, maximum: 60000 },
             userAgent: { type: "string", default: "Sentinel-Risk-Scanner/2.0" },
+            concurrency: { type: "integer", default: 5, minimum: 1, maximum: 50 },
             stopOnFirstHit: { type: "boolean", default: false },
         },
     };
@@ -157,6 +159,20 @@ export function get_output_schema() {
 
 globalThis.get_input_schema = get_input_schema;
 globalThis.get_output_schema = get_output_schema;
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
 
 function normalizeTarget(raw?: string): string | null {
     if (!raw || typeof raw !== "string") return null;
@@ -575,6 +591,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
         const timeout = getInputNumber(input, "timeout", "timeout_ms", 8000);
         const userAgent = getInputString(input, "userAgent", "user_agent", "Sentinel-Risk-Scanner/2.0");
+        const concurrency = Math.max(1, Math.min(getInputNumber(input, "concurrency", "concurrency", 5), 50));
         const stopOnFirstHit = getInputBoolean(input, "stopOnFirstHit", "stop_on_first_hit", false);
         const normalizedInput: ToolInput = {
             ...input,
@@ -582,6 +599,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             maxRules,
             timeout,
             userAgent,
+            concurrency,
             stopOnFirstHit,
             dictionaryId: getInputString(input, "dictionaryId", "dictionary_id") || input.dictionaryId,
         };
@@ -609,12 +627,21 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const evidence: any[] = [];
         const vulnerabilityFindings: any[] = [];
 
-        outer:
+        const scanTasks: Array<{ target: string; rule: RuleEntry }> = [];
         for (const target of targets) {
             for (const rule of rules) {
+                scanTasks.push({ target, rule });
+            }
+        }
+
+        let stopRequested = false;
+        await runWithConcurrency(
+            scanTasks.map(({ target, rule }) => async () => {
+                if (stopRequested) return;
+
                 const result = await executeRule(target, rule, normalizedInput);
                 if (result.evidence) evidence.push(result.evidence);
-                if (!result.matched || !result.finding) continue;
+                if (!result.matched || !result.finding) return;
 
                 const metadata = parseMetadata(rule.metadata);
                 findings.push(result.finding);
@@ -628,10 +655,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 });
 
                 if (stopOnFirstHit) {
-                    break outer;
+                    stopRequested = true;
                 }
-            }
-        }
+            }),
+            concurrency,
+        );
 
         return {
             success: true,

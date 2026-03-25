@@ -3,7 +3,7 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category risk
  * @default_severity medium
@@ -27,6 +27,7 @@ interface ToolInput {
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     maxTargets?: number;
 }
 
@@ -80,6 +81,7 @@ export function get_input_schema() {
             dictionaryEntries: { type: "array" },
             timeout: { type: "integer", default: 8000, minimum: 1000, maximum: 60000 },
             userAgent: { type: "string", default: "Sentinel-Sensitive-File-Scanner/1.0" },
+            concurrency: { type: "integer", default: 8, minimum: 1, maximum: 50 },
             maxTargets: { type: "integer", default: 10, minimum: 1, maximum: 100 },
         },
     };
@@ -98,6 +100,20 @@ export function get_output_schema() {
 
 globalThis.get_input_schema = get_input_schema;
 globalThis.get_output_schema = get_output_schema;
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
 
 function normalizeTarget(raw?: string): string | null {
     if (!raw || typeof raw !== "string") return null;
@@ -178,6 +194,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         const timeout = Number(input.timeout || 8000);
         const userAgent = input.userAgent || "Sentinel-Sensitive-File-Scanner/1.0";
+        const concurrency = Math.max(1, Math.min(Number(input.concurrency || 8), 50));
         const targets = Array.from(new Set([
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
@@ -192,18 +209,25 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const findings: Finding[] = [];
         const vulnerabilityFindings: any[] = [];
 
+        const scanTasks: Array<{ target: string; rule: RuleEntry }> = [];
         for (const target of targets) {
             for (const rule of rules) {
+                scanTasks.push({ target, rule });
+            }
+        }
+
+        await runWithConcurrency(
+            scanTasks.map(({ target, rule }) => async () => {
                 const metadata = parseMetadata(rule.metadata);
-                if (metadata.enabled === false) continue;
+                if (metadata.enabled === false) return;
                 const path = metadata.path || rule.word;
                 const url = joinUrl(target, path);
                 try {
                     const response = await fetchWithTimeout(url, timeout, userAgent);
-                    if (response.status !== 200) continue;
+                    if (response.status !== 200) return;
                     const body = await response.text();
                     const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
-                    if (matchers.length > 0 && !matchers.every((matcher: any) => matcherHit(body, matcher))) continue;
+                    if (matchers.length > 0 && !matchers.every((matcher: any) => matcherHit(body, matcher))) return;
 
                     const finding = {
                         title: metadata.name || `Sensitive file exposed: ${path}`,
@@ -226,10 +250,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         source: "sensitive_file_scanner",
                     });
                 } catch {
-                    continue;
+                    return;
                 }
-            }
-        }
+            }),
+            concurrency,
+        );
 
         return {
             success: true,

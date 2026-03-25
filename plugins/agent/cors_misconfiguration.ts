@@ -3,7 +3,7 @@
  * 
  * @plugin cors_misconfiguration
  * @name CORS Misconfiguration Detector
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @category vuln
  * @default_severity medium
@@ -17,6 +17,7 @@ interface ToolInput {
     headers?: Record<string, string>;
     timeout?: number;
     userAgent?: string;
+    concurrency?: number;
     testOrigins?: string[];
     checkCredentials?: boolean;
     checkWildcard?: boolean;
@@ -69,6 +70,20 @@ const TEST_TYPES = {
     credentials_with_reflected: "Credentials allowed with reflected origin",
 };
 
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
 /**
  * Export input schema
  */
@@ -102,6 +117,13 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
+            },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent CORS test cases",
+                default: 8,
+                minimum: 1,
+                maximum: 30
             },
             testOrigins: {
                 type: "array",
@@ -504,6 +526,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const concurrency = Math.max(1, Math.min(input.concurrency || 8, 30));
         const checkCredentials = input.checkCredentials !== false;
         const checkWildcard = input.checkWildcard !== false;
         const checkNullOrigin = input.checkNullOrigin !== false;
@@ -568,14 +591,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Test each origin
-        for (const { origin, testType } of testOrigins) {
-            const result = await testCors(url, origin, testType, {
-                method,
-                headers,
-                timeout,
-            });
-            tests.push(result);
-        }
+        tests.push(...await runWithConcurrency(
+            testOrigins.map(({ origin, testType }) => async () => {
+                return await testCors(url, origin, testType, {
+                    method,
+                    headers,
+                    timeout,
+                });
+            }),
+            concurrency,
+        ));
         
         // Test preflight
         const preflightResult = await testPreflight(url, "https://evil.com", {
