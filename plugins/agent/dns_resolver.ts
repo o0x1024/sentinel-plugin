@@ -18,6 +18,7 @@ interface ToolInput {
     recordTypes?: RecordType[];
     timeout?: number;
     concurrency?: number;
+    previousSnapshots?: Record<string, DnsSnapshot>;
 }
 
 interface DnsAnswer {
@@ -38,16 +39,41 @@ interface DnsQueryResult {
     error?: string;
 }
 
+interface DnsSnapshot {
+    target: string;
+    records: DnsQueryResult["records"];
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
 interface ToolOutput {
     success: boolean;
     data?: {
         targets: string[];
         results: DnsQueryResult[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, DnsSnapshot>;
         summary: {
             totalTargets: number;
             successfulTargets: number;
             failedTargets: number;
             totalRecords: number;
+            dnsChanges: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -151,6 +177,84 @@ async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency
     return results;
 }
 
+function recordIdentity(record: { recordType: RecordType; value: string }): string {
+    return `${record.recordType}:${record.value.trim().toLowerCase()}`;
+}
+
+function normalizeRecords(records: DnsQueryResult["records"]): DnsQueryResult["records"] {
+    const unique = new Map<string, DnsQueryResult["records"][number]>();
+    for (const record of records) {
+        const normalized = {
+            recordType: record.recordType,
+            value: String(record.value || "").trim(),
+            ttl: record.ttl,
+        };
+        if (!normalized.value) continue;
+        const key = recordIdentity(normalized);
+        if (!unique.has(key)) {
+            unique.set(key, normalized);
+        }
+    }
+    return Array.from(unique.values()).sort((left, right) => {
+        const typeCompare = left.recordType.localeCompare(right.recordType);
+        return typeCompare !== 0 ? typeCompare : left.value.localeCompare(right.value);
+    });
+}
+
+function formatRecord(record: { recordType: RecordType; value: string }): string {
+    return `${record.recordType} ${record.value}`;
+}
+
+function buildEventId(prefix: string, target: string, timestamp: string): string {
+    return `${prefix}-${target}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
+}
+
+function createDnsChangeEvent(
+    target: string,
+    added: DnsQueryResult["records"],
+    removed: DnsQueryResult["records"],
+    timestamp: string,
+): ChangeEvent {
+    const sensitiveTypes = new Set<RecordType>(["A", "AAAA", "CNAME", "MX", "NS"]);
+    const totalChanges = added.length + removed.length;
+    const hasSensitiveRemoval = removed.some(record => sensitiveTypes.has(record.recordType));
+    const hasRoutingChange = [...added, ...removed].some(record => sensitiveTypes.has(record.recordType));
+    const severity: ChangeEvent["severity"] = hasSensitiveRemoval
+        ? "high"
+        : hasRoutingChange || totalChanges >= 4
+            ? "medium"
+            : "low";
+    const baseScore = severity === "high" ? 72 : severity === "medium" ? 54 : 32;
+    const riskScore = Math.min(95, baseScore + Math.min(totalChanges, 5) * 5);
+    const parts: string[] = [];
+    if (added.length > 0) {
+        parts.push(`added ${added.length} record(s): ${added.map(formatRecord).join(", ")}`);
+    }
+    if (removed.length > 0) {
+        parts.push(`removed ${removed.length} record(s): ${removed.map(formatRecord).join(", ")}`);
+    }
+
+    return {
+        id: buildEventId("dns", target, timestamp),
+        assetId: target,
+        eventType: "dns_change",
+        severity,
+        title: `DNS records changed for ${target}`,
+        description: parts.join("; "),
+        oldValue: removed.map(formatRecord).join("\n") || undefined,
+        newValue: added.map(formatRecord).join("\n") || undefined,
+        detectionMethod: "dns_resolver",
+        tags: ["dns", "change", ...(removed.length > 0 ? ["removed"] : []), ...(added.length > 0 ? ["added"] : [])],
+        autoTriggerEnabled: true,
+        riskScore,
+        metadata: {
+            target,
+            added,
+            removed,
+        },
+    };
+}
+
 export function get_input_schema() {
     return {
         type: "object",
@@ -181,6 +285,10 @@ export function get_input_schema() {
                 minimum: 1,
                 maximum: 50,
             },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous DNS snapshots keyed by target for change detection",
+            },
         },
     };
 }
@@ -197,6 +305,8 @@ export function get_output_schema() {
                 properties: {
                     targets: { type: "array", items: { type: "string" } },
                     results: { type: "array", description: "DNS resolution results" },
+                    changeEvents: { type: "array", description: "Detected DNS change events" },
+                    snapshots: { type: "object", description: "DNS snapshots keyed by target" },
                     summary: { type: "object" },
                     surface_artifacts: {
                         type: "object",
@@ -239,6 +349,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
         const recordTypes = (input.recordTypes?.length ? input.recordTypes : DEFAULT_RECORD_TYPES)
             .filter((type): type is RecordType => type in DNS_TYPE_CODES);
+        const previousSnapshots = input.previousSnapshots || {};
+        const timestamp = new Date().toISOString();
 
         const tasks = targets.map((target) => async (): Promise<DnsQueryResult> => {
             try {
@@ -270,7 +382,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         });
 
         const results = await runWithConcurrency(tasks, concurrency);
-
+        const changeEvents: ChangeEvent[] = [];
+        const snapshots: Record<string, DnsSnapshot> = {};
         const domains = new Map<string, any>();
         const ips = new Map<string, any>();
         const evidences: any[] = [];
@@ -287,6 +400,28 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         for (const result of results) {
+            result.records = normalizeRecords(result.records);
+
+            if (result.success) {
+                snapshots[result.target] = {
+                    target: result.target,
+                    records: result.records,
+                    lastChecked: timestamp,
+                };
+
+                const previous = previousSnapshots[result.target];
+                if (previous) {
+                    const previousRecords = normalizeRecords(previous.records || []);
+                    const previousKeys = new Set(previousRecords.map(recordIdentity));
+                    const currentKeys = new Set(result.records.map(recordIdentity));
+                    const added = result.records.filter(record => !previousKeys.has(recordIdentity(record)));
+                    const removed = previousRecords.filter(record => !currentKeys.has(recordIdentity(record)));
+                    if (added.length > 0 || removed.length > 0) {
+                        changeEvents.push(createDnsChangeEvent(result.target, added, removed, timestamp));
+                    }
+                }
+            }
+
             evidences.push({
                 asset_type: "domain",
                 asset_key: result.target,
@@ -356,15 +491,31 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             data: {
                 targets,
                 results,
+                changeEvents,
+                snapshots,
                 summary: {
                     totalTargets: targets.length,
                     successfulTargets,
                     failedTargets: targets.length - successfulTargets,
                     totalRecords,
+                    dnsChanges: changeEvents.length,
                 },
                 surface_artifacts: {
                     domains: Array.from(domains.values()),
                     ips: Array.from(ips.values()),
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "domain",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "dns_resolver",
+                        metadata: event.metadata,
+                    })),
                     evidences,
                     relations: Array.from(relations.values()),
                 },

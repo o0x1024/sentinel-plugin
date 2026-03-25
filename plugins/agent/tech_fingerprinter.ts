@@ -29,6 +29,7 @@ interface ToolInput {
     userAgent?: string;
     concurrency?: number;
     maxTargets?: number;
+    previousSnapshots?: Record<string, TechnologySnapshot>;
 }
 
 interface RuleEntry {
@@ -50,15 +51,44 @@ interface PerTargetResult {
     technologies: TechnologyResult[];
 }
 
+interface TechnologySnapshot {
+    url: string;
+    technologies: Array<{
+        name: string;
+        category: string;
+        version?: string;
+    }>;
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
 interface ToolOutput {
     success: boolean;
     data?: {
         results: PerTargetResult[];
         technologies: TechnologyResult[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, TechnologySnapshot>;
         summary: {
             totalTargets: number;
             matchedTargets: number;
             identifiedTechnologies: number;
+            technologyChanges: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -154,6 +184,7 @@ export function get_input_schema() {
             userAgent: { type: "string", default: "Sentinel-Tech-Fingerprinter/2.0" },
             concurrency: { type: "integer", default: 5, minimum: 1, maximum: 20 },
             maxTargets: { type: "integer", default: 20, minimum: 1, maximum: 200 },
+            previousSnapshots: { type: "object", description: "Previous technology snapshots keyed by target URL" },
         },
     };
 }
@@ -168,6 +199,8 @@ export function get_output_schema() {
                 properties: {
                     results: { type: "array" },
                     technologies: { type: "array" },
+                    changeEvents: { type: "array" },
+                    snapshots: { type: "object" },
                     summary: { type: "object" },
                     surface_artifacts: { type: "object" },
                 },
@@ -275,6 +308,68 @@ async function fetchWithTimeout(url: string, timeout: number, userAgent: string)
     }
 }
 
+function normalizeTechnologySnapshot(technologies: Array<{ name: string; category: string; version?: string }>): Array<{ name: string; category: string; version?: string }> {
+    const unique = new Map<string, { name: string; category: string; version?: string }>();
+    for (const technology of technologies) {
+        const normalized = {
+            name: String(technology.name || "").trim(),
+            category: String(technology.category || "technology").trim() || "technology",
+            version: technology.version ? String(technology.version).trim() : undefined,
+        };
+        if (!normalized.name) continue;
+        const key = `${normalized.name.toLowerCase()}::${normalized.category.toLowerCase()}`;
+        unique.set(key, normalized);
+    }
+    return Array.from(unique.values()).sort((left, right) => {
+        const categoryCompare = left.category.localeCompare(right.category);
+        return categoryCompare !== 0 ? categoryCompare : left.name.localeCompare(right.name);
+    });
+}
+
+function buildTechnologyEventId(url: string, timestamp: string): string {
+    return `technology-${url}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
+}
+
+function createTechnologyChangeEvent(
+    url: string,
+    added: Array<{ name: string; category: string; version?: string }>,
+    removed: Array<{ name: string; category: string; version?: string }>,
+    updated: Array<{ name: string; category: string; oldVersion?: string; newVersion?: string }>,
+    timestamp: string,
+): ChangeEvent {
+    const severity: ChangeEvent["severity"] = removed.length > 0 || updated.length > 0 ? "medium" : "low";
+    const parts: string[] = [];
+    if (added.length > 0) {
+        parts.push(`added ${added.map(item => `${item.name}${item.version ? ` ${item.version}` : ""}`).join(", ")}`);
+    }
+    if (removed.length > 0) {
+        parts.push(`removed ${removed.map(item => `${item.name}${item.version ? ` ${item.version}` : ""}`).join(", ")}`);
+    }
+    if (updated.length > 0) {
+        parts.push(`updated ${updated.map(item => `${item.name} ${item.oldVersion || "unknown"} -> ${item.newVersion || "unknown"}`).join(", ")}`);
+    }
+    return {
+        id: buildTechnologyEventId(url, timestamp),
+        assetId: url,
+        eventType: "technology_change",
+        severity,
+        title: `Technology stack changed for ${url}`,
+        description: parts.join("; "),
+        oldValue: JSON.stringify({ removed, updated: updated.map(item => ({ name: item.name, category: item.category, version: item.oldVersion })) }),
+        newValue: JSON.stringify({ added, updated: updated.map(item => ({ name: item.name, category: item.category, version: item.newVersion })) }),
+        detectionMethod: "tech_fingerprinter",
+        tags: ["technology", "change", "fingerprint"],
+        autoTriggerEnabled: true,
+        riskScore: removed.length > 0 || updated.length > 0 ? 58 : 40,
+        metadata: {
+            url,
+            added,
+            removed,
+            updated,
+        },
+    };
+}
+
 function matcherHit(ctx: Record<string, any>, matcher: any): boolean {
     const part = String(matcher?.part || "body").toLowerCase();
     const type = String(matcher?.type || "contains").toLowerCase();
@@ -350,6 +445,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const rules = await loadRules(input);
         const results: PerTargetResult[] = [];
         const fingerprints: any[] = [];
+        const previousSnapshots = input.previousSnapshots || {};
+        const changeEvents: ChangeEvent[] = [];
+        const snapshots: Record<string, TechnologySnapshot> = {};
+        const timestamp = new Date().toISOString();
 
         await runWithConcurrency(
             targets.map((target) => async () => {
@@ -392,26 +491,103 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             return tech;
                         });
 
+                    const normalizedTechnologies = normalizeTechnologySnapshot(
+                        technologies.map(item => ({
+                            name: item.name,
+                            category: item.category,
+                            version: item.version,
+                        })),
+                    );
+
+                    snapshots[target] = {
+                        url: target,
+                        technologies: normalizedTechnologies,
+                        lastChecked: timestamp,
+                    };
+
+                    const previous = previousSnapshots[target];
+                    if (previous) {
+                        const previousMap = new Map(normalizeTechnologySnapshot(previous.technologies || []).map(item => [`${item.name.toLowerCase()}::${item.category.toLowerCase()}`, item]));
+                        const currentMap = new Map(normalizedTechnologies.map(item => [`${item.name.toLowerCase()}::${item.category.toLowerCase()}`, item]));
+                        const added = normalizedTechnologies.filter(item => !previousMap.has(`${item.name.toLowerCase()}::${item.category.toLowerCase()}`));
+                        const removed = Array.from(previousMap.entries())
+                            .filter(([key]) => !currentMap.has(key))
+                            .map(([, value]) => value);
+                        const updated = normalizedTechnologies.flatMap((item) => {
+                            const key = `${item.name.toLowerCase()}::${item.category.toLowerCase()}`;
+                            const previousItem = previousMap.get(key);
+                            if (!previousItem || previousItem.version === item.version) {
+                                return [];
+                            }
+                            return [{
+                                name: item.name,
+                                category: item.category,
+                                oldVersion: previousItem.version,
+                                newVersion: item.version,
+                            }];
+                        });
+                        if (added.length > 0 || removed.length > 0 || updated.length > 0) {
+                            changeEvents.push(createTechnologyChangeEvent(target, added, removed, updated, timestamp));
+                        }
+                    }
+
                     results.push({ url: target, technologies });
                 } catch {
+                    snapshots[target] = {
+                        url: target,
+                        technologies: [],
+                        lastChecked: timestamp,
+                    };
                     results.push({ url: target, technologies: [] });
                 }
             }),
             concurrency,
         );
 
+        const uniqueTechnologies = Array.from(
+            new Map(
+                results
+                    .flatMap(item => item.technologies)
+                    .map(item => [`${item.name.toLowerCase()}::${item.category.toLowerCase()}::${item.version || ""}`, item]),
+            ).values(),
+        );
+
         return {
             success: true,
             data: {
                 results,
-                technologies: results[0]?.technologies || [],
+                technologies: uniqueTechnologies,
+                changeEvents,
+                snapshots,
                 summary: {
                     totalTargets: targets.length,
                     matchedTargets: results.filter(item => item.technologies.length > 0).length,
                     identifiedTechnologies: results.reduce((sum, item) => sum + item.technologies.length, 0),
+                    technologyChanges: changeEvents.length,
                 },
                 surface_artifacts: {
                     fingerprints,
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "web",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "tech_fingerprinter",
+                        metadata: event.metadata,
+                    })),
+                    evidences: Object.values(snapshots).map(snapshot => ({
+                        asset_type: "web",
+                        asset_key: snapshot.url,
+                        evidence_type: "technology_snapshot",
+                        title: `Technology Snapshot: ${snapshot.url}`,
+                        content_json: snapshot,
+                        source: "tech_fingerprinter",
+                    })),
                 },
             },
         };

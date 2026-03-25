@@ -18,6 +18,7 @@ interface ToolInput {
     timeout?: number;
     removeDuplicates?: boolean;
     apiConfig?: ApiConfig;
+    previousSnapshots?: Record<string, SubdomainSnapshot>;
 }
 
 interface SubdomainResult {
@@ -33,6 +34,28 @@ interface SourceResult {
     responseTime: number;
 }
 
+interface SubdomainSnapshot {
+    domain: string;
+    subdomains: string[];
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
 interface ToolOutput {
     success: boolean;
     data?: {
@@ -40,6 +63,8 @@ interface ToolOutput {
         subdomains: string[];
         sourceResults: SourceResult[];
         skippedSources?: string[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, SubdomainSnapshot>;
         summary: {
             totalUnique: number;
             totalFound: number;
@@ -47,6 +72,7 @@ interface ToolOutput {
             sourcesSucceeded: number;
             sourcesFailed: number;
             sourcesSkipped: number;
+            subdomainChanges: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -294,6 +320,10 @@ export function get_input_schema() {
                     shodan_token: { type: "string", description: "Shodan API token" },
                     zoomeye_token: { type: "string", description: "ZoomEye API token" }
                 }
+            },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous subdomain snapshots keyed by root domain for change detection"
             }
         }
     };
@@ -321,6 +351,14 @@ export function get_output_schema() {
                     sourceResults: { 
                         type: "array",
                         description: "Results from each data source"
+                    },
+                    changeEvents: {
+                        type: "array",
+                        description: "Detected subdomain change events"
+                    },
+                    snapshots: {
+                        type: "object",
+                        description: "Subdomain snapshots keyed by root domain"
                     },
                     summary: {
                         type: "object",
@@ -467,6 +505,37 @@ function prioritizeSources(sources: DataSource[]): DataSource[] {
         }
         return left.localeCompare(right);
     });
+}
+
+function buildSubdomainEventId(domain: string, eventType: string, timestamp: string): string {
+    return `${eventType}-${domain}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
+}
+
+function createSubdomainChangeEvent(domain: string, eventType: "asset_discovered" | "asset_removed", subdomains: string[], timestamp: string): ChangeEvent {
+    const discovered = eventType === "asset_discovered";
+    const severity: ChangeEvent["severity"] = subdomains.length >= 10 ? "medium" : "low";
+    return {
+        id: buildSubdomainEventId(domain, eventType, timestamp),
+        assetId: domain,
+        eventType,
+        severity,
+        title: discovered
+            ? `New subdomains discovered for ${domain}`
+            : `Subdomains no longer observed for ${domain}`,
+        description: discovered
+            ? `Discovered ${subdomains.length} subdomain(s): ${subdomains.join(", ")}`
+            : `No longer observed ${subdomains.length} subdomain(s): ${subdomains.join(", ")}`,
+        oldValue: discovered ? undefined : subdomains.join("\n"),
+        newValue: discovered ? subdomains.join("\n") : undefined,
+        detectionMethod: "subdomain_enumerator",
+        tags: ["subdomain", discovered ? "discovered" : "removed", "dns"],
+        autoTriggerEnabled: true,
+        riskScore: discovered ? 44 + Math.min(subdomains.length, 10) : 56 + Math.min(subdomains.length, 10),
+        metadata: {
+            domain,
+            subdomains,
+        },
+    };
 }
 
 /**
@@ -2419,7 +2488,6 @@ async function runWithConcurrency<T>(
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        // Validate domain
         if (!input.domain || typeof input.domain !== "string") {
             return {
                 success: false,
@@ -2429,7 +2497,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const domain = input.domain.toLowerCase().trim();
         
-        // Validate domain format
         if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
             return {
                 success: false,
@@ -2442,8 +2509,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const removeDuplicates = input.removeDuplicates !== false;
         const requestedSources = Array.isArray(input.sources) && input.sources.length > 0;
         const skippedSources: DataSource[] = [];
+        const previousSnapshots = input.previousSnapshots || {};
+        const timestamp = new Date().toISOString();
         
-        // Determine sources to query
         let sources: DataSource[] = [...AVAILABLE_SOURCES];
         if (requestedSources) {
             sources = input.sources.filter(s => 
@@ -2469,14 +2537,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         sources = prioritizeSources(sources);
-        
-        // Create tasks
         const tasks = sources.map(source => () => querySource(source, domain, timeout, input.apiConfig));
-        
-        // Execute with concurrency
         const sourceResults = await runWithConcurrency(tasks, concurrency);
         
-        // Aggregate results
         const allSubdomains: string[] = [];
         let sourcesSucceeded = 0;
         let sourcesFailed = 0;
@@ -2490,10 +2553,36 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             allSubdomains.push(...result.subdomains);
         }
         
-        // Deduplicate if requested
         const finalSubdomains = removeDuplicates 
             ? [...new Set(allSubdomains)].sort()
             : allSubdomains.sort();
+
+        const snapshots: Record<string, SubdomainSnapshot> = {
+            [domain]: {
+                domain,
+                subdomains: finalSubdomains,
+                lastChecked: timestamp,
+            },
+        };
+        const changeEvents: ChangeEvent[] = [];
+        const previousSnapshot = previousSnapshots[domain];
+
+        if (!previousSnapshot) {
+            if (finalSubdomains.length > 0) {
+                changeEvents.push(createSubdomainChangeEvent(domain, "asset_discovered", finalSubdomains, timestamp));
+            }
+        } else {
+            const previousSet = new Set((previousSnapshot.subdomains || []).map(item => item.toLowerCase()));
+            const currentSet = new Set(finalSubdomains.map(item => item.toLowerCase()));
+            const added = finalSubdomains.filter(item => !previousSet.has(item.toLowerCase()));
+            const removed = (previousSnapshot.subdomains || []).filter(item => !currentSet.has(item.toLowerCase()));
+            if (added.length > 0) {
+                changeEvents.push(createSubdomainChangeEvent(domain, "asset_discovered", added, timestamp));
+            }
+            if (removed.length > 0) {
+                changeEvents.push(createSubdomainChangeEvent(domain, "asset_removed", removed, timestamp));
+            }
+        }
         
         return {
             success: true,
@@ -2502,13 +2591,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 subdomains: finalSubdomains,
                 sourceResults: sourceResults.sort((a, b) => b.count - a.count),
                 skippedSources,
+                changeEvents,
+                snapshots,
                 summary: {
                     totalUnique: new Set(allSubdomains).size,
                     totalFound: allSubdomains.length,
                     sourcesQueried: sources.length,
                     sourcesSucceeded,
                     sourcesFailed,
-                    sourcesSkipped: skippedSources.length
+                    sourcesSkipped: skippedSources.length,
+                    subdomainChanges: changeEvents.length,
                 },
                 surface_artifacts: {
                     domains: finalSubdomains.map(subdomain => ({
@@ -2518,6 +2610,27 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         source: "subdomain_enumerator",
                         confidence: 0.8,
                     })),
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "domain",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "subdomain_enumerator",
+                        metadata: event.metadata,
+                    })),
+                    evidences: [{
+                        asset_type: "domain",
+                        asset_key: domain,
+                        evidence_type: "subdomain_snapshot",
+                        title: `Subdomain Snapshot: ${domain}`,
+                        content_json: snapshots[domain],
+                        source: "subdomain_enumerator",
+                    }],
                     relations: finalSubdomains.map(subdomain => ({
                         from_type: "domain",
                         from_key: domain,

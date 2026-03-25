@@ -25,6 +25,7 @@ interface ToolInput {
     concurrency?: number;
     followHttpRedirects?: boolean;
     readBanner?: boolean;
+    previousSnapshots?: Record<string, ServiceSnapshot>;
 }
 
 interface FingerprintResult {
@@ -44,15 +45,50 @@ interface FingerprintResult {
     error?: string;
 }
 
+interface ServiceSnapshot {
+    target: string;
+    host: string;
+    port: number;
+    protocol: string;
+    serviceName: string;
+    productName?: string;
+    vendor?: string;
+    version?: string;
+    banner?: string;
+    serverHeader?: string;
+    title?: string;
+    statusCode?: number;
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
 interface ToolOutput {
     success: boolean;
     data?: {
         results: FingerprintResult[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, ServiceSnapshot>;
         summary: {
             totalTargets: number;
             successfulFingerprints: number;
             failedFingerprints: number;
             identifiedProducts: number;
+            serviceChanges: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -264,6 +300,53 @@ async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency
     return results;
 }
 
+function buildServiceEventId(target: string, timestamp: string): string {
+    return `service-${target}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
+}
+
+function buildServiceSnapshot(result: FingerprintResult, timestamp: string): ServiceSnapshot {
+    return {
+        target: result.target,
+        host: result.host,
+        port: result.port,
+        protocol: result.protocol,
+        serviceName: result.serviceName,
+        productName: result.productName,
+        vendor: result.vendor,
+        version: result.version,
+        banner: result.banner,
+        serverHeader: result.serverHeader,
+        title: result.title,
+        statusCode: result.statusCode,
+        lastChecked: timestamp,
+    };
+}
+
+function createServiceChangeEvent(target: string, diffs: string[], previous: ServiceSnapshot, current: ServiceSnapshot, timestamp: string): ChangeEvent {
+    const impactful = previous.serviceName !== current.serviceName || previous.productName !== current.productName;
+    const severity: ChangeEvent["severity"] = impactful ? "high" : "medium";
+    return {
+        id: buildServiceEventId(target, timestamp),
+        assetId: target,
+        eventType: "service_change",
+        severity,
+        title: `Service fingerprint changed for ${target}`,
+        description: diffs.join("; "),
+        oldValue: JSON.stringify(previous),
+        newValue: JSON.stringify(current),
+        detectionMethod: "service_fingerprinter",
+        tags: ["service", "fingerprint", "change"],
+        autoTriggerEnabled: true,
+        riskScore: impactful ? 68 : 52,
+        metadata: {
+            target,
+            previous,
+            current,
+            fields: diffs,
+        },
+    };
+}
+
 export function get_input_schema() {
     return {
         type: "object",
@@ -293,6 +376,10 @@ export function get_input_schema() {
                 type: "boolean",
                 default: true,
             },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous service snapshots keyed by service target for change detection",
+            },
         },
     };
 }
@@ -308,6 +395,8 @@ export function get_output_schema() {
                 type: "object",
                 properties: {
                     results: { type: "array" },
+                    changeEvents: { type: "array" },
+                    snapshots: { type: "object" },
                     summary: { type: "object" },
                     surface_artifacts: {
                         type: "object",
@@ -346,6 +435,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
         const followHttpRedirects = input.followHttpRedirects !== false;
         const readBanner = input.readBanner !== false;
+        const previousSnapshots = input.previousSnapshots || {};
+        const timestamp = new Date().toISOString();
 
         const tasks = normalizedTargets.map((target) => async (): Promise<FingerprintResult> => {
             const key = serviceKey(target.host, target.port, target.protocol);
@@ -395,6 +486,44 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const results = await runWithConcurrency(tasks, concurrency);
         const successful = results.filter((result) => result.success);
+        const changeEvents: ChangeEvent[] = [];
+        const snapshots: Record<string, ServiceSnapshot> = {};
+
+        for (const result of successful) {
+            const snapshot = buildServiceSnapshot(result, timestamp);
+            snapshots[result.target] = snapshot;
+            const previous = previousSnapshots[result.target];
+            if (!previous) {
+                continue;
+            }
+
+            const diffs: string[] = [];
+            if (previous.serviceName !== snapshot.serviceName) {
+                diffs.push(`service ${previous.serviceName || "unknown"} -> ${snapshot.serviceName || "unknown"}`);
+            }
+            if ((previous.productName || "") !== (snapshot.productName || "")) {
+                diffs.push(`product ${JSON.stringify(previous.productName || "")} -> ${JSON.stringify(snapshot.productName || "")}`);
+            }
+            if ((previous.version || "") !== (snapshot.version || "")) {
+                diffs.push(`version ${JSON.stringify(previous.version || "")} -> ${JSON.stringify(snapshot.version || "")}`);
+            }
+            if ((previous.serverHeader || "") !== (snapshot.serverHeader || "")) {
+                diffs.push(`server header ${JSON.stringify(previous.serverHeader || "")} -> ${JSON.stringify(snapshot.serverHeader || "")}`);
+            }
+            if ((previous.banner || "") !== (snapshot.banner || "")) {
+                diffs.push(`banner ${JSON.stringify(previous.banner || "")} -> ${JSON.stringify(snapshot.banner || "")}`);
+            }
+            if ((previous.title || "") !== (snapshot.title || "")) {
+                diffs.push(`title ${JSON.stringify(previous.title || "")} -> ${JSON.stringify(snapshot.title || "")}`);
+            }
+            if (previous.statusCode !== snapshot.statusCode) {
+                diffs.push(`status ${previous.statusCode || "unknown"} -> ${snapshot.statusCode || "unknown"}`);
+            }
+
+            if (diffs.length > 0) {
+                changeEvents.push(createServiceChangeEvent(result.target, diffs, previous, snapshot, timestamp));
+            }
+        }
 
         const services = successful.map((result) => ({
             host_key: result.host,
@@ -470,15 +599,31 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             success: true,
             data: {
                 results,
+                changeEvents,
+                snapshots,
                 summary: {
                     totalTargets: normalizedTargets.length,
                     successfulFingerprints: successful.length,
                     failedFingerprints: normalizedTargets.length - successful.length,
                     identifiedProducts: successful.filter((result) => Boolean(result.productName)).length,
+                    serviceChanges: changeEvents.length,
                 },
                 surface_artifacts: {
                     services,
                     fingerprints,
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "service",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "service_fingerprinter",
+                        metadata: event.metadata,
+                    })),
                     evidences,
                     relations,
                 },

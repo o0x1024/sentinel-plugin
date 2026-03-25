@@ -23,6 +23,7 @@ interface ToolInput {
     extractHeaders?: boolean;
     checkHttps?: boolean;
     checkHttp?: boolean;
+    previousSnapshots?: Record<string, ProbeSnapshot>;
 }
 
 interface ProbeResult {
@@ -41,16 +42,48 @@ interface ProbeResult {
     technologies?: string[];
 }
 
+interface ProbeSnapshot {
+    url: string;
+    alive: boolean;
+    statusCode?: number;
+    title?: string;
+    contentType?: string;
+    server?: string;
+    redirectUrl?: string;
+    technologies: string[];
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
 interface ToolOutput {
     success: boolean;
     data?: {
         targets: string[];
         results: ProbeResult[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, ProbeSnapshot>;
         summary: {
             total: number;
             alive: number;
             dead: number;
             byStatusCode: Record<string, number>;
+            contentChanges: number;
+            technologyChanges: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -173,6 +206,10 @@ export function get_input_schema() {
                 type: "boolean",
                 description: "Check HTTP protocol",
                 default: true
+            },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous HTTP snapshots keyed by URL for change detection"
             }
         }
     };
@@ -208,6 +245,8 @@ export function get_output_schema() {
                         },
                         description: "Probe results for alive hosts"
                     },
+                    changeEvents: { type: "array", description: "Detected probe change events" },
+                    snapshots: { type: "object", description: "HTTP snapshots keyed by URL" },
                     summary: {
                         type: "object",
                         properties: {
@@ -394,12 +433,121 @@ async function runWithConcurrency<T>(
     return results;
 }
 
+function normalizeTechnologyList(technologies?: string[]): string[] {
+    return Array.from(new Set((technologies || []).map((item) => String(item || "").trim()).filter(Boolean)))
+        .sort((left, right) => left.localeCompare(right));
+}
+
+function buildProbeEventId(prefix: string, url: string, timestamp: string): string {
+    return `${prefix}-${url}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
+}
+
+function buildProbeSnapshot(result: ProbeResult, timestamp: string): ProbeSnapshot {
+    return {
+        url: result.url,
+        alive: result.alive,
+        statusCode: result.statusCode,
+        title: result.title,
+        contentType: result.contentType,
+        server: result.server,
+        redirectUrl: result.redirectUrl,
+        technologies: normalizeTechnologyList(result.technologies),
+        lastChecked: timestamp,
+    };
+}
+
+function createAvailabilityEvent(previous: ProbeSnapshot | null, current: ProbeSnapshot, timestamp: string): ChangeEvent {
+    const discovered = current.alive;
+    return {
+        id: buildProbeEventId(discovered ? "web-discovered" : "web-removed", current.url, timestamp),
+        assetId: current.url,
+        eventType: discovered ? "asset_discovered" : "asset_removed",
+        severity: discovered ? "medium" : "high",
+        title: discovered ? `Web endpoint discovered: ${current.url}` : `Web endpoint unreachable: ${current.url}`,
+        description: discovered
+            ? `A live web endpoint was observed at ${current.url}${current.statusCode ? ` with status ${current.statusCode}` : ""}.`
+            : `Previously reachable web endpoint ${current.url} is no longer responding successfully.`,
+        oldValue: previous ? JSON.stringify(previous) : undefined,
+        newValue: discovered ? JSON.stringify(current) : undefined,
+        detectionMethod: "http_prober",
+        tags: ["http", discovered ? "discovered" : "removed", "availability"],
+        autoTriggerEnabled: true,
+        riskScore: discovered ? 52 : 74,
+        metadata: {
+            previous,
+            current,
+        },
+    };
+}
+
+function createContentChangeEvent(url: string, diffs: string[], previous: ProbeSnapshot, current: ProbeSnapshot, timestamp: string): ChangeEvent {
+    const statusChanged = previous.statusCode !== current.statusCode;
+    const severity: ChangeEvent["severity"] = statusChanged ? "medium" : "low";
+    return {
+        id: buildProbeEventId("content", url, timestamp),
+        assetId: url,
+        eventType: "content_change",
+        severity,
+        title: `HTTP content changed for ${url}`,
+        description: diffs.join("; "),
+        oldValue: JSON.stringify({
+            statusCode: previous.statusCode,
+            title: previous.title,
+            contentType: previous.contentType,
+            server: previous.server,
+            redirectUrl: previous.redirectUrl,
+        }),
+        newValue: JSON.stringify({
+            statusCode: current.statusCode,
+            title: current.title,
+            contentType: current.contentType,
+            server: current.server,
+            redirectUrl: current.redirectUrl,
+        }),
+        detectionMethod: "http_prober",
+        tags: ["http", "content", ...(statusChanged ? ["status"] : [])],
+        autoTriggerEnabled: true,
+        riskScore: statusChanged ? 58 : 36,
+        metadata: {
+            url,
+            previous,
+            current,
+            fields: diffs,
+        },
+    };
+}
+
+function createTechnologyChangeEvent(url: string, added: string[], removed: string[], timestamp: string): ChangeEvent {
+    const severity: ChangeEvent["severity"] = removed.length > 0 ? "medium" : "low";
+    const parts: string[] = [];
+    if (added.length > 0) parts.push(`added ${added.join(", ")}`);
+    if (removed.length > 0) parts.push(`removed ${removed.join(", ")}`);
+    return {
+        id: buildProbeEventId("technology", url, timestamp),
+        assetId: url,
+        eventType: "technology_change",
+        severity,
+        title: `Technology footprint changed for ${url}`,
+        description: parts.join("; "),
+        oldValue: removed.join("\n") || undefined,
+        newValue: added.join("\n") || undefined,
+        detectionMethod: "http_prober",
+        tags: ["http", "technology", "change"],
+        autoTriggerEnabled: true,
+        riskScore: removed.length > 0 ? 57 : 42,
+        metadata: {
+            url,
+            added,
+            removed,
+        },
+    };
+}
+
 /**
  * Main analysis function
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        // Validate input
         if (!input.targets || !Array.isArray(input.targets)) {
             return {
                 success: false,
@@ -407,8 +555,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        // Filter out empty strings
-        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        const validTargets = input.targets.filter(t => typeof t === "string" && t.trim().length > 0);
         if (validTargets.length === 0) {
             return {
                 success: false,
@@ -426,18 +573,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const checkHttps = input.checkHttps !== false;
         const checkHttp = input.checkHttp !== false;
         const ports = input.ports || DEFAULT_PORTS;
+        const previousSnapshots = input.previousSnapshots || {};
+        const timestamp = new Date().toISOString();
         
-        // Build URL list
         const urls: string[] = [];
         
         for (const target of validTargets) {
-            // If target is already a URL, add it directly
             if (target.startsWith("http://") || target.startsWith("https://")) {
                 urls.push(target);
                 continue;
             }
             
-            // Otherwise, build URLs for each port and protocol
             for (const port of ports) {
                 if (checkHttps && (port === 443 || port === 8443 || port !== 80)) {
                     urls.push(normalizeTarget(target, port, "https"));
@@ -448,10 +594,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         }
         
-        // Deduplicate URLs
         const uniqueUrls = [...new Set(urls)];
-        
-        // Create probe tasks
         const tasks = uniqueUrls.map(url => () => probeUrl(url, {
             timeout,
             followRedirects,
@@ -461,12 +604,62 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             extractHeaders,
         }));
         
-        // Execute with concurrency
         const results = await runWithConcurrency(tasks, concurrency);
-        
-        // Calculate summary
         const aliveResults = results.filter(r => r.alive);
         const deadResults = results.filter(r => !r.alive);
+        const changeEvents: ChangeEvent[] = [];
+        const snapshots: Record<string, ProbeSnapshot> = {};
+
+        for (const result of results) {
+            const snapshot = buildProbeSnapshot(result, timestamp);
+            snapshots[result.url] = snapshot;
+            const previous = previousSnapshots[result.url];
+
+            if (!previous) {
+                if (snapshot.alive) {
+                    changeEvents.push(createAvailabilityEvent(null, snapshot, timestamp));
+                }
+                continue;
+            }
+
+            if (previous.alive !== snapshot.alive) {
+                changeEvents.push(createAvailabilityEvent(previous, snapshot, timestamp));
+                continue;
+            }
+
+            if (!snapshot.alive || !previous.alive) {
+                continue;
+            }
+
+            const contentDiffs: string[] = [];
+            if (previous.statusCode !== snapshot.statusCode) {
+                contentDiffs.push(`status ${previous.statusCode || "unknown"} -> ${snapshot.statusCode || "unknown"}`);
+            }
+            if ((previous.title || "") !== (snapshot.title || "")) {
+                contentDiffs.push(`title ${JSON.stringify(previous.title || "")} -> ${JSON.stringify(snapshot.title || "")}`);
+            }
+            if ((previous.server || "") !== (snapshot.server || "")) {
+                contentDiffs.push(`server ${JSON.stringify(previous.server || "")} -> ${JSON.stringify(snapshot.server || "")}`);
+            }
+            if ((previous.contentType || "") !== (snapshot.contentType || "")) {
+                contentDiffs.push(`content-type ${JSON.stringify(previous.contentType || "")} -> ${JSON.stringify(snapshot.contentType || "")}`);
+            }
+            if ((previous.redirectUrl || "") !== (snapshot.redirectUrl || "")) {
+                contentDiffs.push(`redirect ${JSON.stringify(previous.redirectUrl || "")} -> ${JSON.stringify(snapshot.redirectUrl || "")}`);
+            }
+            if (contentDiffs.length > 0) {
+                changeEvents.push(createContentChangeEvent(result.url, contentDiffs, previous, snapshot, timestamp));
+            }
+
+            const previousTechnologies = new Set(normalizeTechnologyList(previous.technologies));
+            const currentTechnologies = new Set(snapshot.technologies);
+            const addedTechnologies = snapshot.technologies.filter(item => !previousTechnologies.has(item));
+            const removedTechnologies = [...previousTechnologies].filter(item => !currentTechnologies.has(item));
+            if (addedTechnologies.length > 0 || removedTechnologies.length > 0) {
+                changeEvents.push(createTechnologyChangeEvent(result.url, addedTechnologies, removedTechnologies, timestamp));
+            }
+        }
+
         const surfaceDomains = [...new Set(aliveResults
             .map(result => new URL(result.url).hostname)
             .filter(hostname => hostname.includes(".") && !isIpLiteral(hostname))
@@ -558,12 +751,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             success: true,
             data: {
                 targets: input.targets,
-                results: results.filter(r => r.alive), // Only return alive results
+                results: aliveResults,
+                changeEvents,
+                snapshots,
                 summary: {
                     total: uniqueUrls.length,
                     alive: aliveResults.length,
                     dead: deadResults.length,
                     byStatusCode,
+                    contentChanges: changeEvents.filter(event => event.eventType === "content_change").length,
+                    technologyChanges: changeEvents.filter(event => event.eventType === "technology_change").length,
                 },
                 surface_artifacts: {
                     domains: surfaceDomains,
@@ -571,6 +768,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     hosts: surfaceHosts,
                     services: surfaceServices,
                     webs: surfaceWebs,
+                    changes: changeEvents.map(event => ({
+                        asset_key: event.assetId,
+                        asset_type: "web",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "http_prober",
+                        metadata: event.metadata,
+                    })),
                     evidences: surfaceEvidences,
                     relations: aliveResults.flatMap(result => {
                         const parsed = new URL(result.url);
