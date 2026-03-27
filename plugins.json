@@ -1,6 +1,6 @@
 {
-  "version": "2.3.4",
-  "updated_at": "2026-03-25",
+  "version": "2.3.5",
+  "updated_at": "2026-03-27",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -37,30 +37,6 @@
       "default_severity": "medium",
       "tags": ["information-disclosure", "secrets", "api-keys", "credentials", "pii"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/sensitive_info_detector.ts"
-    },
-    {
-      "id": "url_encoder",
-      "name": "URL Encoder/Decoder",
-      "version": "2.0.0",
-      "author": "Sentinel Team",
-      "main_category": "agent",
-      "category": "utility",
-      "description": "Encode and decode text using various schemes (URL, Base64, HTML entities, Hex, Unicode)",
-      "default_severity": "info",
-      "tags": ["encoding", "url", "base64", "html", "utility"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/url_encoder.ts"
-    },
-    {
-      "id": "hash_calculator",
-      "name": "Hash Calculator",
-      "version": "2.0.0",
-      "author": "Sentinel Team",
-      "main_category": "agent",
-      "category": "utility",
-      "description": "Calculate cryptographic hashes (MD5, SHA-1, SHA-256, SHA-384, SHA-512) with optional HMAC support",
-      "default_severity": "info",
-      "tags": ["hash", "md5", "sha256", "crypto", "hmac"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/hash_calculator.ts"
     },
     {
       "id": "nextjs_rce_scanner",
@@ -113,11 +89,11 @@
     {
       "id": "http_prober",
       "name": "HTTP Prober",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Probe HTTP/HTTPS endpoints with optimized liveness checks, collecting response metadata and emitting domain/ip, web, evidence, and relation artifacts.",
+      "description": "Probe HTTP/HTTPS endpoints with abortable request timeouts, bounded body reads, higher default concurrency, and single-pass preview fetches for faster web surface discovery.",
       "default_severity": "info",
       "tags": ["http", "probe", "alive", "discovery", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/http_prober.ts"

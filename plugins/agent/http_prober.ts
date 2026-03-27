@@ -3,7 +3,7 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.1.0
+ * @version 1.2.0
  * @author Sentinel Team
  * @category recon
  * @default_severity info
@@ -90,13 +90,15 @@ interface ToolOutput {
     error?: string;
 }
 
-const DEFAULT_TIMEOUT = 10000;
-const DEFAULT_CONCURRENCY = 32;
-const DEFAULT_MAX_REDIRECTS = 5;
+const DEFAULT_TIMEOUT = 3000;
+const DEFAULT_CONCURRENCY = 80;
+const MAX_CONCURRENCY = 100;
+const DEFAULT_MAX_REDIRECTS = 2;
 const DEFAULT_PORTS = [80, 443, 8080, 8443];
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 const HTTP_PRIMARY_PORTS = new Set([80, 8080]);
 const HTTPS_PRIMARY_PORTS = new Set([443, 8443]);
+const RESPONSE_PREVIEW_BYTES = 16 * 1024;
 
 function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
@@ -182,7 +184,7 @@ export function get_input_schema() {
                 description: "Number of concurrent requests",
                 default: DEFAULT_CONCURRENCY,
                 minimum: 1,
-                maximum: 50
+                maximum: MAX_CONCURRENCY
             },
             followRedirects: {
                 type: "boolean",
@@ -288,6 +290,51 @@ function extractTitle(html: string): string | undefined {
     return match ? match[1].trim() : undefined;
 }
 
+type ProbeFetchInit = RequestInit & {
+    timeout: number;
+    maxRedirects: number;
+    maxBodyBytes?: number;
+};
+
+async function fetchWithTimeout(url: string, init: ProbeFetchInit): Promise<any> {
+    const controller = new AbortController();
+    const upstreamSignal = init.signal;
+    const timeoutMs = Number.isFinite(init.timeout) ? Math.max(0, init.timeout) : 0;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const abortFromUpstream = () => {
+        controller.abort();
+    };
+
+    if (upstreamSignal) {
+        if (upstreamSignal.aborted) {
+            controller.abort();
+        } else {
+            upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
+        }
+    }
+
+    if (timeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+            controller.abort();
+        }, timeoutMs);
+    }
+
+    try {
+        return await fetch(url, {
+            ...init,
+            signal: controller.signal,
+        });
+    } finally {
+        if (timeoutId !== undefined) {
+            clearTimeout(timeoutId);
+        }
+        if (upstreamSignal) {
+            upstreamSignal.removeEventListener("abort", abortFromUpstream);
+        }
+    }
+}
+
 /**
  * Detect technologies from headers
  */
@@ -313,6 +360,30 @@ function detectTechnologies(headers: Record<string, string>): string[] {
 
 function isHtmlContentType(contentType?: string): boolean {
     return /(?:text\/html|application\/xhtml\+xml)/i.test(contentType || "");
+}
+
+function collectResponseHeaders(response: any): Record<string, string> {
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value: string, key: string) => {
+        headers[key.toLowerCase()] = value;
+    });
+    return headers;
+}
+
+function parseContentLength(headers: Record<string, string>): number {
+    const contentRange = headers["content-range"];
+    if (contentRange) {
+        const match = contentRange.match(/bytes\s+\d+-\d+\/(\d+|\*)/i);
+        if (match && match[1] !== "*") {
+            const totalLength = parseInt(match[1], 10);
+            if (Number.isFinite(totalLength) && totalLength > 0) {
+                return totalLength;
+            }
+        }
+    }
+
+    const contentLength = parseInt(headers["content-length"] || "0", 10);
+    return Number.isFinite(contentLength) && contentLength > 0 ? contentLength : 0;
 }
 
 function shouldFallbackToGet(status: number): boolean {
@@ -444,56 +515,50 @@ async function probeUrl(
         },
         redirect: options.followRedirects ? "follow" : "manual",
         maxRedirects: options.maxRedirects,
-        // @ts-ignore
         timeout: options.timeout,
-    } as const;
+    } satisfies ProbeFetchInit;
+    const getRequestInit = {
+        ...requestInit,
+        method: "GET",
+        maxBodyBytes: RESPONSE_PREVIEW_BYTES,
+        headers: {
+            ...requestInit.headers,
+            "Range": `bytes=0-${RESPONSE_PREVIEW_BYTES - 1}`,
+        },
+    } satisfies ProbeFetchInit;
     
     try {
         let response: any;
-        let requestMethod: "HEAD" | "GET" = "HEAD";
-        try {
-            response = await fetch(url, {
-                method: "HEAD",
-                ...requestInit,
-            });
-        } catch {
-            requestMethod = "GET";
-            response = await fetch(url, {
-                method: "GET",
-                ...requestInit,
-            });
+        let requestMethod: "HEAD" | "GET" = options.extractTitle ? "GET" : "HEAD";
+        if (requestMethod === "GET") {
+            response = await fetchWithTimeout(url, getRequestInit);
+        } else {
+            try {
+                response = await fetchWithTimeout(url, {
+                    method: "HEAD",
+                    ...requestInit,
+                });
+            } catch {
+                requestMethod = "GET";
+                response = await fetchWithTimeout(url, getRequestInit);
+            }
         }
 
-        let headers: Record<string, string> = {};
-        response.headers.forEach((value: string, key: string) => {
-            headers[key.toLowerCase()] = value;
-        });
+        let headers = collectResponseHeaders(response);
 
         if (requestMethod === "HEAD" && shouldFallbackToGet(response.status)) {
-            response = await fetch(url, {
-                method: "GET",
-                ...requestInit,
-            });
-            headers = {};
-            response.headers.forEach((value: string, key: string) => {
-                headers[key.toLowerCase()] = value;
-            });
             requestMethod = "GET";
+            response = await fetchWithTimeout(url, getRequestInit);
+            headers = collectResponseHeaders(response);
         }
         
         let title: string | undefined;
-        let contentLength = parseInt(headers["content-length"] || "0", 10);
+        let contentLength = parseContentLength(headers);
         
         if (requestMethod === "HEAD" && shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
-            response = await fetch(url, {
-                method: "GET",
-                ...requestInit,
-            });
-            headers = {};
-            response.headers.forEach((value: string, key: string) => {
-                headers[key.toLowerCase()] = value;
-            });
-            contentLength = parseInt(headers["content-length"] || "0", 10);
+            response = await fetchWithTimeout(url, getRequestInit);
+            headers = collectResponseHeaders(response);
+            contentLength = parseContentLength(headers);
             requestMethod = "GET";
         }
 
@@ -701,7 +766,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const timeout = input.timeout || DEFAULT_TIMEOUT;
-        const concurrency = input.concurrency || DEFAULT_CONCURRENCY;
+        const rawConcurrency = typeof input.concurrency === "number" ? Math.trunc(input.concurrency) : DEFAULT_CONCURRENCY;
+        const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, rawConcurrency));
         const followRedirects = input.followRedirects !== false;
         const maxRedirects = input.maxRedirects || DEFAULT_MAX_REDIRECTS;
         const userAgent = input.userAgent || DEFAULT_USER_AGENT;
