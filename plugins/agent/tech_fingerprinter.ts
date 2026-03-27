@@ -33,6 +33,7 @@ interface ToolInput {
 }
 
 interface RuleEntry {
+    id?: string;
     word: string;
     category?: string | null;
     metadata?: any;
@@ -134,7 +135,19 @@ export function get_output_schema() {
                     changeEvents: { type: "array" },
                     snapshots: { type: "object" },
                     summary: { type: "object" },
-                    surface_artifacts: { type: "object" },
+                    surface_artifacts: {
+                        type: "object",
+                        properties: {
+                            fingerprints: {
+                                type: "array",
+                                description: "Strict normalized fingerprint artifacts with rule_id, rule_word, rule_name, normalized_product, and normalized_category",
+                            },
+                            evidences: {
+                                type: "array",
+                                description: "Structured evidence artifacts describing captured technology snapshots",
+                            },
+                        },
+                    },
                 },
             },
             error: { type: "string" },
@@ -190,6 +203,7 @@ async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
         return entries
             .filter((item: any) => item && typeof item.word === "string")
             .map((item: any) => ({
+                id: typeof item.id === "string" ? item.id : undefined,
                 word: item.word,
                 category: typeof item.category === "string" ? item.category : null,
                 metadata: parseMetadata(item.metadata),
@@ -359,6 +373,17 @@ function extractVersion(ctx: Record<string, any>, metadata: Record<string, any>)
     return undefined;
 }
 
+function normalizeConfidence(value: unknown): number {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+        return 0.8;
+    }
+    if (numeric > 1) {
+        return Math.max(0, Math.min(numeric / 100, 1));
+    }
+    return Math.max(0, Math.min(numeric, 1));
+}
+
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         const timeout = Number(input.timeout || 10000);
@@ -406,11 +431,18 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         .filter(rule => ruleMatched(ctx, parseMetadata(rule.metadata)))
                         .map(rule => {
                             const metadata = parseMetadata(rule.metadata);
+                            const version = extractVersion(ctx, metadata);
+                            const ruleName = metadata.name || rule.word;
+                            const normalizedProduct = metadata.product || ruleName;
+                            const normalizedCategory = metadata.asset_category || rule.category || "technology";
+                            const normalizedFamily = metadata.asset_family || null;
+                            const normalizedVendor = metadata.vendor || null;
+                            const confidence = normalizeConfidence(metadata.confidence);
                             const tech = {
-                                name: metadata.name || rule.word,
-                                category: rule.category || "technology",
-                                version: extractVersion(ctx, metadata),
-                                confidence: Math.round(Number(metadata.confidence || 0.8) * 100),
+                                name: ruleName,
+                                category: normalizedCategory,
+                                version,
+                                confidence: Math.round(confidence * 100),
                                 evidence: [`matched:${rule.word}`],
                             };
 
@@ -420,10 +452,21 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                                 fingerprint_type: "technology",
                                 fingerprint_key: rule.word,
                                 fingerprint_value: tech.name,
+                                rule_id: metadata.rule_id || rule.id || `fingerprint_rule:${rule.word}`,
+                                rule_word: rule.word,
+                                rule_name: ruleName,
+                                normalized_product: normalizedProduct,
+                                normalized_vendor: normalizedVendor || undefined,
+                                normalized_category: normalizedCategory,
+                                normalized_family: normalizedFamily || undefined,
                                 version: tech.version,
-                                confidence: tech.confidence,
+                                confidence,
+                                is_primary: Boolean(metadata.is_primary),
+                                match_source_part: Array.isArray(metadata.matchers) && metadata.matchers.length > 0
+                                    ? String(metadata.matchers[0]?.part || "body").toLowerCase()
+                                    : "body",
                                 source: "tech_fingerprinter",
-                                web_key: target,
+                                evidence: `matched:${rule.word}`,
                             });
 
                             return tech;

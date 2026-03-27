@@ -11,6 +11,13 @@
  * @description Fingerprint exposed services from host/port targets and produce typed service, fingerprint, evidence, and relation artifacts
  */
 
+declare const Sentinel: {
+    Dictionary?: {
+        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
+        getDefaultId?(dictType: string): Promise<string | null>;
+    };
+};
+
 interface PortLikeTarget {
     host_key?: string;
     ip_or_host?: string;
@@ -28,11 +35,20 @@ interface ToolInput {
     targets?: Array<string | PortLikeTarget>;
     target_objects?: Array<string | PortLikeTarget>;
     service_targets?: Array<string | PortLikeTarget>;
+    dictionaryId?: string;
+    dictionaryEntries?: RuleEntry[];
     timeout?: number;
     concurrency?: number;
     followHttpRedirects?: boolean;
     readBanner?: boolean;
     previousSnapshots?: Record<string, ServiceSnapshot>;
+}
+
+interface RuleEntry {
+    id?: string;
+    word: string;
+    category?: string | null;
+    metadata?: any;
 }
 
 interface FingerprintResult {
@@ -136,6 +152,56 @@ const pluginGlobals = globalThis as typeof globalThis & {
     get_output_schema?: typeof get_output_schema;
     analyze?: typeof analyze;
 };
+
+function parseMetadata(value: any): Record<string, any> {
+    if (!value) return {};
+    if (typeof value === "string") {
+        try {
+            return JSON.parse(value);
+        } catch {
+            return {};
+        }
+    }
+    return typeof value === "object" ? value : {};
+}
+
+async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
+    if (!Sentinel?.Dictionary?.getEntries) return [];
+    try {
+        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
+        return entries
+            .filter((item: any) => item && typeof item.word === "string")
+            .map((item: any) => ({
+                id: typeof item.id === "string" ? item.id : undefined,
+                word: item.word,
+                category: typeof item.category === "string" ? item.category : null,
+                metadata: parseMetadata(item.metadata),
+            }));
+    } catch {
+        return [];
+    }
+}
+
+async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
+    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
+        return input.dictionaryEntries.map(entry => ({
+            ...entry,
+            metadata: parseMetadata(entry.metadata),
+        }));
+    }
+
+    const candidates = [input.dictionaryId, "builtin_service_fingerprint_rules", "Service Fingerprint Rules"]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+    for (const candidate of candidates) {
+        const rules = await loadDictionaryEntries(candidate);
+        if (rules.length > 0) {
+            return rules;
+        }
+    }
+
+    return [];
+}
 
 function normalizeTarget(raw: string | PortLikeTarget): { host: string; port: number; protocol: string } | null {
     if (typeof raw === "string") {
@@ -359,6 +425,77 @@ async function fingerprintTcp(
     }
 }
 
+function normalizeServiceCategory(serviceName?: string, productName?: string): string {
+    const combined = `${serviceName || ""} ${productName || ""}`.toLowerCase();
+    if (combined.includes("nginx") || combined.includes("apache") || combined.includes("iis") || combined.includes("http")) {
+        return "web_server";
+    }
+    if (combined.includes("mysql") || combined.includes("postgres") || combined.includes("mongodb") || combined.includes("oracle") || combined.includes("mssql")) {
+        return "database";
+    }
+    if (combined.includes("redis")) {
+        return "cache";
+    }
+    if (combined.includes("rabbitmq")) {
+        return "messaging";
+    }
+    if (combined.includes("elasticsearch")) {
+        return "search";
+    }
+    if (combined.includes("ssh")) {
+        return "remote_access";
+    }
+    return "service";
+}
+
+function serviceMatcherHit(ctx: Record<string, any>, matcher: any): boolean {
+    const part = String(matcher?.part || "banner").toLowerCase();
+    const type = String(matcher?.type || "contains").toLowerCase();
+    const value = String(matcher?.value || "");
+
+    const source = part === "header"
+        ? String(ctx.serverHeader || "")
+        : part === "product"
+            ? String(ctx.productName || "")
+            : part === "service"
+                ? String(ctx.serviceName || "")
+                : String(ctx.banner || "");
+
+    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
+    if (type === "regex") {
+        try {
+            return new RegExp(value, "i").test(source);
+        } catch {
+            return false;
+        }
+    }
+    return source.toLowerCase().includes(value.toLowerCase());
+}
+
+function matchServiceRule(result: FingerprintResult, rules: RuleEntry[]): RuleEntry | undefined {
+    for (const rule of rules) {
+        const metadata = parseMetadata(rule.metadata);
+        const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
+        if (matchers.length > 0) {
+            const operator = String(metadata.operator || "or").toLowerCase();
+            const matched = operator === "and"
+                ? matchers.every((matcher: any) => serviceMatcherHit(result, matcher))
+                : matchers.some((matcher: any) => serviceMatcherHit(result, matcher));
+            if (matched) {
+                return rule;
+            }
+            continue;
+        }
+
+        const probe = `${result.productName || ""} ${result.serviceName || ""} ${result.serverHeader || ""} ${result.banner || ""}`.toLowerCase();
+        if (probe.includes(rule.word.toLowerCase())) {
+            return rule;
+        }
+    }
+
+    return undefined;
+}
+
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
     const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
@@ -435,6 +572,14 @@ export function get_input_schema() {
                 type: "array",
                 description: "Structured service endpoints with host, port, and protocol fields",
             },
+            dictionaryId: {
+                type: "string",
+                description: "Structured fingerprint dictionary ID or name",
+            },
+            dictionaryEntries: {
+                type: "array",
+                description: "Structured rule entries injected by workflow",
+            },
             timeout: {
                 type: "integer",
                 default: 5000,
@@ -480,6 +625,20 @@ export function get_output_schema() {
                     surface_artifacts: {
                         type: "object",
                         description: "Typed network surface artifacts for surface graph ingestion",
+                        properties: {
+                            services: {
+                                type: "array",
+                                description: "Structured service assets",
+                            },
+                            fingerprints: {
+                                type: "array",
+                                description: "Strict normalized service fingerprints with explicit rule_* and normalized_* fields",
+                            },
+                            evidences: {
+                                type: "array",
+                                description: "Structured service evidence artifacts",
+                            },
+                        },
                     },
                 },
             },
@@ -516,6 +675,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const followHttpRedirects = input.followHttpRedirects !== false;
         const readBanner = input.readBanner !== false;
         const previousSnapshots = input.previousSnapshots || {};
+        const rules = await loadRules(input);
         const timestamp = new Date().toISOString();
 
         const tasks = normalizedTargets.map((target) => async (): Promise<FingerprintResult> => {
@@ -622,13 +782,38 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const fingerprints = successful.flatMap((result) => {
             const key = serviceKey(result.host, result.port);
+            const matchedRule = matchServiceRule(result, rules);
+            if (!matchedRule) {
+                return [];
+            }
+            const ruleMetadata = parseMetadata(matchedRule?.metadata);
+            const normalizedProduct = ruleMetadata.product;
+            const normalizedCategory = ruleMetadata.asset_category;
+            if (!normalizedProduct || !normalizedCategory) {
+                return [];
+            }
+            const normalizedVendor = ruleMetadata.vendor;
+            const normalizedFamily = ruleMetadata.asset_family || undefined;
+            const ruleBase = (matchedRule.word || normalizedProduct).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unknown";
+            const ruleId = ruleMetadata.rule_id || matchedRule.id || `service_rule:${ruleBase}`;
+            const ruleWord = matchedRule.word || ruleBase;
+            const ruleName = ruleMetadata.name || matchedRule.word || normalizedProduct;
             const items: any[] = [];
             if (result.banner) {
                 items.push({
                     asset_type: "service",
                     asset_key: key,
                     fingerprint_type: "banner",
+                    fingerprint_key: "banner",
                     fingerprint_value: result.banner,
+                    rule_id: ruleId,
+                    rule_word: ruleWord,
+                    rule_name: ruleName,
+                    normalized_product: ruleMetadata.product || normalizedProduct,
+                    normalized_vendor: normalizedVendor,
+                    normalized_category: normalizedCategory,
+                    normalized_family: normalizedFamily,
+                    version: result.version,
                     confidence: 0.85,
                     evidence: result.banner,
                 });
@@ -638,7 +823,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     asset_type: "service",
                     asset_key: key,
                     fingerprint_type: "server_header",
+                    fingerprint_key: "server_header",
                     fingerprint_value: result.serverHeader,
+                    rule_id: ruleId,
+                    rule_word: ruleWord,
+                    rule_name: ruleName,
+                    normalized_product: ruleMetadata.product || normalizedProduct,
+                    normalized_vendor: normalizedVendor,
+                    normalized_category: normalizedCategory,
+                    normalized_family: normalizedFamily,
+                    version: result.version,
                     confidence: 0.9,
                     evidence: result.serverHeader,
                 });
@@ -648,7 +842,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     asset_type: "service",
                     asset_key: key,
                     fingerprint_type: "product",
+                    fingerprint_key: "product_name",
                     fingerprint_value: `${result.productName}${result.version ? ` ${result.version}` : ""}`,
+                    rule_id: ruleId,
+                    rule_word: ruleWord,
+                    rule_name: ruleName,
+                    normalized_product: ruleMetadata.product || normalizedProduct,
+                    normalized_vendor: normalizedVendor,
+                    normalized_category: normalizedCategory,
+                    normalized_family: normalizedFamily,
+                    version: result.version,
                     confidence: 0.9,
                 });
             }

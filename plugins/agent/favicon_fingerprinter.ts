@@ -11,11 +11,27 @@
  * @description Fetch favicons from web targets and emit favicon fingerprint and evidence artifacts for ASM and network asset mapping workflows
  */
 
+declare const Sentinel: {
+    Dictionary?: {
+        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
+        getDefaultId?(dictType: string): Promise<string | null>;
+    };
+};
+
 interface ToolInput {
     targets: string[];
+    dictionaryId?: string;
+    dictionaryEntries?: RuleEntry[];
     timeout?: number;
     concurrency?: number;
     followRedirects?: boolean;
+}
+
+interface RuleEntry {
+    id?: string;
+    word: string;
+    category?: string | null;
+    metadata?: any;
 }
 
 interface FingerprintResult {
@@ -50,6 +66,56 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
+
+function parseMetadata(value: any): Record<string, any> {
+    if (!value) return {};
+    if (typeof value === "string") {
+        try {
+            return JSON.parse(value);
+        } catch {
+            return {};
+        }
+    }
+    return typeof value === "object" ? value : {};
+}
+
+async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
+    if (!Sentinel?.Dictionary?.getEntries) return [];
+    try {
+        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
+        return entries
+            .filter((item: any) => item && typeof item.word === "string")
+            .map((item: any) => ({
+                id: typeof item.id === "string" ? item.id : undefined,
+                word: item.word,
+                category: typeof item.category === "string" ? item.category : null,
+                metadata: parseMetadata(item.metadata),
+            }));
+    } catch {
+        return [];
+    }
+}
+
+async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
+    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
+        return input.dictionaryEntries.map(entry => ({
+            ...entry,
+            metadata: parseMetadata(entry.metadata),
+        }));
+    }
+
+    const candidates = [input.dictionaryId, "builtin_favicon_fingerprint_rules", "Favicon Fingerprint Rules"]
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+
+    for (const candidate of candidates) {
+        const rules = await loadDictionaryEntries(candidate);
+        if (rules.length > 0) {
+            return rules;
+        }
+    }
+
+    return [];
+}
 
 function normalizeTarget(value: string): string {
     const trimmed = String(value || "").trim();
@@ -101,10 +167,62 @@ function extractIconCandidates(baseUrl: URL, html: string): string[] {
     return Array.from(new Set(candidates));
 }
 
+function matchFaviconRule(faviconSha256: string, iconUrl: string, rules: RuleEntry[]): RuleEntry | undefined {
+    for (const rule of rules) {
+        const metadata = parseMetadata(rule.metadata);
+        const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
+        if (matchers.length > 0) {
+            const operator = String(metadata.operator || "or").toLowerCase();
+            const matched = operator === "and"
+                ? matchers.every((matcher: any) => {
+                    const part = String(matcher?.part || "").toLowerCase();
+                    const type = String(matcher?.type || "contains").toLowerCase();
+                    const source = part.includes("url") ? iconUrl : faviconSha256;
+                    const value = String(matcher?.value || "");
+                    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
+                    if (type === "regex") {
+                        try {
+                            return new RegExp(value, "i").test(source);
+                        } catch {
+                            return false;
+                        }
+                    }
+                    return source.toLowerCase().includes(value.toLowerCase());
+                })
+                : matchers.some((matcher: any) => {
+                    const part = String(matcher?.part || "").toLowerCase();
+                    const type = String(matcher?.type || "contains").toLowerCase();
+                    const source = part.includes("url") ? iconUrl : faviconSha256;
+                    const value = String(matcher?.value || "");
+                    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
+                    if (type === "regex") {
+                        try {
+                            return new RegExp(value, "i").test(source);
+                        } catch {
+                            return false;
+                        }
+                    }
+                    return source.toLowerCase().includes(value.toLowerCase());
+                });
+            if (matched) {
+                return rule;
+            }
+            continue;
+        }
+
+        if (faviconSha256.toLowerCase().includes(rule.word.toLowerCase())) {
+            return rule;
+        }
+    }
+
+    return undefined;
+}
+
 async function fingerprintTarget(
     target: string,
     timeout: number,
     followRedirects: boolean,
+    rules: RuleEntry[],
 ): Promise<FingerprintResult & { fingerprint?: any; evidence?: any }> {
     const canonicalUrl = new URL(target);
     try {
@@ -134,6 +252,8 @@ async function fingerprintTarget(
                 if (!buffer || buffer.byteLength === 0) continue;
 
                 const faviconSha256 = await sha256Hex(buffer);
+                const matchedRule = matchFaviconRule(faviconSha256, iconUrl, rules);
+                const metadata = parseMetadata(matchedRule?.metadata);
                 return {
                     target: canonicalUrl.toString(),
                     success: true,
@@ -141,19 +261,28 @@ async function fingerprintTarget(
                     faviconSha256,
                     contentType: iconResponse.headers.get("content-type") || undefined,
                     bytes: buffer.byteLength,
-                    fingerprint: {
-                        asset_type: "web",
-                        asset_key: canonicalUrl.toString(),
-                        fingerprint_type: "favicon_sha256",
-                        fingerprint_key: iconUrl,
-                        fingerprint_value: faviconSha256,
-                        confidence: 0.95,
-                        evidence: `Fetched favicon from ${iconUrl}`,
-                    },
+                    fingerprint: matchedRule && metadata.product && metadata.asset_category
+                        ? {
+                            asset_type: "web",
+                            asset_key: canonicalUrl.toString(),
+                            fingerprint_type: "favicon",
+                            fingerprint_key: iconUrl,
+                            fingerprint_value: faviconSha256,
+                            rule_id: metadata.rule_id || matchedRule.id || `favicon_rule:${matchedRule.word}`,
+                            rule_word: matchedRule.word,
+                            rule_name: metadata.name || matchedRule.word,
+                            normalized_product: metadata.product,
+                            normalized_vendor: metadata.vendor,
+                            normalized_category: metadata.asset_category,
+                            normalized_family: metadata.asset_family,
+                            confidence: 0.95,
+                            evidence: `Fetched favicon from ${iconUrl}`,
+                        }
+                        : undefined,
                     evidence: {
                         asset_type: "web",
                         asset_key: canonicalUrl.toString(),
-                        evidence_type: "favicon_fetch",
+                        evidence_type: "favicon_metadata",
                         title: `Favicon fingerprint for ${canonicalUrl.hostname}`,
                         content_json: {
                             icon_url: iconUrl,
@@ -205,6 +334,14 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: "HTTP or HTTPS URLs to fingerprint via favicon",
             },
+            dictionaryId: {
+                type: "string",
+                description: "Structured fingerprint dictionary ID or name",
+            },
+            dictionaryEntries: {
+                type: "array",
+                description: "Structured rule entries injected by workflow",
+            },
             timeout: {
                 type: "integer",
                 description: "Network timeout in milliseconds",
@@ -244,6 +381,16 @@ export function get_output_schema() {
                     surface_artifacts: {
                         type: "object",
                         description: "Favicon fingerprint and evidence artifacts for surface graph ingestion",
+                        properties: {
+                            fingerprints: {
+                                type: "array",
+                                description: "Strict favicon fingerprint artifacts with explicit rule_* and normalized_* fields",
+                            },
+                            evidences: {
+                                type: "array",
+                                description: "Structured favicon evidence artifacts",
+                            },
+                        },
                     },
                 },
             },
@@ -267,8 +414,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const timeout = Math.max(1000, Math.min(input.timeout || 10000, 60000));
         const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
+        const rules = await loadRules(input);
 
-        const tasks = targets.map((target) => () => fingerprintTarget(target, timeout, input.followRedirects !== false));
+        const tasks = targets.map((target) => () => fingerprintTarget(target, timeout, input.followRedirects !== false, rules));
         const fingerprints = await runWithConcurrency(tasks, concurrency);
 
         return {

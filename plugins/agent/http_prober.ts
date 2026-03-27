@@ -40,6 +40,7 @@ interface ProbeResult {
     responseTime?: number;
     error?: string;
     technologies?: string[];
+    contentSummary?: string;
 }
 
 interface ProbeSnapshot {
@@ -271,7 +272,17 @@ export function get_output_schema() {
                     },
                     surface_artifacts: {
                         type: "object",
-                        description: "Typed network surface artifacts for surface graph ingestion"
+                        description: "Typed network surface artifacts for surface graph ingestion",
+                        properties: {
+                            webs: {
+                                type: "array",
+                                description: "Strict web assets with canonical_url, scheme, http_status_code, response_headers, and content_summary",
+                            },
+                            evidences: {
+                                type: "array",
+                                description: "Strict web evidences such as http_response_headers and http_response_body_summary",
+                            },
+                        },
                     }
                 }
             },
@@ -288,6 +299,16 @@ pluginGlobals.get_output_schema = get_output_schema;
 function extractTitle(html: string): string | undefined {
     const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
     return match ? match[1].trim() : undefined;
+}
+
+function buildContentSummary(text: string): string {
+    return text
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 500);
 }
 
 type ProbeFetchInit = RequestInit & {
@@ -554,6 +575,7 @@ async function probeUrl(
         
         let title: string | undefined;
         let contentLength = parseContentLength(headers);
+        let contentSummary: string | undefined;
         
         if (requestMethod === "HEAD" && shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
             response = await fetchWithTimeout(url, getRequestInit);
@@ -566,6 +588,7 @@ async function probeUrl(
             try {
                 const text = await response.text();
                 title = extractTitle(text);
+                contentSummary = buildContentSummary(text);
                 if (!contentLength) {
                     contentLength = text.length;
                 }
@@ -587,12 +610,10 @@ async function probeUrl(
             contentLength,
             contentType: headers["content-type"],
             server: headers["server"],
+            headers,
             technologies,
+            contentSummary,
         };
-        
-        if (options.extractHeaders) {
-            result.headers = headers;
-        }
         
         result.redirectUrl = resolveRedirectUrl(url, response, headers);
         
@@ -881,32 +902,47 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 site_title: result.title,
                 http_status_code: result.statusCode,
                 server_header: result.server,
-                response_headers: result.headers,
+                response_headers: result.headers || {},
+                content_summary: result.contentSummary || `${result.statusCode || "unknown"} ${result.title || ""}`.trim(),
                 source: "http_prober",
                 confidence: 0.95,
             };
         });
-        const surfaceEvidences = aliveResults.map(result => {
+        const surfaceEvidences = aliveResults.flatMap(result => {
             const parsed = new URL(result.url);
-            return {
+            const evidences: any[] = [{
                 asset_type: "web",
                 asset_key: result.url,
-                evidence_type: "http_probe",
-                title: `HTTP Probe: ${parsed.hostname}`,
-                content_text: `${result.statusCode || "unknown"} ${result.title || ""}`.trim(),
+                evidence_type: "http_response_headers",
+                title: `HTTP Response Headers: ${parsed.hostname}`,
                 content_json: {
                     url: result.url,
-                    status_code: result.statusCode,
-                    title: result.title,
-                    server: result.server,
-                    headers: result.headers,
-                    content_type: result.contentType,
-                    response_time: result.responseTime,
-                    technologies: result.technologies,
-                    redirect_url: result.redirectUrl,
+                    headers: result.headers || {},
                 },
                 source: "http_prober",
-            };
+            }];
+
+            if (result.contentSummary) {
+                evidences.push({
+                    asset_type: "web",
+                    asset_key: result.url,
+                    evidence_type: "http_response_body_summary",
+                    title: `HTTP Response Body Summary: ${parsed.hostname}`,
+                    content_text: result.contentSummary,
+                    content_json: {
+                        url: result.url,
+                        status_code: result.statusCode,
+                        title: result.title,
+                        content_type: result.contentType,
+                        response_time: result.responseTime,
+                        technologies: result.technologies,
+                        redirect_url: result.redirectUrl,
+                    },
+                    source: "http_prober",
+                });
+            }
+
+            return evidences;
         });
         
         const byStatusCode: Record<string, number> = {};
