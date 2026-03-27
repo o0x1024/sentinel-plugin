@@ -79,6 +79,14 @@ interface ToolOutput {
     error?: string;
 }
 
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 type FetchWithTimeoutInit = RequestInit & {
     timeout?: number;
 };
@@ -329,7 +337,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 /**
  * Export output schema
@@ -387,7 +395,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -2507,14 +2515,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const timeout = Math.max(5000, Math.min(input.timeout || DEFAULT_TIMEOUT, 120000));
         const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const removeDuplicates = input.removeDuplicates !== false;
-        const requestedSources = Array.isArray(input.sources) && input.sources.length > 0;
+        const requestedSourceList = Array.isArray(input.sources) ? input.sources : [];
+        const requestedSources = requestedSourceList.length > 0;
         const skippedSources: DataSource[] = [];
         const previousSnapshots = input.previousSnapshots || {};
         const timestamp = new Date().toISOString();
         
         let sources: DataSource[] = [...AVAILABLE_SOURCES];
         if (requestedSources) {
-            sources = input.sources.filter(s => 
+            sources = requestedSourceList.filter(s => 
                 AVAILABLE_SOURCES.includes(s as DataSource)
             ) as DataSource[];
             
@@ -2652,4 +2661,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

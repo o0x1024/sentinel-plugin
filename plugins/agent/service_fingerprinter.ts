@@ -14,13 +14,20 @@
 interface PortLikeTarget {
     host_key?: string;
     ip_or_host?: string;
+    host?: string;
     port?: number;
     port_number?: number;
     transport_protocol?: string;
+    protocol?: string;
+    value?: string;
+    type?: string;
+    service_name?: string;
 }
 
 interface ToolInput {
-    targets: Array<string | PortLikeTarget>;
+    targets?: Array<string | PortLikeTarget>;
+    target_objects?: Array<string | PortLikeTarget>;
+    service_targets?: Array<string | PortLikeTarget>;
     timeout?: number;
     concurrency?: number;
     followHttpRedirects?: boolean;
@@ -124,6 +131,12 @@ const DEFAULT_SERVICE_NAMES: Record<number, string> = {
     27017: "mongodb",
 };
 
+const pluginGlobals = globalThis as typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
 function normalizeTarget(raw: string | PortLikeTarget): { host: string; port: number; protocol: string } | null {
     if (typeof raw === "string") {
         const trimmed = raw.trim();
@@ -144,15 +157,74 @@ function normalizeTarget(raw: string | PortLikeTarget): { host: string; port: nu
         }
     }
 
-    const host = String(raw.ip_or_host || raw.host_key || "").trim();
+    if (typeof raw.value === "string" && raw.value.trim()) {
+        return normalizeTarget(raw.value);
+    }
+
+    const host = String(raw.ip_or_host || raw.host || raw.host_key || "").trim();
     const port = Number(raw.port ?? raw.port_number ?? 0);
-    const protocol = String(raw.transport_protocol || "tcp").trim().toLowerCase();
+    const protocol = String(raw.transport_protocol || raw.protocol || "tcp").trim().toLowerCase();
     if (!host || !port) return null;
     return { host, port, protocol };
 }
 
-function serviceKey(host: string, port: number, protocol: string): string {
+function collectRawTargets(input: ToolInput): Array<string | PortLikeTarget> {
+    const rawTargets = [
+        ...(Array.isArray(input.service_targets) ? input.service_targets : []),
+        ...(Array.isArray(input.target_objects) ? input.target_objects : []),
+        ...(Array.isArray(input.targets) ? input.targets : []),
+    ];
+
+    return rawTargets.filter((target) => {
+        if (typeof target === "string") {
+            return target.trim().length > 0;
+        }
+        if (!target || typeof target !== "object") {
+            return false;
+        }
+        if (target.type && target.type !== "service") {
+            return false;
+        }
+        return true;
+    });
+}
+
+function serviceKey(host: string, port: number): string {
+    return `${host}:${port}`;
+}
+
+function legacyServiceKey(host: string, port: number, protocol: string): string {
     return `${host}:${port}/${protocol}`;
+}
+
+function dedupeTargets(targets: Array<{ host: string; port: number; protocol: string }>): Array<{ host: string; port: number; protocol: string }> {
+    const deduped = new Map<string, { host: string; port: number; protocol: string }>();
+    for (const target of targets) {
+        const key = serviceKey(target.host, target.port);
+        const existing = deduped.get(key);
+        if (!existing) {
+            deduped.set(key, target);
+            continue;
+        }
+
+        const existingPriority = existing.protocol === "https" ? 3 : existing.protocol === "http" ? 2 : 1;
+        const currentPriority = target.protocol === "https" ? 3 : target.protocol === "http" ? 2 : 1;
+        if (currentPriority > existingPriority) {
+            deduped.set(key, target);
+        }
+    }
+    return Array.from(deduped.values());
+}
+
+function findPreviousSnapshot(
+    previousSnapshots: Record<string, ServiceSnapshot>,
+    result: FingerprintResult,
+): ServiceSnapshot | undefined {
+    return previousSnapshots[result.target]
+        || previousSnapshots[legacyServiceKey(result.host, result.port, result.protocol)]
+        || previousSnapshots[legacyServiceKey(result.host, result.port, "tcp")]
+        || previousSnapshots[legacyServiceKey(result.host, result.port, "http")]
+        || previousSnapshots[legacyServiceKey(result.host, result.port, "https")];
 }
 
 function inferServiceName(port: number, protocol: string, banner?: string, serverHeader?: string): string {
@@ -350,11 +422,18 @@ function createServiceChangeEvent(target: string, diffs: string[], previous: Ser
 export function get_input_schema() {
     return {
         type: "object",
-        required: ["targets"],
         properties: {
             targets: {
                 type: "array",
                 description: "Port targets as strings like host:port or surface port objects",
+            },
+            target_objects: {
+                type: "array",
+                description: "Structured monitor targets. Service entries are preferred when present.",
+            },
+            service_targets: {
+                type: "array",
+                description: "Structured service endpoints with host, port, and protocol fields",
             },
             timeout: {
                 type: "integer",
@@ -384,7 +463,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 export function get_output_schema() {
     return {
@@ -409,20 +488,21 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!Array.isArray(input.targets) || input.targets.length === 0) {
+        const rawTargets = collectRawTargets(input);
+        if (rawTargets.length === 0) {
             return {
                 success: false,
-                error: "Invalid input: targets array is required",
+                error: "Invalid input: service targets are required",
             };
         }
 
-        const normalizedTargets = input.targets
+        const normalizedTargets = dedupeTargets(rawTargets
             .map(normalizeTarget)
-            .filter((target): target is NonNullable<typeof target> => Boolean(target));
+            .filter((target): target is NonNullable<typeof target> => Boolean(target)));
 
         if (normalizedTargets.length === 0) {
             return {
@@ -439,7 +519,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const timestamp = new Date().toISOString();
 
         const tasks = normalizedTargets.map((target) => async (): Promise<FingerprintResult> => {
-            const key = serviceKey(target.host, target.port, target.protocol);
+            const key = serviceKey(target.host, target.port);
             try {
                 let details: Partial<FingerprintResult> = {};
                 if (HTTP_PORTS.has(target.port) || target.protocol === "http" || target.protocol === "https") {
@@ -492,7 +572,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         for (const result of successful) {
             const snapshot = buildServiceSnapshot(result, timestamp);
             snapshots[result.target] = snapshot;
-            const previous = previousSnapshots[result.target];
+            const previous = findPreviousSnapshot(previousSnapshots, result);
             if (!previous) {
                 continue;
             }
@@ -529,8 +609,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             host_key: result.host,
             ip_or_host: result.host,
             port: result.port,
-            transport_protocol: result.protocol,
-            protocol_name: result.serviceName,
+            transport_protocol: "tcp",
+            protocol_name: result.protocol,
             application_service_name: result.serviceName,
             product_name: result.productName,
             vendor: result.vendor,
@@ -541,7 +621,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }));
 
         const fingerprints = successful.flatMap((result) => {
-            const key = serviceKey(result.host, result.port, result.protocol);
+            const key = serviceKey(result.host, result.port);
             const items: any[] = [];
             if (result.banner) {
                 items.push({
@@ -577,7 +657,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const evidences = successful.map((result) => ({
             asset_type: "service",
-            asset_key: serviceKey(result.host, result.port, result.protocol),
+            asset_key: serviceKey(result.host, result.port),
             evidence_type: "service_probe",
             title: `Service Fingerprint: ${result.host}:${result.port}`,
             content_text: result.banner || result.serverHeader || result.serviceName,
@@ -586,13 +666,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }));
 
         const relations = successful.map((result) => ({
-            from_type: "host",
+            from_type: /^\d{1,3}(?:\.\d{1,3}){3}$/.test(result.host) || result.host.includes(":") ? "ip" : "domain",
             from_key: result.host,
             to_type: "service",
-            to_key: serviceKey(result.host, result.port, result.protocol),
-            relation_type: "hosts_service",
+            to_key: serviceKey(result.host, result.port),
+            relation_type: "exposes_service",
             source: "service_fingerprinter",
-            confidence: 0.95,
+            confidence: 0.92,
         }));
 
         return {
@@ -637,4 +717,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

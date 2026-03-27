@@ -42,6 +42,14 @@ interface ToolOutput {
     error?: string;
 }
 
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 /**
  * 【方案2】导出参数 Schema 函数
  * 
@@ -86,7 +94,7 @@ export function get_input_schema() {
 }
 
 // 绑定到 globalThis
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 /**
  * Export output schema
@@ -126,7 +134,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 /**
  * Generate exploit payload
@@ -397,7 +405,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             results.push({
                                 url: targetUrl,
                                 vulnerable: true,
-                                commandOutput: commandOutput,
+                                commandOutput: commandOutput || undefined,
                                 responseTime: requestResult.responseTime
                             });
                             return;
@@ -440,5 +448,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 }
 
 // Export to globalThis for plugin engine
-globalThis.analyze = analyze;
-
+pluginGlobals.analyze = analyze;

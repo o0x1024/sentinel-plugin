@@ -90,7 +90,13 @@ interface ToolOutput {
     error?: string;
 }
 
+const DEFAULT_TIMEOUT = 10000;
+const DEFAULT_CONCURRENCY = 32;
+const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_PORTS = [80, 443, 8080, 8443];
+const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+const HTTP_PRIMARY_PORTS = new Set([80, 8080]);
+const HTTPS_PRIMARY_PORTS = new Set([443, 8443]);
 
 function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
@@ -139,6 +145,12 @@ const TECH_SIGNATURES: Record<string, { header?: string; pattern: RegExp }[]> = 
     ],
 };
 
+const pluginGlobals = globalThis as typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
 /**
  * Export input schema
  */
@@ -161,14 +173,14 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Request timeout in milliseconds",
-                default: 10000,
+                default: DEFAULT_TIMEOUT,
                 minimum: 1000,
                 maximum: 60000
             },
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent requests",
-                default: 10,
+                default: DEFAULT_CONCURRENCY,
                 minimum: 1,
                 maximum: 50
             },
@@ -180,12 +192,12 @@ export function get_input_schema() {
             maxRedirects: {
                 type: "integer",
                 description: "Maximum number of redirects to follow",
-                default: 5
+                default: DEFAULT_MAX_REDIRECTS
             },
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header",
-                default: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                default: DEFAULT_USER_AGENT
             },
             extractTitle: {
                 type: "boolean",
@@ -215,7 +227,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 /**
  * Export output schema
@@ -266,7 +278,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 /**
  * Extract title from HTML content
@@ -299,6 +311,48 @@ function detectTechnologies(headers: Record<string, string>): string[] {
     return detected;
 }
 
+function isHtmlContentType(contentType?: string): boolean {
+    return /(?:text\/html|application\/xhtml\+xml)/i.test(contentType || "");
+}
+
+function shouldFallbackToGet(status: number): boolean {
+    return status === 405 || status === 501;
+}
+
+function shouldFetchBodyForTitle(
+    statusCode: number,
+    headers: Record<string, string>,
+    extractTitleEnabled: boolean,
+): boolean {
+    if (!extractTitleEnabled || statusCode >= 400) {
+        return false;
+    }
+
+    const contentType = headers["content-type"];
+    return !contentType || isHtmlContentType(contentType);
+}
+
+function resolveRedirectUrl(
+    requestedUrl: string,
+    response: { redirected?: boolean; url?: string },
+    headers: Record<string, string>,
+): string | undefined {
+    if (response.redirected && response.url && response.url !== requestedUrl) {
+        return response.url;
+    }
+
+    const location = headers["location"];
+    if (!location) {
+        return undefined;
+    }
+
+    try {
+        return new URL(location, requestedUrl).toString();
+    } catch {
+        return location;
+    }
+}
+
 /**
  * Normalize target to URL
  */
@@ -316,6 +370,57 @@ function normalizeTarget(target: string, port: number, protocol: string): string
     return `${protocol}://${target}:${port}`;
 }
 
+function buildCandidateUrls(
+    target: string,
+    ports: number[],
+    options: {
+        checkHttp: boolean;
+        checkHttps: boolean;
+        probeUnknownPortsWithBoth: boolean;
+    }
+): string[] {
+    if (target.startsWith("http://") || target.startsWith("https://")) {
+        return [target];
+    }
+
+    const urls: string[] = [];
+    for (const port of ports) {
+        const protocols: string[] = [];
+        const isHttpPrimary = HTTP_PRIMARY_PORTS.has(port);
+        const isHttpsPrimary = HTTPS_PRIMARY_PORTS.has(port);
+
+        if (options.checkHttp && isHttpPrimary) {
+            protocols.push("http");
+        }
+        if (options.checkHttps && isHttpsPrimary) {
+            protocols.push("https");
+        }
+
+        if (protocols.length === 0 && options.probeUnknownPortsWithBoth) {
+            if (options.checkHttps) {
+                protocols.push("https");
+            }
+            if (options.checkHttp) {
+                protocols.push("http");
+            }
+        }
+
+        if (protocols.length === 0) {
+            if (options.checkHttps && !options.checkHttp) {
+                protocols.push("https");
+            } else if (options.checkHttp && !options.checkHttps) {
+                protocols.push("http");
+            }
+        }
+
+        for (const protocol of protocols) {
+            urls.push(normalizeTarget(target, port, protocol));
+        }
+    }
+
+    return urls;
+}
+
 /**
  * Probe a single URL
  */
@@ -331,33 +436,68 @@ async function probeUrl(
     }
 ): Promise<ProbeResult> {
     const startTime = performance.now();
+    const requestInit = {
+        headers: {
+            "User-Agent": options.userAgent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        },
+        redirect: options.followRedirects ? "follow" : "manual",
+        maxRedirects: options.maxRedirects,
+        // @ts-ignore
+        timeout: options.timeout,
+    } as const;
     
     try {
-        const response = await fetch(url, {
-            method: "GET",
-            headers: {
-                "User-Agent": options.userAgent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            },
-            redirect: options.followRedirects ? "follow" : "manual",
-            // @ts-ignore
-            timeout: options.timeout,
-        });
-        
-        const responseTime = Math.round(performance.now() - startTime);
-        
-        // Convert headers to object
-        const headers: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
+        let response: any;
+        let requestMethod: "HEAD" | "GET" = "HEAD";
+        try {
+            response = await fetch(url, {
+                method: "HEAD",
+                ...requestInit,
+            });
+        } catch {
+            requestMethod = "GET";
+            response = await fetch(url, {
+                method: "GET",
+                ...requestInit,
+            });
+        }
+
+        let headers: Record<string, string> = {};
+        response.headers.forEach((value: string, key: string) => {
             headers[key.toLowerCase()] = value;
         });
+
+        if (requestMethod === "HEAD" && shouldFallbackToGet(response.status)) {
+            response = await fetch(url, {
+                method: "GET",
+                ...requestInit,
+            });
+            headers = {};
+            response.headers.forEach((value: string, key: string) => {
+                headers[key.toLowerCase()] = value;
+            });
+            requestMethod = "GET";
+        }
         
-        // Get response body for title extraction
         let title: string | undefined;
         let contentLength = parseInt(headers["content-length"] || "0", 10);
         
-        if (options.extractTitle) {
+        if (requestMethod === "HEAD" && shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
+            response = await fetch(url, {
+                method: "GET",
+                ...requestInit,
+            });
+            headers = {};
+            response.headers.forEach((value: string, key: string) => {
+                headers[key.toLowerCase()] = value;
+            });
+            contentLength = parseInt(headers["content-length"] || "0", 10);
+            requestMethod = "GET";
+        }
+
+        if (requestMethod === "GET" && shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
             try {
                 const text = await response.text();
                 title = extractTitle(text);
@@ -375,13 +515,13 @@ async function probeUrl(
         const result: ProbeResult = {
             url,
             alive: true,
+            responseTime: Math.round(performance.now() - startTime),
             statusCode: response.status,
             statusText: response.statusText,
             title,
             contentLength,
             contentType: headers["content-type"],
             server: headers["server"],
-            responseTime,
             technologies,
         };
         
@@ -389,10 +529,7 @@ async function probeUrl(
             result.headers = headers;
         }
         
-        // Check for redirect
-        if (response.redirected) {
-            result.redirectUrl = response.url;
-        }
+        result.redirectUrl = resolveRedirectUrl(url, response, headers);
         
         return result;
         
@@ -563,11 +700,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = input.timeout || 10000;
-        const concurrency = input.concurrency || 10;
+        const timeout = input.timeout || DEFAULT_TIMEOUT;
+        const concurrency = input.concurrency || DEFAULT_CONCURRENCY;
         const followRedirects = input.followRedirects !== false;
-        const maxRedirects = input.maxRedirects || 5;
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const maxRedirects = input.maxRedirects || DEFAULT_MAX_REDIRECTS;
+        const userAgent = input.userAgent || DEFAULT_USER_AGENT;
         const extractTitle = input.extractTitle !== false;
         const extractHeaders = input.extractHeaders === true;
         const checkHttps = input.checkHttps !== false;
@@ -576,23 +713,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const previousSnapshots = input.previousSnapshots || {};
         const timestamp = new Date().toISOString();
         
-        const urls: string[] = [];
-        
-        for (const target of validTargets) {
-            if (target.startsWith("http://") || target.startsWith("https://")) {
-                urls.push(target);
-                continue;
-            }
-            
-            for (const port of ports) {
-                if (checkHttps && (port === 443 || port === 8443 || port !== 80)) {
-                    urls.push(normalizeTarget(target, port, "https"));
-                }
-                if (checkHttp && (port === 80 || port === 8080 || port !== 443)) {
-                    urls.push(normalizeTarget(target, port, "http"));
-                }
-            }
-        }
+        const probeUnknownPortsWithBoth = Array.isArray(input.ports) && input.ports.length > 0;
+        const urls = validTargets.flatMap(target => buildCandidateUrls(target, ports, {
+            checkHttp,
+            checkHttps,
+            probeUnknownPortsWithBoth,
+        }));
         
         const uniqueUrls = [...new Set(urls)];
         const tasks = uniqueUrls.map(url => () => probeUrl(url, {
@@ -679,30 +805,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             source: "http_prober",
             confidence: 0.9,
         }));
-        const surfaceHosts = aliveResults.map(result => {
-            const parsed = new URL(result.url);
-            return {
-                hostname: parsed.hostname,
-                fqdn: parsed.hostname,
-                ip_addresses: isIpLiteral(parsed.hostname) ? [parsed.hostname] : undefined,
-                source: "http_prober",
-                confidence: 0.95,
-            };
-        });
-        const surfaceServices = aliveResults.map(result => {
-            const parsed = new URL(result.url);
-            const protocol = parsed.protocol.replace(":", "");
-            return {
-                host_key: parsed.hostname,
-                ip_or_host: parsed.hostname,
-                port: Number(parsed.port || (protocol === "https" ? 443 : 80)),
-                transport_protocol: "tcp",
-                protocol_name: protocol.toUpperCase(),
-                application_service_name: protocol.toUpperCase(),
-                source: "http_prober",
-                confidence: 0.95,
-            };
-        });
         const surfaceWebs = aliveResults.map(result => {
             const parsed = new URL(result.url);
             return {
@@ -765,8 +867,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 surface_artifacts: {
                     domains: surfaceDomains,
                     ips: surfaceIps,
-                    hosts: surfaceHosts,
-                    services: surfaceServices,
                     webs: surfaceWebs,
                     changes: changeEvents.map(event => ({
                         asset_key: event.assetId,
@@ -782,55 +882,28 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         metadata: event.metadata,
                     })),
                     evidences: surfaceEvidences,
-                    relations: aliveResults.flatMap(result => {
+                    relations: aliveResults.map(result => {
                         const parsed = new URL(result.url);
-                        const protocol = parsed.protocol.replace(":", "");
-                        const port = Number(parsed.port || (protocol === "https" ? 443 : 80));
-                        const serviceKey = `${parsed.hostname}:${port}/${protocol}`;
-                        const relations = [
-                            {
-                                from_type: "host",
+                        if (isIpLiteral(parsed.hostname)) {
+                            return {
+                                from_type: "ip",
                                 from_key: parsed.hostname,
-                                to_type: "service",
-                                to_key: serviceKey,
-                                relation_type: "hosts_service",
-                                source: "http_prober",
-                                confidence: 0.95,
-                            },
-                            {
-                                from_type: "service",
-                                from_key: serviceKey,
                                 to_type: "web",
                                 to_key: result.url,
                                 relation_type: "exposes_web",
                                 source: "http_prober",
-                                confidence: 0.95,
-                            },
-                        ];
-
-                        if (isIpLiteral(parsed.hostname)) {
-                            relations.unshift({
-                                from_type: "ip",
-                                from_key: parsed.hostname,
-                                to_type: "host",
-                                to_key: parsed.hostname,
-                                relation_type: "identifies_host",
-                                source: "http_prober",
                                 confidence: 0.9,
-                            });
-                        } else {
-                            relations.unshift({
-                                from_type: "domain",
-                                from_key: parsed.hostname,
-                                to_type: "host",
-                                to_key: parsed.hostname,
-                                relation_type: "resolves_to_host",
-                                source: "http_prober",
-                                confidence: 0.9,
-                            });
+                            };
                         }
-
-                        return relations;
+                        return {
+                            from_type: "domain",
+                            from_key: parsed.hostname,
+                            to_type: "web",
+                            to_key: result.url,
+                            relation_type: "exposes_web",
+                            source: "http_prober",
+                            confidence: 0.9,
+                        };
                     }),
                 },
             },
@@ -844,4 +917,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

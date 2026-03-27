@@ -12,7 +12,9 @@
  */
 
 interface ToolInput {
-    targets: string[];  // List of hosts/IPs to monitor
+    targets?: Array<string | ServiceTarget>;  // Legacy host list or service endpoints
+    target_objects?: Array<string | ServiceTarget>;
+    service_targets?: Array<string | ServiceTarget>;
     ports?: number[];   // Specific ports to scan (default: common ports)
     timeout?: number;
     concurrency?: number;
@@ -32,6 +34,19 @@ interface PortSnapshot {
     host: string;
     openPorts: PortInfo[];
     lastChecked: string;
+}
+
+interface ServiceTarget {
+    type?: string;
+    value?: string;
+    host?: string;
+    host_key?: string;
+    ip_or_host?: string;
+    port?: number;
+    port_number?: number;
+    protocol?: string;
+    transport_protocol?: string;
+    service_name?: string;
 }
 
 interface ChangeEvent {
@@ -79,6 +94,14 @@ interface ToolOutput {
     };
     error?: string;
 }
+
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
 
 // Common ports to scan
 const COMMON_PORTS = [
@@ -140,6 +163,63 @@ function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
+function normalizeHostTarget(target: string | ServiceTarget): { host: string; ports?: number[] } | null {
+    if (typeof target === "string") {
+        const trimmed = target.trim();
+        if (!trimmed) return null;
+
+        try {
+            if (trimmed.includes("://")) {
+                const parsed = new URL(trimmed);
+                const host = parsed.hostname;
+                const port = parsed.port ? Number(parsed.port) : 0;
+                return host ? { host, ports: port > 0 ? [port] : undefined } : null;
+            }
+        } catch {
+            // Fall through to host:port parsing.
+        }
+
+        const base = trimmed.split("/")[0];
+        if (!base) return null;
+
+        const colonParts = base.split(":");
+        if (colonParts.length === 2 && /^\d+$/.test(colonParts[1])) {
+            return { host: colonParts[0], ports: [Number(colonParts[1])] };
+        }
+
+        return { host: base };
+    }
+
+    if (!target || typeof target !== "object") {
+        return null;
+    }
+
+    if (typeof target.value === "string" && target.value.trim()) {
+        return normalizeHostTarget(target.value);
+    }
+
+    const host = String(target.host || target.ip_or_host || target.host_key || "").trim();
+    const port = Number(target.port ?? target.port_number ?? 0);
+    if (!host) return null;
+    return { host, ports: port > 0 ? [port] : undefined };
+}
+
+function collectRawTargets(input: ToolInput): Array<string | ServiceTarget> {
+    return [
+        ...(Array.isArray(input.service_targets) ? input.service_targets : []),
+        ...(Array.isArray(input.target_objects) ? input.target_objects : []),
+        ...(Array.isArray(input.targets) ? input.targets : []),
+    ].filter((target) => {
+        if (typeof target === "string") {
+            return target.trim().length > 0;
+        }
+        if (!target || typeof target !== "object") {
+            return false;
+        }
+        return !target.type || target.type === "service" || target.type === "host" || target.type === "ip";
+    });
+}
+
 // Calculate risk score
 function calculateRiskScore(severity: string, eventType: string, ports: number[]): number {
     let score = 0;
@@ -195,12 +275,18 @@ async function runWithConcurrency<T>(
 export function get_input_schema() {
     return {
         type: "object",
-        required: ["targets"],
         properties: {
             targets: {
                 type: "array",
-                items: { type: "string" },
-                description: "List of hosts/IPs to scan for port changes"
+                description: "Legacy host targets or service endpoint strings"
+            },
+            target_objects: {
+                type: "array",
+                description: "Structured monitor targets including service endpoints"
+            },
+            service_targets: {
+                type: "array",
+                description: "Structured service endpoints with host, port, and protocol fields"
             },
             ports: {
                 type: "array",
@@ -234,7 +320,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 /**
  * Export output schema
@@ -283,7 +369,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 /**
  * Check if a single port is open via HTTP probe
@@ -397,23 +483,38 @@ async function scanHost(
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!input.targets || !Array.isArray(input.targets)) {
+        const rawTargets = collectRawTargets(input);
+        if (rawTargets.length === 0) {
             return {
                 success: false,
                 error: "Invalid input: targets array is required"
             };
         }
-        
-        // Filter out empty strings
-        const validTargets = [...new Set(input.targets.filter(t => typeof t === 'string' && t.trim().length > 0))];
-        if (validTargets.length === 0) {
+
+        const normalizedTargetSpecs = rawTargets
+            .map(normalizeHostTarget)
+            .filter((target): target is NonNullable<typeof target> => Boolean(target));
+
+        if (normalizedTargetSpecs.length === 0) {
             return {
                 success: false,
-                error: "Invalid input: targets array must contain at least one non-empty string"
+                error: "Invalid input: no valid host or service targets provided"
             };
         }
-        
-        const ports = [...new Set(input.ports || COMMON_PORTS)].sort((left, right) => left - right);
+
+        const targetPortMap = new Map<string, Set<number>>();
+        for (const target of normalizedTargetSpecs) {
+            const entry = targetPortMap.get(target.host) || new Set<number>();
+            for (const port of target.ports || []) {
+                if (port > 0) {
+                    entry.add(port);
+                }
+            }
+            targetPortMap.set(target.host, entry);
+        }
+
+        const validTargets = [...targetPortMap.keys()];
+        const defaultPorts = [...new Set(input.ports || COMMON_PORTS)].sort((left, right) => left - right);
         const timeout = input.timeout || 3000;
         const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const targetConcurrency = Math.max(1, Math.min(MAX_TARGET_CONCURRENCY, validTargets.length, concurrency));
@@ -451,7 +552,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
             
             try {
-                const openPorts = await scanHost(host, ports, timeout, concurrency, detectService);
+                const selectedPorts = [...(targetPortMap.get(host) || new Set<number>())];
+                const scanPorts = (selectedPorts.length > 0 ? selectedPorts : defaultPorts)
+                    .sort((left, right) => left - right);
+                const openPorts = await scanHost(host, scanPorts, timeout, concurrency, detectService);
                 
                 result.success = true;
                 successfulScans++;
@@ -612,7 +716,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 changeEvents,
                 snapshots: newSnapshots,
                 summary: {
-                    totalTargets: input.targets.length,
+                    totalTargets: validTargets.length,
                     successfulScans,
                     failedScans,
                     totalOpenPorts,
@@ -621,19 +725,21 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     serviceChanges: serviceChangesCount,
                 },
                 surface_artifacts: {
+                    domains: [...new Set(results
+                        .map(result => result.host)
+                        .filter(host => !isIpLiteral(host))
+                    )].map(domainName => ({
+                        domain_name: domainName,
+                        fqdn: domainName,
+                        source: "port_monitor",
+                        confidence: 0.95,
+                    })),
                     ips: [...new Set(results
                         .map(result => result.host)
                         .filter(host => isIpLiteral(host))
                     )].map(ipAddress => ({
                         ip_address: ipAddress,
                         ip_version: ipAddress.includes(":") ? "IPv6" : "IPv4",
-                        source: "port_monitor",
-                        confidence: 0.95,
-                    })),
-                    hosts: results.map(result => ({
-                        hostname: result.host,
-                        fqdn: isIpLiteral(result.host) ? undefined : result.host,
-                        ip_addresses: isIpLiteral(result.host) ? [result.host] : undefined,
                         source: "port_monitor",
                         confidence: 0.95,
                     })),
@@ -648,22 +754,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             confidence: 0.95,
                         }))
                     ),
-                    services: results.flatMap(result =>
-                        (result.snapshot?.openPorts || []).map(portInfo => ({
-                            host_key: result.host,
-                            ip_or_host: result.host,
-                            port: portInfo.port,
-                            transport_protocol: portInfo.protocol,
-                            protocol_name: portInfo.service || PORT_SERVICES[portInfo.port] || "unknown",
-                            application_service_name: portInfo.service || PORT_SERVICES[portInfo.port] || "unknown",
-                            banner: portInfo.banner,
-                            source: "port_monitor",
-                            confidence: 0.9,
-                        }))
-                    ),
                     changes: changeEvents.map(event => ({
                         asset_key: event.assetId,
-                        asset_type: "host",
+                        asset_type: isIpLiteral(event.assetId) ? "ip" : "domain",
                         change_type: event.eventType,
                         severity: event.severity,
                         title: event.title,
@@ -677,7 +770,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     evidences: results
                         .filter(result => result.snapshot)
                         .map(result => ({
-                            asset_type: "host",
+                            asset_type: isIpLiteral(result.host) ? "ip" : "domain",
                             asset_key: result.host,
                             evidence_type: "port_snapshot",
                             title: `Port Snapshot: ${result.host}`,
@@ -687,11 +780,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         })),
                     relations: results.flatMap(result =>
                         (result.snapshot?.openPorts || []).map(portInfo => ({
-                            from_type: "host",
+                            from_type: isIpLiteral(result.host) ? "ip" : "domain",
                             from_key: result.host,
-                            to_type: "service",
+                            to_type: "port",
                             to_key: `${result.host}:${portInfo.port}/${portInfo.protocol}`,
-                            relation_type: "hosts_service",
+                            relation_type: "exposes_port",
                             source: "port_monitor",
                             confidence: 0.95,
                         }))
@@ -708,4 +801,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

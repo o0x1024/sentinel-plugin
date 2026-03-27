@@ -8,7 +8,7 @@
  * @category recon
  * @default_severity info
  * @tags cidr, ip, network, asm, surface
- * @description Expand IPv4 CIDR blocks and individual IP targets into typed IP and host surface artifacts for ASM and network asset mapping workflows
+ * @description Expand IPv4 CIDR blocks and individual IP targets into typed IP surface artifacts for ASM and network asset mapping workflows
  */
 
 interface ToolInput {
@@ -20,7 +20,7 @@ interface ToolInput {
 interface MappingResult {
     target: string;
     kind: "cidr" | "ip";
-    generatedHosts: number;
+    generatedIps: number;
     truncated: boolean;
     error?: string;
 }
@@ -33,13 +33,20 @@ interface ToolOutput {
         summary: {
             totalTargets: number;
             generatedIps: number;
-            generatedHosts: number;
             truncatedTargets: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
 }
+
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
 
 function isIpv4(value: string): boolean {
     const parts = value.split(".");
@@ -124,7 +131,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 export function get_output_schema() {
     return {
@@ -139,7 +146,7 @@ export function get_output_schema() {
                     summary: { type: "object" },
                     surface_artifacts: {
                         type: "object",
-                        description: "Typed IP and host assets for surface graph ingestion",
+                        description: "Typed IP assets for surface graph ingestion",
                     },
                 },
             },
@@ -148,7 +155,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
@@ -161,12 +168,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const includeNetworkBroadcast = Boolean(input.includeNetworkBroadcast);
 
         const ips: any[] = [];
-        const hosts: any[] = [];
-        const relations: any[] = [];
         const evidences: any[] = [];
         const results: MappingResult[] = [];
         const seenIps = new Set<string>();
-        const seenHosts = new Set<string>();
 
         for (const target of targets) {
             try {
@@ -197,27 +201,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         });
                     }
 
-                    if (!seenHosts.has(ip)) {
-                        seenHosts.add(ip);
-                        hosts.push({
-                            hostname: ip,
-                            ip_addresses: [ip],
-                            device_type: "network_node",
-                            lifecycle_status: "active",
-                            labels: kind === "cidr" ? ["cidr_seed"] : ["ip_seed"],
-                            last_online_at: new Date().toISOString(),
-                        });
-                    }
-
-                    relations.push({
-                        from_type: "ip",
-                        from_key: ip,
-                        to_type: "host",
-                        to_key: ip,
-                        relation_type: "identifies_host",
-                        confidence: 1,
-                    });
-
                     evidences.push({
                         asset_type: "ip",
                         asset_key: ip,
@@ -234,14 +217,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 results.push({
                     target,
                     kind,
-                    generatedHosts: addresses.length,
+                    generatedIps: addresses.length,
                     truncated,
                 });
             } catch (error) {
                 results.push({
                     target,
                     kind: target.includes("/") ? "cidr" : "ip",
-                    generatedHosts: 0,
+                    generatedIps: 0,
                     truncated: false,
                     error: error instanceof Error ? error.message : String(error),
                 });
@@ -256,13 +239,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 summary: {
                     totalTargets: targets.length,
                     generatedIps: ips.length,
-                    generatedHosts: hosts.length,
                     truncatedTargets: results.filter((item) => item.truncated).length,
                 },
                 surface_artifacts: {
                     ips,
-                    hosts,
-                    relations,
                     evidences,
                 },
             },
@@ -275,4 +255,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

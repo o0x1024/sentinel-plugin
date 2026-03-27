@@ -43,6 +43,14 @@ interface ToolOutput {
     error?: string;
 }
 
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 function normalizeTarget(value: string): string {
     const trimmed = String(value || "").trim();
     if (!trimmed) return "";
@@ -220,7 +228,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 export function get_output_schema() {
     return {
@@ -244,7 +252,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
@@ -291,4 +299,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

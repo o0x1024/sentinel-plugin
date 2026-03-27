@@ -105,7 +105,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Expand IPv4 CIDR ranges and IP targets into typed IP and host assets for ASM and network surface mapping workflows.",
+      "description": "Expand IPv4 CIDR ranges and IP targets into typed IP assets with CIDR mapping evidence for ASM and network surface mapping workflows.",
       "default_severity": "info",
       "tags": ["cidr", "ip", "network", "asm", "surface"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cidr_mapper.ts"
@@ -117,7 +117,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Probe HTTP/HTTPS endpoints to check if they are alive, collect response info including status code, title, content length, headers, and technologies",
+      "description": "Probe HTTP/HTTPS endpoints with optimized liveness checks, collecting response metadata and emitting domain/ip, web, evidence, and relation artifacts.",
       "default_severity": "info",
       "tags": ["http", "probe", "alive", "discovery", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/http_prober.ts"
@@ -129,7 +129,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Identify web technologies using dictionary-driven fingerprint rules with structured matchers, version extraction, and configurable concurrent target scanning",
+      "description": "Identify web technologies using explicit dictionary-driven fingerprint rules with structured matchers, version extraction, and concurrent target scanning.",
       "default_severity": "info",
       "tags": ["fingerprint", "technology", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/tech_fingerprinter.ts"
@@ -137,11 +137,11 @@
     {
       "id": "sensitive_file_scanner",
       "name": "Sensitive File Scanner",
-      "version": "1.1.0",
+      "version": "1.3.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
-      "description": "Scan web targets for exposed sensitive files using structured dictionary rules with configurable concurrent target-rule scanning",
+      "description": "Scan web targets for exposed sensitive files using explicit dictionary matchers and negative matchers with concurrent target-rule scanning.",
       "default_severity": "medium",
       "tags": ["risk", "exposure", "file", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sensitive_file_scanner.ts"
@@ -153,7 +153,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
-      "description": "Execute safe dictionary-driven verification rules with deduplicated rule loading, fingerprint-scope prefiltering, bounded concurrent target-rule scanning, and corrected executed-task accounting",
+      "description": "Execute safe dictionary-driven verification rules loaded from workflow input or poc dictionaries, with fingerprint scoping, chained requests, and structured evidence.",
       "default_severity": "medium",
       "tags": ["risk", "poc", "verification", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/risk_scanner.ts"
@@ -177,7 +177,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
-      "description": "Fingerprint exposed network services from host/port targets, producing service, fingerprint, evidence, and relation artifacts for ASM and network asset mapping.",
+      "description": "Fingerprint exposed services from host/port targets, producing service, fingerprint, evidence, and direct domain/ip relation artifacts.",
       "default_severity": "info",
       "tags": ["service", "fingerprint", "banner", "port", "asm", "network"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_fingerprinter.ts"
@@ -321,7 +321,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
-      "description": "Monitor hosts for port/service changes with deduplicated target/port queues, fixed worker-pool concurrency, and bounded multi-target scanning",
+      "description": "Monitor domain/ip targets for port changes with deduplicated target queues, bounded scanning, and direct domain/ip to port surface relations.",
       "default_severity": "medium",
       "tags": ["port", "service", "monitor", "change-detection", "scan"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/port_monitor.ts"

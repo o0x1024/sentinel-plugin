@@ -76,53 +76,15 @@ interface ToolOutput {
     error?: string;
 }
 
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
 
-const FALLBACK_RULES: RuleEntry[] = [
-    {
-        word: "swagger_ui_exposed",
-        category: "api_exposure",
-        metadata: {
-            name: "Swagger UI Exposed",
-            severity: "medium",
-            finding_type: "api_exposure",
-            match_scope: { fingerprints: ["swagger ui"] },
-            requests: [
-                {
-                    id: "swagger",
-                    method: "GET",
-                    path: "swagger-ui.html",
-                    matchers: [{ part: "body", type: "contains", value: "swagger-ui" }],
-                },
-            ],
-            description: "Swagger UI is publicly accessible.",
-            remediation: "Restrict Swagger UI in production environments.",
-            safe_mode: true,
-        },
-    },
-    {
-        word: "spring_actuator_env_exposed",
-        category: "config_exposure",
-        metadata: {
-            name: "Spring Actuator Env Exposed",
-            severity: "high",
-            finding_type: "config_exposure",
-            match_scope: { fingerprints: ["spring", "spring boot"] },
-            requests: [
-                {
-                    id: "env",
-                    method: "GET",
-                    path: "actuator/env",
-                    matchers: [{ part: "body", type: "contains", value: "\"propertySources\"" }],
-                },
-            ],
-            description: "Spring Actuator environment endpoint is publicly accessible.",
-            remediation: "Disable or protect actuator endpoints.",
-            cwe: "CWE-200",
-            safe_mode: true,
-        },
-    },
-];
+const pluginGlobals = globalThis as PluginGlobals;
+
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
 
 const DEFAULT_CONCURRENCY = 4;
 const MAX_CONCURRENCY = 20;
@@ -301,8 +263,8 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_input_schema = get_input_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
@@ -547,7 +509,7 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
         if (rules.length > 0) return rules;
     }
 
-    return FALLBACK_RULES;
+    return [];
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeout: number): Promise<Response> {
@@ -789,6 +751,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const observedFingerprints = getObservedFingerprints(normalizedInput);
         const allRules = dedupeRules(await loadRules(normalizedInput));
+        if (allRules.length === 0) {
+            return {
+                success: false,
+                error: "No risk verification rules loaded. Configure dictionaryEntries or a poc_rule dictionary with explicit requests and matchers.",
+            };
+        }
         const rules = allRules
             .filter(rule => {
                 const metadata = parseMetadata(rule.metadata);
@@ -862,4 +830,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

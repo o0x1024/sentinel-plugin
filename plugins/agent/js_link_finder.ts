@@ -64,6 +64,14 @@ interface ToolOutput {
     error?: string;
 }
 
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 /**
  * Input schema for agent
  */
@@ -892,6 +900,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 }
 
 // Export for Deno runtime
-globalThis.analyze = analyze;
-globalThis.get_input_schema = get_input_schema;
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.analyze = analyze;
+pluginGlobals.get_input_schema = get_input_schema;
+pluginGlobals.get_output_schema = get_output_schema;

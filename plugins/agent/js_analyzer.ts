@@ -100,6 +100,14 @@ interface ToolOutput {
     error?: string;
 }
 
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 // Secret patterns with severity
 const SECRET_PATTERNS: { name: string; pattern: RegExp; severity: "critical" | "high" | "medium" | "low" }[] = [
     // Cloud Provider Keys
@@ -272,7 +280,7 @@ export function get_input_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 /**
  * Execute tasks with concurrency control
@@ -340,7 +348,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 /**
  * Extract literals from JavaScript code using Sentinel AST API (oxc_parser)
@@ -887,4 +895,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

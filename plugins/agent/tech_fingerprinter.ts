@@ -95,81 +95,13 @@ interface ToolOutput {
     error?: string;
 }
 
-const FALLBACK_RULES: RuleEntry[] = [
-    {
-        word: "nginx",
-        category: "web_server",
-        metadata: {
-            name: "Nginx",
-            confidence: 0.95,
-            matchers: [{ part: "header", key: "server", type: "regex", value: "nginx(?:/([0-9.]+))?" }],
-            version_patterns: [{ part: "header", key: "server", pattern: "nginx/([0-9.]+)" }],
-        },
-    },
-    {
-        word: "apache",
-        category: "web_server",
-        metadata: {
-            name: "Apache HTTP Server",
-            confidence: 0.95,
-            matchers: [{ part: "header", key: "server", type: "regex", value: "apache(?:/([0-9.]+))?" }],
-            version_patterns: [{ part: "header", key: "server", pattern: "apache/([0-9.]+)" }],
-        },
-    },
-    {
-        word: "cloudflare",
-        category: "cdn",
-        metadata: {
-            name: "Cloudflare",
-            confidence: 0.9,
-            operator: "or",
-            matchers: [
-                { part: "header", key: "server", type: "contains", value: "cloudflare" },
-                { part: "header", key: "cf-ray", type: "exists" },
-            ],
-        },
-    },
-    {
-        word: "nextjs",
-        category: "framework",
-        metadata: {
-            name: "Next.js",
-            confidence: 0.85,
-            operator: "or",
-            matchers: [
-                { part: "body", type: "contains", value: "__NEXT_DATA__" },
-                { part: "body", type: "contains", value: "_next/static" },
-                { part: "header", key: "x-powered-by", type: "contains", value: "Next.js" },
-            ],
-        },
-    },
-    {
-        word: "vuejs",
-        category: "framework",
-        metadata: {
-            name: "Vue.js",
-            confidence: 0.8,
-            operator: "or",
-            matchers: [
-                { part: "body", type: "regex", value: "data-v-[a-f0-9]+" },
-                { part: "body", type: "contains", value: "__VUE__" },
-            ],
-        },
-    },
-    {
-        word: "swagger_ui",
-        category: "api_doc",
-        metadata: {
-            name: "Swagger UI",
-            confidence: 0.95,
-            operator: "or",
-            matchers: [
-                { part: "title", type: "contains", value: "Swagger UI" },
-                { part: "body", type: "contains", value: "swagger-ui" },
-            ],
-        },
-    },
-];
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
 
 export function get_input_schema() {
     return {
@@ -210,8 +142,8 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_input_schema = get_input_schema;
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_input_schema = get_input_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
@@ -287,7 +219,7 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
         if (rules.length > 0) return rules;
     }
 
-    return FALLBACK_RULES;
+    return [];
 }
 
 async function fetchWithTimeout(url: string, timeout: number, userAgent: string): Promise<Response> {
@@ -443,6 +375,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const rules = await loadRules(input);
+        if (rules.length === 0) {
+            return {
+                success: false,
+                error: "No technology fingerprint rules loaded. Configure dictionaryEntries or a fingerprint_rule dictionary with explicit matchers.",
+            };
+        }
         const results: PerTargetResult[] = [];
         const fingerprints: any[] = [];
         const previousSnapshots = input.previousSnapshots || {};
@@ -599,4 +537,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;

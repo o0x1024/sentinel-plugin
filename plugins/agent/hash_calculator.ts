@@ -21,6 +21,14 @@ interface ToolInput {
   hmacKey?: string;
 }
 
+type PluginGlobals = typeof globalThis & {
+  get_input_schema?: typeof get_input_schema;
+  get_output_schema?: typeof get_output_schema;
+  analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 /**
  * 【方案2】导出参数 Schema 函数
  * 
@@ -56,7 +64,7 @@ export function get_input_schema() {
 }
 
 // 绑定到 globalThis
-globalThis.get_input_schema = get_input_schema;
+pluginGlobals.get_input_schema = get_input_schema;
 
 /**
  * Export output schema
@@ -81,7 +89,7 @@ export function get_output_schema() {
     };
 }
 
-globalThis.get_output_schema = get_output_schema;
+pluginGlobals.get_output_schema = get_output_schema;
 
 interface ToolOutput {
   success: boolean;
@@ -371,4 +379,4 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 }
 
 // Required: bind to globalThis
-globalThis.analyze = analyze;
+pluginGlobals.analyze = analyze;
