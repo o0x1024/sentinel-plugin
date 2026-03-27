@@ -1,5 +1,5 @@
 {
-  "version": "2.3.6",
+  "version": "2.3.7",
   "updated_at": "2026-03-27",
   "plugins": [
     {
@@ -157,6 +157,18 @@
       "default_severity": "info",
       "tags": ["service", "fingerprint", "banner", "port", "asm", "network", "dictionary", "normalized"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_fingerprinter.ts"
+    },
+    {
+      "id": "service_monitor",
+      "name": "Service Monitor",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "monitor",
+      "description": "Monitor exposed services for availability, banner, product, and version changes with structured snapshots, service artifacts, and change events.",
+      "default_severity": "medium",
+      "tags": ["service", "monitor", "change-detection", "banner", "version", "asm", "network"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_monitor.ts"
     },
     {
       "id": "directory_bruteforcer",
