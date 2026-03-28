@@ -3,16 +3,18 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.2.0
+ * @version 1.4.0
  * @author Sentinel Team
  * @category recon
  * @default_severity info
  * @tags http, probe, alive, discovery, web
- * @description Probe HTTP/HTTPS endpoints to check if they are alive, collect response info including status code, title, content length, headers, and technologies
+ * @description Probe HTTP/HTTPS endpoints from URLs and service endpoints to confirm live websites, collect status code, title, headers, technologies, and structured web artifacts
  */
 
 interface ToolInput {
     targets: string[];
+    target_objects?: Array<string | ServiceLikeTarget>;
+    service_targets?: Array<string | ServiceLikeTarget>;
     ports?: number[];
     timeout?: number;
     concurrency?: number;
@@ -24,6 +26,19 @@ interface ToolInput {
     checkHttps?: boolean;
     checkHttp?: boolean;
     previousSnapshots?: Record<string, ProbeSnapshot>;
+}
+
+interface ServiceLikeTarget {
+    type?: string;
+    value?: string;
+    host?: string;
+    host_key?: string;
+    ip_or_host?: string;
+    port?: number;
+    port_number?: number;
+    protocol?: string;
+    transport_protocol?: string;
+    service_name?: string;
 }
 
 interface ProbeResult {
@@ -160,12 +175,19 @@ const pluginGlobals = globalThis as typeof globalThis & {
 export function get_input_schema() {
     return {
         type: "object",
-        required: ["targets"],
         properties: {
             targets: {
                 type: "array",
                 items: { type: "string" },
-                description: "List of targets to probe (domains, IPs, or URLs)"
+                description: "List of generic targets to probe (domains, IPs, or URLs)"
+            },
+            target_objects: {
+                type: "array",
+                description: "Structured target objects, including service endpoint assets",
+            },
+            service_targets: {
+                type: "array",
+                description: "Service endpoint targets such as host:port or structured service assets",
             },
             ports: {
                 type: "array",
@@ -460,6 +482,144 @@ function normalizeTarget(target: string, port: number, protocol: string): string
         return `${protocol}://${target}`;
     }
     return `${protocol}://${target}:${port}`;
+}
+
+type NormalizedServiceTarget = {
+    host: string;
+    port: number;
+    protocol?: string;
+    serviceName?: string;
+};
+
+function normalizeServiceTarget(raw: string | ServiceLikeTarget): NormalizedServiceTarget | null {
+    if (typeof raw === "string") {
+        const trimmed = raw.trim();
+        if (!trimmed) return null;
+
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+            try {
+                const parsed = new URL(trimmed);
+                const protocol = parsed.protocol.replace(":", "").toLowerCase();
+                const port = Number(parsed.port || (protocol === "https" ? 443 : 80));
+                if (!parsed.hostname || !port) return null;
+                return { host: parsed.hostname, port, protocol };
+            } catch {
+                return null;
+            }
+        }
+
+        const normalized = trimmed.replace(/\/(?:tcp|udp)$/i, "");
+        try {
+            const parsed = new URL(`tcp://${normalized}`);
+            const port = Number(parsed.port || 0);
+            if (!parsed.hostname || !port) return null;
+            return { host: parsed.hostname, port, protocol: "tcp" };
+        } catch {
+            const [hostPart, portPart] = normalized.split(":");
+            const port = Number(portPart || 0);
+            if (!hostPart || !port) return null;
+            return { host: hostPart, port, protocol: "tcp" };
+        }
+    }
+
+    if (!raw || typeof raw !== "object") {
+        return null;
+    }
+
+    if (raw.type && raw.type !== "service") {
+        return null;
+    }
+
+    if (typeof raw.value === "string" && raw.value.trim()) {
+        const normalized = normalizeServiceTarget(raw.value);
+        if (normalized) {
+            return {
+                ...normalized,
+                protocol: raw.protocol || raw.transport_protocol || normalized.protocol,
+                serviceName: raw.service_name,
+            };
+        }
+    }
+
+    const host = String(raw.ip_or_host || raw.host || raw.host_key || "").trim();
+    const port = Number(raw.port ?? raw.port_number ?? 0);
+    const protocol = String(raw.protocol || raw.transport_protocol || "").trim().toLowerCase();
+    const serviceName = String(raw.service_name || "").trim().toLowerCase();
+    if (!host || !port) return null;
+    return {
+        host,
+        port,
+        protocol: protocol || undefined,
+        serviceName: serviceName || undefined,
+    };
+}
+
+function collectServiceTargets(input: ToolInput): NormalizedServiceTarget[] {
+    const rawTargets = [
+        ...(Array.isArray(input.service_targets) ? input.service_targets : []),
+        ...(Array.isArray(input.target_objects) ? input.target_objects : []),
+    ];
+
+    const deduped = new Map<string, NormalizedServiceTarget>();
+    for (const rawTarget of rawTargets) {
+        const normalized = normalizeServiceTarget(rawTarget);
+        if (!normalized) continue;
+
+        const key = `${normalized.host}:${normalized.port}`;
+        const existing = deduped.get(key);
+        if (!existing) {
+            deduped.set(key, normalized);
+            continue;
+        }
+
+        const existingPriority = existing.protocol === "https" ? 3 : existing.protocol === "http" ? 2 : 1;
+        const currentPriority = normalized.protocol === "https" ? 3 : normalized.protocol === "http" ? 2 : 1;
+        if (currentPriority > existingPriority) {
+            deduped.set(key, normalized);
+        }
+    }
+
+    return Array.from(deduped.values());
+}
+
+function buildCandidateUrlsFromServiceTarget(
+    target: NormalizedServiceTarget,
+    options: {
+        checkHttp: boolean;
+        checkHttps: boolean;
+        probeUnknownPortsWithBoth: boolean;
+    }
+): string[] {
+    const protocols: string[] = [];
+    const normalizedProtocol = (target.protocol || "").toLowerCase();
+    const normalizedServiceName = (target.serviceName || "").toLowerCase();
+
+    if ((normalizedProtocol === "https" || normalizedServiceName === "https") && options.checkHttps) {
+        protocols.push("https");
+    } else if ((normalizedProtocol === "http" || normalizedServiceName === "http") && options.checkHttp) {
+        protocols.push("http");
+    } else {
+        const isHttpPrimary = HTTP_PRIMARY_PORTS.has(target.port);
+        const isHttpsPrimary = HTTPS_PRIMARY_PORTS.has(target.port);
+
+        if (options.checkHttp && isHttpPrimary) {
+            protocols.push("http");
+        }
+        if (options.checkHttps && isHttpsPrimary) {
+            protocols.push("https");
+        }
+
+        if (protocols.length === 0 && options.probeUnknownPortsWithBoth) {
+            if (options.checkHttps) {
+                protocols.push("https");
+            }
+            if (options.checkHttp) {
+                protocols.push("http");
+            }
+        }
+    }
+
+    return protocols.map((protocol) => normalizeTarget(target.host, target.port, protocol));
 }
 
 function buildCandidateUrls(
@@ -771,21 +931,37 @@ function createTechnologyChangeEvent(url: string, added: string[], removed: stri
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!input.targets || !Array.isArray(input.targets)) {
+        const rawTargets = Array.isArray(input.targets) ? input.targets : [];
+        const validStringTargets = rawTargets.filter(
+            target => typeof target === "string" && target.trim().length > 0,
+        );
+
+        const inferredServiceTargets = validStringTargets.filter((target) => {
+            if (target.startsWith("http://") || target.startsWith("https://")) {
+                return false;
+            }
+            return normalizeServiceTarget(target) !== null;
+        });
+
+        const genericTargets = validStringTargets.filter((target) => !inferredServiceTargets.includes(target));
+        const structuredServiceTargets = collectServiceTargets({
+            ...input,
+            service_targets: [
+                ...(Array.isArray(input.service_targets) ? input.service_targets : []),
+                ...inferredServiceTargets,
+            ],
+        });
+
+        if (
+            genericTargets.length === 0
+            && structuredServiceTargets.length === 0
+        ) {
             return {
                 success: false,
-                error: "Invalid input: targets array is required"
+                error: "Invalid input: provide at least one generic target or service endpoint target"
             };
         }
-        
-        const validTargets = input.targets.filter(t => typeof t === "string" && t.trim().length > 0);
-        if (validTargets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: targets array must contain at least one non-empty string"
-            };
-        }
-        
+
         const timeout = input.timeout || DEFAULT_TIMEOUT;
         const rawConcurrency = typeof input.concurrency === "number" ? Math.trunc(input.concurrency) : DEFAULT_CONCURRENCY;
         const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, rawConcurrency));
@@ -801,13 +977,20 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const timestamp = new Date().toISOString();
         
         const probeUnknownPortsWithBoth = Array.isArray(input.ports) && input.ports.length > 0;
-        const urls = validTargets.flatMap(target => buildCandidateUrls(target, ports, {
+        const urls = genericTargets.flatMap(target => buildCandidateUrls(target, ports, {
             checkHttp,
             checkHttps,
             probeUnknownPortsWithBoth,
         }));
+        const serviceUrls = structuredServiceTargets.flatMap((target) =>
+            buildCandidateUrlsFromServiceTarget(target, {
+                checkHttp,
+                checkHttps,
+                probeUnknownPortsWithBoth: true,
+            }),
+        );
         
-        const uniqueUrls = [...new Set(urls)];
+        const uniqueUrls = [...new Set([...urls, ...serviceUrls])];
         const tasks = uniqueUrls.map(url => () => probeUrl(url, {
             timeout,
             followRedirects,

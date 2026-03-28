@@ -560,7 +560,7 @@ function isIpLiteral(value: string): boolean {
 }
 
 async function resolveServiceProbeEngine(requestedEngine?: string): Promise<ResolvedServiceProbeEngine> {
-    const normalizedRequested = String(requestedEngine || "builtin").trim().toLowerCase() || "builtin";
+    const normalizedRequested = String(requestedEngine || "pistol").trim().toLowerCase() || "pistol";
     if (normalizedRequested === "builtin") {
         return {
             requested: "builtin",
@@ -684,8 +684,8 @@ export function get_input_schema() {
             serviceProbeEngine: {
                 type: "string",
                 enum: ["builtin", "pistol"],
-                default: "builtin",
-                description: "Service probe engine. Experimental engines automatically fall back to builtin unless supported and implemented.",
+                default: "pistol",
+                description: "Service probe engine. Pistol is the default service-identification engine; builtin remains available as a lighter fallback.",
             },
             previousSnapshots: {
                 type: "object",
