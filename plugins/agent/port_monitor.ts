@@ -3,12 +3,12 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.2.0
+ * @version 1.3.0
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
  * @tags port, service, monitor, change-detection, scan
- * @description Monitor hosts for port/service changes, generating ChangeEvents for workflow automation
+ * @description Monitor hosts for port exposure changes using native Rust-backed port discovery, generating ChangeEvents for workflow automation
  */
 
 interface ToolInput {
@@ -95,6 +95,30 @@ interface ToolOutput {
     error?: string;
 }
 
+interface NativePortScanTarget {
+    host: string;
+    ports?: number[];
+}
+
+interface NativePortScanResult {
+    host: string;
+    resolved_ips: string[];
+    open_ports: number[];
+    error?: string;
+}
+
+interface NativePortScanResponse {
+    success: boolean;
+    results: NativePortScanResult[];
+    summary?: {
+        total_targets: number;
+        successful_scans: number;
+        failed_scans: number;
+        total_open_ports: number;
+    };
+    error?: string;
+}
+
 type PluginGlobals = typeof globalThis & {
     get_input_schema?: typeof get_input_schema;
     get_output_schema?: typeof get_output_schema;
@@ -109,46 +133,13 @@ const COMMON_PORTS = [
     1433, 1521, 2049, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 8888, 9200, 27017
 ];
 
-// Well-known port services
-const PORT_SERVICES: Record<number, string> = {
-    21: "FTP",
-    22: "SSH",
-    23: "Telnet",
-    25: "SMTP",
-    53: "DNS",
-    80: "HTTP",
-    110: "POP3",
-    111: "RPC",
-    135: "MSRPC",
-    139: "NetBIOS",
-    143: "IMAP",
-    443: "HTTPS",
-    445: "SMB",
-    993: "IMAPS",
-    995: "POP3S",
-    1433: "MSSQL",
-    1521: "Oracle",
-    2049: "NFS",
-    3306: "MySQL",
-    3389: "RDP",
-    5432: "PostgreSQL",
-    5900: "VNC",
-    6379: "Redis",
-    8080: "HTTP-Proxy",
-    8443: "HTTPS-Alt",
-    8888: "HTTP-Alt",
-    9200: "Elasticsearch",
-    27017: "MongoDB",
-};
-
 // High-risk ports
 const HIGH_RISK_PORTS = new Set([
     21, 22, 23, 25, 135, 139, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 27017
 ]);
 
-const DEFAULT_CONCURRENCY = 10;
-const MAX_CONCURRENCY = 30;
-const MAX_TARGET_CONCURRENCY = 4;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 128;
 
 // Generate UUID
 function generateId(): string {
@@ -234,7 +225,6 @@ function calculateRiskScore(severity: string, eventType: string, ports: number[]
     switch (eventType) {
         case "ports_opened": score += 20; break;
         case "ports_closed": score += 5; break;
-        case "service_change": score += 15; break;
         case "high_risk_port_opened": score += 30; break;
     }
     
@@ -246,27 +236,6 @@ function calculateRiskScore(severity: string, eventType: string, ports: number[]
     }
     
     return Math.min(score, 100);
-}
-
-// Run tasks with concurrency limit
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number
-): Promise<T[]> {
-    const results: T[] = new Array(tasks.length);
-    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
-    let index = 0;
-
-    const workers = Array.from({ length: workerCount }, async () => {
-        while (index < tasks.length) {
-            const currentIndex = index;
-            index++;
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
 }
 
 /**
@@ -296,21 +265,21 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Connection timeout in milliseconds per port",
-                default: 3000,
+                default: 1500,
                 minimum: 1000,
                 maximum: 30000
             },
             concurrency: {
                 type: "integer",
-                description: "Number of concurrent port checks",
+                description: "Number of concurrent target scans",
                 default: DEFAULT_CONCURRENCY,
                 minimum: 1,
                 maximum: MAX_CONCURRENCY
             },
             detectService: {
                 type: "boolean",
-                description: "Try to detect service on open ports",
-                default: true
+                description: "Reserved for compatibility; service fingerprinting is handled by dedicated service plugins",
+                default: false
             },
             previousSnapshots: {
                 type: "object",
@@ -371,111 +340,34 @@ export function get_output_schema() {
 
 pluginGlobals.get_output_schema = get_output_schema;
 
-/**
- * Check if a single port is open via HTTP probe
- */
-async function checkPort(host: string, port: number, timeout: number, detectService: boolean): Promise<PortInfo> {
-    const portInfo: PortInfo = {
-        port,
-        state: "closed",
-        protocol: "tcp",
-    };
-    
-    try {
-        // Try HTTP/HTTPS probe for web ports
-        if ([80, 443, 8080, 8443, 8888, 3000, 5000, 9000].includes(port)) {
-            const protocol = [443, 8443].includes(port) ? "https" : "http";
-            const url = `${protocol}://${host}:${port}/`;
-            
-            const response = await fetch(url, {
-                method: "HEAD",
-                // @ts-ignore
-                timeout,
-            });
-            
-            portInfo.state = "open";
-            portInfo.service = protocol.toUpperCase();
-            
-            // Try to get server header
-            const server = response.headers.get("server");
-            if (server) {
-                portInfo.banner = server;
-            }
-            
-            return portInfo;
-        }
-        
-        // For other ports, try TCP connect via Deno.connect
-        // @ts-ignore - Deno API
-        const conn = await Deno.connect({
-            hostname: host,
-            port: port,
-            transport: "tcp",
-        });
-        
-        portInfo.state = "open";
-        portInfo.service = PORT_SERVICES[port] || "unknown";
-        
-        // Try to read banner if detectService is enabled
-        if (detectService) {
-            try {
-                // Set a short read timeout
-                const buffer = new Uint8Array(256);
-                // @ts-ignore
-                conn.setReadDeadline(Date.now() + 2000);
-                const bytesRead = await conn.read(buffer);
-                
-                if (bytesRead && bytesRead > 0) {
-                    const banner = new TextDecoder().decode(buffer.subarray(0, bytesRead)).trim();
-                    if (banner && banner.length > 0 && banner.length < 200) {
-                        portInfo.banner = banner.replace(/[\x00-\x1f]/g, '').substring(0, 100);
-                    }
-                }
-            } catch {
-                // Banner grab failed, that's ok
-            }
-        }
-        
-        conn.close();
-        return portInfo;
-        
-    } catch (error: any) {
-        // Connection failed - port is likely closed or filtered
-        if (error.message?.includes("timed out") || error.message?.includes("timeout")) {
-            portInfo.state = "filtered";
-        }
-        return portInfo;
-    }
+function mapOpenPorts(openPorts: number[]): PortInfo[] {
+    return [...new Set(openPorts)]
+        .filter(port => Number.isInteger(port) && port > 0)
+        .sort((left, right) => left - right)
+        .map(port => ({
+            port,
+            state: "open",
+            protocol: "tcp",
+        }));
 }
 
-/**
- * Scan all ports for a host
- */
-async function scanHost(
-    host: string,
-    ports: number[],
+async function scanPortsWithNativeEngine(
+    targets: NativePortScanTarget[],
+    defaultPorts: number[],
     timeout: number,
-    concurrency: number,
-    detectService: boolean
-): Promise<PortInfo[]> {
-    const openPorts: PortInfo[] = [];
-    
-    // Create tasks for each port
-    const tasks = ports.map(port => async () => {
-        const result = await checkPort(host, port, timeout, detectService);
-        if (result.state === "open") {
-            openPorts.push(result);
-        }
-        return result;
+    concurrency: number
+): Promise<NativePortScanResponse> {
+    if (typeof Sentinel === "undefined" || !Sentinel.Network || typeof Sentinel.Network.scanPorts !== "function") {
+        throw new Error("Native port scanning engine is not available");
+    }
+
+    return await Sentinel.Network.scanPorts({
+        targets,
+        ports: defaultPorts,
+        timeout_ms: timeout,
+        concurrency,
+        tries: 1,
     });
-    
-    // Run with concurrency
-    await runWithConcurrency(tasks, concurrency);
-    
-    // Sort by port number
-    openPorts.sort((a, b) => a.port - b.port);
-    
-    return openPorts;
 }
 
 /**
@@ -515,10 +407,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const validTargets = [...targetPortMap.keys()];
         const defaultPorts = [...new Set(input.ports || COMMON_PORTS)].sort((left, right) => left - right);
-        const timeout = input.timeout || 3000;
+        const timeout = input.timeout || 1500;
         const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const targetConcurrency = Math.max(1, Math.min(MAX_TARGET_CONCURRENCY, validTargets.length, concurrency));
-        const detectService = input.detectService !== false;
         const previousSnapshots = input.previousSnapshots || {};
         
         const results: PortResult[] = [];
@@ -530,33 +420,31 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let totalOpenPorts = 0;
         let newPortsOpened = 0;
         let portsClosed = 0;
-        let serviceChangesCount = 0;
-        
-        await runWithConcurrency(validTargets.map((target) => async () => {
-            // Parse host from target (could be IP, hostname, or URL)
-            let host = target;
-            try {
-                if (target.includes("://")) {
-                    const url = new URL(target);
-                    host = url.hostname;
-                } else {
-                    host = target.split("/")[0].split(":")[0];
-                }
-            } catch {
-                // Use as-is
-            }
-            
+        const nativeTargets: NativePortScanTarget[] = validTargets.map(host => ({
+            host,
+            ports: [...(targetPortMap.get(host) || new Set<number>())].sort((left, right) => left - right),
+        }));
+        const nativeScan = await scanPortsWithNativeEngine(nativeTargets, defaultPorts, timeout, concurrency);
+        if (!nativeScan.success && (!nativeScan.results || nativeScan.results.length === 0)) {
+            return {
+                success: false,
+                error: nativeScan.error || "Native port scan failed",
+            };
+        }
+
+        for (const nativeResult of nativeScan.results || []) {
+            const host = nativeResult.host;
             const result: PortResult = {
                 host,
                 success: false,
             };
-            
+
             try {
-                const selectedPorts = [...(targetPortMap.get(host) || new Set<number>())];
-                const scanPorts = (selectedPorts.length > 0 ? selectedPorts : defaultPorts)
-                    .sort((left, right) => left - right);
-                const openPorts = await scanHost(host, scanPorts, timeout, concurrency, detectService);
-                
+                if (nativeResult.error) {
+                    throw new Error(nativeResult.error);
+                }
+
+                const openPorts = mapOpenPorts(nativeResult.open_ports || []);
                 result.success = true;
                 successfulScans++;
                 totalOpenPorts += openPorts.length;
@@ -584,20 +472,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     result.newPorts = newPorts;
                     result.closedPorts = closedPorts;
                     
-                    // Check for service changes on existing ports
-                    const serviceChanges: Array<{ port: number; oldService?: string; newService?: string }> = [];
-                    for (const newPort of openPorts) {
-                        const prevPort = prevSnapshot.openPorts.find(p => p.port === newPort.port);
-                        if (prevPort && prevPort.service !== newPort.service) {
-                            serviceChanges.push({
-                                port: newPort.port,
-                                oldService: prevPort.service,
-                                newService: newPort.service,
-                            });
-                        }
-                    }
-                    result.serviceChanges = serviceChanges;
-                    
                     // Generate change events for new ports
                     if (newPorts.length > 0) {
                         newPortsOpened += newPorts.length;
@@ -612,7 +486,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             eventType,
                             severity,
                             title: `New Ports Opened: ${host}`,
-                            description: `${newPorts.length} new port(s) detected: ${newPorts.map(p => `${p.port}/${p.service || 'unknown'}`).join(", ")}`,
+                            description: `${newPorts.length} new port(s) detected: ${newPorts.map(p => `${p.port}/tcp`).join(", ")}`,
                             newValue: JSON.stringify(newPorts.map(p => p.port)),
                             detectionMethod: "port_monitor",
                             tags: ["port", "open", "change", ...(highRiskNew.length > 0 ? ["high-risk"] : [])],
@@ -621,6 +495,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             metadata: {
                                 newPorts,
                                 highRiskPorts: highRiskNew.map(p => p.port),
+                                resolvedIps: nativeResult.resolved_ips || [],
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, newPorts.map(p => p.port));
@@ -637,7 +512,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             eventType: "ports_closed",
                             severity: "low",
                             title: `Ports Closed: ${host}`,
-                            description: `${closedPorts.length} port(s) no longer accessible: ${closedPorts.map(p => `${p.port}/${p.service || 'unknown'}`).join(", ")}`,
+                            description: `${closedPorts.length} port(s) no longer accessible: ${closedPorts.map(p => `${p.port}/tcp`).join(", ")}`,
                             oldValue: JSON.stringify(closedPorts.map(p => p.port)),
                             detectionMethod: "port_monitor",
                             tags: ["port", "closed", "change"],
@@ -648,29 +523,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, closedPorts.map(p => p.port));
-                        changeEvents.push(event);
-                    }
-                    
-                    // Generate change events for service changes
-                    if (serviceChanges.length > 0) {
-                        serviceChangesCount += serviceChanges.length;
-                        
-                        const event: ChangeEvent = {
-                            id: generateId(),
-                            assetId: host,
-                            eventType: "service_change",
-                            severity: "medium",
-                            title: `Service Changes Detected: ${host}`,
-                            description: `${serviceChanges.length} service(s) changed: ${serviceChanges.map(s => `${s.port}: ${s.oldService || 'unknown'} → ${s.newService || 'unknown'}`).join(", ")}`,
-                            detectionMethod: "port_monitor",
-                            tags: ["port", "service", "change"],
-                            autoTriggerEnabled: true,
-                            riskScore: 0,
-                            metadata: {
-                                serviceChanges,
-                            },
-                        };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, serviceChanges.map(s => s.port));
                         changeEvents.push(event);
                     }
                 } else {
@@ -684,7 +536,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             eventType: "ports_discovered",
                             severity: highRiskPorts.length > 0 ? "medium" : "low",
                             title: `Open Ports Discovered: ${host}`,
-                            description: `Initial scan found ${openPorts.length} open port(s): ${openPorts.map(p => `${p.port}/${p.service || 'unknown'}`).join(", ")}`,
+                            description: `Initial scan found ${openPorts.length} open port(s): ${openPorts.map(p => `${p.port}/tcp`).join(", ")}`,
                             newValue: JSON.stringify(openPorts.map(p => p.port)),
                             detectionMethod: "port_monitor",
                             tags: ["port", "discovery", "initial-scan"],
@@ -693,6 +545,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             metadata: {
                                 openPorts,
                                 highRiskPorts: highRiskPorts.map(p => p.port),
+                                resolvedIps: nativeResult.resolved_ips || [],
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, openPorts.map(p => p.port));
@@ -704,10 +557,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 result.error = error.message || String(error);
                 failedScans++;
             }
-            
+
             results.push(result);
-            return null;
-        }), targetConcurrency);
+        }
         
         return {
             success: true,
@@ -722,7 +574,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     totalOpenPorts,
                     newPortsOpened,
                     portsClosed,
-                    serviceChanges: serviceChangesCount,
+                    serviceChanges: 0,
                 },
                 surface_artifacts: {
                     domains: [...new Set(results

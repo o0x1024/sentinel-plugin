@@ -1,6 +1,6 @@
 {
-  "version": "2.3.7",
-  "updated_at": "2026-03-27",
+  "version": "2.3.8",
+  "updated_at": "2026-03-28",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -169,6 +169,18 @@
       "default_severity": "medium",
       "tags": ["service", "monitor", "change-detection", "banner", "version", "asm", "network"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_monitor.ts"
+    },
+    {
+      "id": "service_probe",
+      "name": "Service Probe",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "agent",
+      "category": "recon",
+      "description": "Probe service endpoints for availability, banner, product, and version details with pluggable service-probe engines and structured service artifacts.",
+      "default_severity": "info",
+      "tags": ["service", "probe", "fingerprint", "banner", "asm", "network", "experimental-engine"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_probe.ts"
     },
     {
       "id": "directory_bruteforcer",
