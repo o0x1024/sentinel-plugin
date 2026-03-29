@@ -1,6 +1,6 @@
 {
-  "version": "2.3.8",
-  "updated_at": "2026-03-28",
+  "version": "2.3.9",
+  "updated_at": "2026-03-29",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -305,13 +305,13 @@
     {
       "id": "port_monitor",
       "name": "Port Monitor",
-      "version": "1.2.0",
+      "version": "1.3.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
-      "description": "Monitor domain/ip targets for port changes with deduplicated target queues, bounded scanning, and direct domain/ip to port surface relations.",
+      "description": "Monitor typed host and IP targets for port exposure changes using native Rust-backed port discovery, prioritizing structured monitor targets and preserving strict IP-only execution semantics for ASM workflows.",
       "default_severity": "medium",
-      "tags": ["port", "service", "monitor", "change-detection", "scan"],
+      "tags": ["port", "monitor", "network", "asm", "surface", "ip", "host", "change-detection", "native"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/port_monitor.ts"
     },
     {

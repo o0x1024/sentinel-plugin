@@ -3,12 +3,12 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.0
+ * @version 1.3.1
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
  * @tags port, service, monitor, change-detection, scan
- * @description Monitor hosts for port exposure changes using native Rust-backed port discovery, generating ChangeEvents for workflow automation
+ * @description Monitor typed host and IP targets for port exposure changes using native Rust-backed port discovery, prioritizing structured monitor targets and preserving strict IP-only execution semantics for ASM workflows
  */
 
 import { reportMonitorProgress } from "./monitor_progress.ts";
