@@ -3,7 +3,7 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.1
+ * @version 1.0.2
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
@@ -760,16 +760,16 @@ async function probeServicesWithNativeEngine(
         readBanner,
         engine,
         monitorProgress: monitorExecution ? {
-            task_id: monitorExecution.task_id,
-            task_name: monitorExecution.task_name,
-            program_id: monitorExecution.program_id,
-            execution_mode: monitorExecution.execution_mode,
-            started_at: monitorExecution.started_at,
-            current_plugin: monitorExecution.current_plugin,
-            current_plugin_index: monitorExecution.current_plugin_index,
-            completed_steps: monitorExecution.completed_steps,
-            total_steps: monitorExecution.total_steps,
-            imported_assets: monitorExecution.imported_assets ?? 0,
+            taskId: monitorExecution.task_id,
+            taskName: monitorExecution.task_name,
+            programId: monitorExecution.program_id,
+            executionMode: monitorExecution.execution_mode,
+            startedAt: monitorExecution.started_at,
+            currentPlugin: monitorExecution.current_plugin,
+            currentPluginIndex: monitorExecution.current_plugin_index,
+            completedSteps: monitorExecution.completed_steps,
+            totalSteps: monitorExecution.total_steps,
+            importedAssets: monitorExecution.imported_assets ?? 0,
         } : undefined,
     }) as NativeServiceProbeResponse;
 }

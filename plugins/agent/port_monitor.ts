@@ -3,7 +3,7 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.2
+ * @version 1.3.3
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
@@ -440,16 +440,16 @@ async function scanPortsWithNativeEngine(
         concurrency,
         tries: 1,
         monitor_progress: monitorExecution ? {
-            task_id: monitorExecution.task_id,
-            task_name: monitorExecution.task_name,
-            program_id: monitorExecution.program_id,
-            execution_mode: monitorExecution.execution_mode,
-            started_at: monitorExecution.started_at,
-            current_plugin: monitorExecution.current_plugin,
-            current_plugin_index: monitorExecution.current_plugin_index,
-            completed_steps: monitorExecution.completed_steps,
-            total_steps: monitorExecution.total_steps,
-            imported_assets: monitorExecution.imported_assets || 0,
+            taskId: monitorExecution.task_id,
+            taskName: monitorExecution.task_name,
+            programId: monitorExecution.program_id,
+            executionMode: monitorExecution.execution_mode,
+            startedAt: monitorExecution.started_at,
+            currentPlugin: monitorExecution.current_plugin,
+            currentPluginIndex: monitorExecution.current_plugin_index,
+            completedSteps: monitorExecution.completed_steps,
+            totalSteps: monitorExecution.total_steps,
+            importedAssets: monitorExecution.imported_assets || 0,
         } : undefined,
     });
 }
