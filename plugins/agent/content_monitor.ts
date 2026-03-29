@@ -11,6 +11,8 @@
  * @description Monitor web pages for content changes, generating ChangeEvents for workflow automation
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 interface ToolInput {
     targets: string[];  // List of URLs to monitor
     timeout?: number;
@@ -19,6 +21,7 @@ interface ToolInput {
     includeHeaders?: boolean;
     excludePatterns?: string[];  // Patterns to exclude from hash (e.g., timestamps)
     previousSnapshots?: Record<string, ContentSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface ContentSnapshot {
@@ -307,6 +310,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const includeHeaders = input.includeHeaders || false;
         const excludePatterns = input.excludePatterns || [];
         const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
+        const totalProgressUnits = validTargets.length + 2;
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing content checks",
+        });
         
         const results: ContentResult[] = [];
         const changeEvents: ChangeEvent[] = [];
@@ -317,6 +329,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let contentChanges = 0;
         let statusChanges = 0;
         let newPages = 0;
+        let completedTargets = 0;
         
         const targetTasks = validTargets.map((target) => async () => {
             let url = target;
@@ -502,9 +515,31 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             
             results.push(result);
+            completedTargets += 1;
+            await reportMonitorProgress(monitorExecution, {
+                current: completedTargets,
+                total: totalProgressUnits,
+                currentTarget: url,
+                phase: "probe",
+                message: `Checking content for ${url}`,
+            });
         });
 
         await runWithConcurrency(targetTasks, concurrency);
+
+        await reportMonitorProgress(monitorExecution, {
+            current: validTargets.length + 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Comparing content snapshots",
+        });
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building content results",
+        });
         
         return {
             success: true,

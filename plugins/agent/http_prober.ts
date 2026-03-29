@@ -11,6 +11,8 @@
  * @description Probe HTTP/HTTPS endpoints from URLs and service endpoints to confirm live websites, collect status code, title, headers, technologies, and structured web artifacts
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 interface ToolInput {
     targets: string[];
     target_objects?: Array<string | ServiceLikeTarget>;
@@ -26,6 +28,7 @@ interface ToolInput {
     checkHttps?: boolean;
     checkHttp?: boolean;
     previousSnapshots?: Record<string, ProbeSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface ServiceLikeTarget {
@@ -974,6 +977,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const checkHttp = input.checkHttp !== false;
         const ports = input.ports || DEFAULT_PORTS;
         const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
         const timestamp = new Date().toISOString();
         
         const probeUnknownPortsWithBoth = Array.isArray(input.ports) && input.ports.length > 0;
@@ -991,16 +995,45 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         );
         
         const uniqueUrls = [...new Set([...urls, ...serviceUrls])];
-        const tasks = uniqueUrls.map(url => () => probeUrl(url, {
-            timeout,
-            followRedirects,
-            maxRedirects,
-            userAgent,
-            extractTitle,
-            extractHeaders,
-        }));
+        const totalProgressUnits = uniqueUrls.length + 2;
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing HTTP probes",
+        });
+
+        let completedUrls = 0;
+        const tasks = uniqueUrls.map(url => async () => {
+            try {
+                return await probeUrl(url, {
+                    timeout,
+                    followRedirects,
+                    maxRedirects,
+                    userAgent,
+                    extractTitle,
+                    extractHeaders,
+                });
+            } finally {
+                completedUrls += 1;
+                await reportMonitorProgress(monitorExecution, {
+                    current: completedUrls,
+                    total: totalProgressUnits,
+                    currentTarget: url,
+                    phase: "probe",
+                    message: `Probing web endpoint ${url}`,
+                });
+            }
+        });
         
         const results = await runWithConcurrency(tasks, concurrency);
+        await reportMonitorProgress(monitorExecution, {
+            current: uniqueUrls.length + 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Comparing HTTP snapshots",
+        });
         const aliveResults = results.filter(r => r.alive);
         const deadResults = results.filter(r => !r.alive);
         const changeEvents: ChangeEvent[] = [];
@@ -1133,6 +1166,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const code = String(result.statusCode || "unknown");
             byStatusCode[code] = (byStatusCode[code] || 0) + 1;
         }
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building web probe results",
+        });
         
         return {
             success: true,

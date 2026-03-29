@@ -11,6 +11,8 @@
  * @description Resolve DNS records for domains and produce typed surface graph artifacts for ASM and network asset mapping
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 type RecordType = "A" | "AAAA" | "CNAME" | "MX" | "NS" | "TXT";
 
 interface ToolInput {
@@ -19,6 +21,7 @@ interface ToolInput {
     timeout?: number;
     concurrency?: number;
     previousSnapshots?: Record<string, DnsSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface DnsAnswer {
@@ -358,7 +361,18 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const recordTypes = (input.recordTypes?.length ? input.recordTypes : DEFAULT_RECORD_TYPES)
             .filter((type): type is RecordType => type in DNS_TYPE_CODES);
         const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
+        const totalProgressUnits = targets.length + 2;
         const timestamp = new Date().toISOString();
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing DNS resolution",
+        });
+
+        let completedTargets = 0;
 
         const tasks = targets.map((target) => async (): Promise<DnsQueryResult> => {
             try {
@@ -386,10 +400,25 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     records: [],
                     error: error instanceof Error ? error.message : String(error),
                 };
+            } finally {
+                completedTargets += 1;
+                await reportMonitorProgress(monitorExecution, {
+                    current: completedTargets,
+                    total: totalProgressUnits,
+                    currentTarget: target,
+                    phase: "resolve",
+                    message: `Resolving DNS records for ${target}`,
+                });
             }
         });
 
         const results = await runWithConcurrency(tasks, concurrency);
+        await reportMonitorProgress(monitorExecution, {
+            current: targets.length + 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Comparing DNS snapshots",
+        });
         const changeEvents: ChangeEvent[] = [];
         const snapshots: Record<string, DnsSnapshot> = {};
         const domains = new Map<string, any>();
@@ -493,6 +522,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const successfulTargets = results.filter((result) => result.success).length;
         const totalRecords = results.reduce((sum, result) => sum + result.records.length, 0);
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building DNS artifacts",
+        });
 
         return {
             success: true,

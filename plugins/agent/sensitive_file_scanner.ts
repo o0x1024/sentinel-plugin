@@ -11,6 +11,8 @@
  * @description Scan web targets for exposed sensitive files using structured dictionary rules.
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 declare const Sentinel: {
     Dictionary?: {
         get?(idOrName: string): Promise<any>;
@@ -29,6 +31,7 @@ interface ToolInput {
     userAgent?: string;
     concurrency?: number;
     maxTargets?: number;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface RuleEntry {
@@ -446,10 +449,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             ? Math.max(1, Number(input.maxTargets))
             : normalizedTargets.length;
         const targets = normalizedTargets.slice(0, maxTargets);
+        const monitorExecution = input.__monitorExecution;
 
         if (targets.length === 0) {
             return { success: false, error: "At least one web target is required" };
         }
+
+        const totalProgressUnits = targets.length + 2;
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing sensitive file scan",
+        });
 
         const rules = await loadRules(input);
         if (rules.length === 0) {
@@ -482,86 +494,105 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             heuristicFiltered: 0,
             statusBuckets: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, other: 0 },
         };
+        let completedTargets = 0;
         await runWithConcurrency(
             targets.map((target) => async () => {
-                for (const preparedRule of preparedRules) {
-                    const { rule, metadata, path, matchers, negativeMatchers } = preparedRule;
-                    const url = joinUrl(target, path);
-                    const effectiveMatchers = matchers;
-                    const shouldReadBody = effectiveMatchers.length > 0 || negativeMatchers.length > 0;
-                    let response: Response | null = null;
-                    try {
-                        stats.attemptedRequests += 1;
-                        response = shouldReadBody
-                            ? await fetchWithTimeout(url, timeout, userAgent)
-                            : await probeStatus(url, timeout, userAgent);
-                        let body: string | null = null;
-                        if (shouldReadBody) {
-                            body = await response.text();
-                        }
-                        ensureStatusBucket(stats, bucketStatus(response.status));
-                        if (response.status !== 200) {
-                            await discardResponse(response);
-                            continue;
-                        }
-                        if (effectiveMatchers.length === 0 && negativeMatchers.length === 0) {
-                            stats.heuristicFiltered += 1;
-                            await discardResponse(response);
-                            continue;
-                        }
-                        const context = buildResponseContext(url, response, body);
-                        if (negativeMatchers.length > 0 && matchAll(context, negativeMatchers, metadata.negative_operator || "or")) {
-                            stats.heuristicFiltered += 1;
-                            await discardResponse(response);
-                            continue;
-                        }
-                        if (effectiveMatchers.length > 0) {
-                            if (!matchAll(context, effectiveMatchers, metadata.match_operator || "and")) {
+                try {
+                    for (const preparedRule of preparedRules) {
+                        const { rule, metadata, path, matchers, negativeMatchers } = preparedRule;
+                        const url = joinUrl(target, path);
+                        const effectiveMatchers = matchers;
+                        const shouldReadBody = effectiveMatchers.length > 0 || negativeMatchers.length > 0;
+                        let response: Response | null = null;
+                        try {
+                            stats.attemptedRequests += 1;
+                            response = shouldReadBody
+                                ? await fetchWithTimeout(url, timeout, userAgent)
+                                : await probeStatus(url, timeout, userAgent);
+                            let body: string | null = null;
+                            if (shouldReadBody) {
+                                body = await response.text();
+                            }
+                            ensureStatusBucket(stats, bucketStatus(response.status));
+                            if (response.status !== 200) {
                                 await discardResponse(response);
                                 continue;
                             }
-                        } else {
-                            stats.heuristicFiltered += 1;
-                            await discardResponse(response);
-                            continue;
-                        }
+                            if (effectiveMatchers.length === 0 && negativeMatchers.length === 0) {
+                                stats.heuristicFiltered += 1;
+                                await discardResponse(response);
+                                continue;
+                            }
+                            const context = buildResponseContext(url, response, body);
+                            if (negativeMatchers.length > 0 && matchAll(context, negativeMatchers, metadata.negative_operator || "or")) {
+                                stats.heuristicFiltered += 1;
+                                await discardResponse(response);
+                                continue;
+                            }
+                            if (effectiveMatchers.length > 0) {
+                                if (!matchAll(context, effectiveMatchers, metadata.match_operator || "and")) {
+                                    await discardResponse(response);
+                                    continue;
+                                }
+                            } else {
+                                stats.heuristicFiltered += 1;
+                                await discardResponse(response);
+                                continue;
+                            }
 
-                        const finding = {
-                            title: metadata.name || `Sensitive file exposed: ${path}`,
-                            severity: metadata.severity || "medium",
-                            url,
-                            description: metadata.description || `Sensitive file exposed at ${url}`,
-                            evidence: body ? body.slice(0, 500) : undefined,
-                            cwe: metadata.cwe || "CWE-200",
-                            remediation: metadata.remediation || "Restrict public access to this resource.",
-                            tags: Array.isArray(metadata.tags) ? metadata.tags : [],
-                        };
-                        findings.push(finding);
-                        vulnerabilityFindings.push({
-                            title: finding.title,
-                            severity: finding.severity,
-                            target: url,
-                            vulnerability_type: rule.category || "sensitive_file_exposure",
-                            description: finding.description,
-                            evidence: finding.evidence,
-                            source: "sensitive_file_scanner",
-                        });
-                    } catch (error) {
-                        const kind = classifyError(error);
-                        stats.connectivityFailures += 1;
-                        if (kind === "timeout") {
-                            stats.timeoutErrors += 1;
-                        } else {
-                            stats.networkErrors += 1;
+                            const finding = {
+                                title: metadata.name || `Sensitive file exposed: ${path}`,
+                                severity: metadata.severity || "medium",
+                                url,
+                                description: metadata.description || `Sensitive file exposed at ${url}`,
+                                evidence: body ? body.slice(0, 500) : undefined,
+                                cwe: metadata.cwe || "CWE-200",
+                                remediation: metadata.remediation || "Restrict public access to this resource.",
+                                tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+                            };
+                            findings.push(finding);
+                            vulnerabilityFindings.push({
+                                title: finding.title,
+                                severity: finding.severity,
+                                target: url,
+                                vulnerability_type: rule.category || "sensitive_file_exposure",
+                                description: finding.description,
+                                evidence: finding.evidence,
+                                source: "sensitive_file_scanner",
+                            });
+                        } catch (error) {
+                            const kind = classifyError(error);
+                            stats.connectivityFailures += 1;
+                            if (kind === "timeout") {
+                                stats.timeoutErrors += 1;
+                            } else {
+                                stats.networkErrors += 1;
+                            }
+                            stats.skippedTargets += 1;
+                            await discardResponse(response);
+                            break;
                         }
-                        stats.skippedTargets += 1;
-                        await discardResponse(response);
-                        break;
                     }
+                } finally {
+                    completedTargets += 1;
+                    await reportMonitorProgress(monitorExecution, {
+                        current: completedTargets,
+                        total: totalProgressUnits,
+                        currentTarget: target,
+                        phase: "probe",
+                        message: `Scanning sensitive files on ${target}`,
+                    });
                 }
             }),
             concurrency,
         );
+
+        await reportMonitorProgress(monitorExecution, {
+            current: targets.length + 1,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building sensitive file scan results",
+        });
 
         return {
             success: true,

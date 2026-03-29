@@ -11,6 +11,8 @@
  * @description Identify exposed services from host/port targets with the native Rust service identification engine, normalized fingerprint artifacts, and structured service evidence
  */
 
+import { reportMonitorProgress } from "./monitor_progress.ts";
+
 declare const Sentinel: {
     Dictionary?: {
         getEntries?(idOrName: string, limit?: number): Promise<any[]>;
@@ -845,6 +847,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             results = await runWithConcurrency(tasks, concurrency);
         }
 
+        await reportMonitorProgress(monitorExecution, {
+            current: normalizedTargets.length + 1,
+            total: normalizedTargets.length + 2,
+            phase: "compare",
+            message: "Comparing probe results",
+        });
+
         let successfulChecks = 0;
         let failedChecks = 0;
         let reachableServices = 0;
@@ -996,6 +1005,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             source: "service_probe",
             confidence: 0.92,
         }));
+
+        await reportMonitorProgress(monitorExecution, {
+            current: normalizedTargets.length + 2,
+            total: normalizedTargets.length + 2,
+            phase: "build",
+            message: "Building service probe results",
+        });
 
         return {
             success: true,

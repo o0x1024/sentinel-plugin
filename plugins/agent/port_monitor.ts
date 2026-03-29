@@ -11,6 +11,8 @@
  * @description Monitor hosts for port exposure changes using native Rust-backed port discovery, generating ChangeEvents for workflow automation
  */
 
+import { reportMonitorProgress } from "./monitor_progress.ts";
+
 interface ToolInput {
     targets?: Array<string | ServiceTarget>;  // Legacy host list or service endpoints
     target_objects?: Array<string | ServiceTarget>;
@@ -497,6 +499,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
+        await reportMonitorProgress(monitorExecution, {
+            current: validTargets.length + 1,
+            total: validTargets.length + 2,
+            phase: "compare",
+            message: "Comparing port snapshots",
+        });
+
         for (const nativeResult of nativeScan.results || []) {
             const host = nativeResult.host;
             const result: PortResult = {
@@ -625,6 +634,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
             results.push(result);
         }
+
+        await reportMonitorProgress(monitorExecution, {
+            current: validTargets.length + 2,
+            total: validTargets.length + 2,
+            phase: "build",
+            message: "Building port monitoring results",
+        });
         
         return {
             success: true,

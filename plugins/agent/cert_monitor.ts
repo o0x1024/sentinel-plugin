@@ -11,6 +11,8 @@
  * @description Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
     timeout?: number;
@@ -18,6 +20,7 @@ interface ToolInput {
     checkExpiry?: boolean;
     expiryWarningDays?: number;  // Warn if expiring within N days
     previousSnapshots?: Record<string, CertSnapshot>;  // Previous state for comparison
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface CertInfo {
@@ -358,6 +361,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const checkExpiry = input.checkExpiry !== false;
         const expiryWarningDays = input.expiryWarningDays || 30;
         const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
 
         const normalizedDomains = Array.from(
             new Set(
@@ -366,6 +370,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     .filter((domain) => domain.length > 0),
             ),
         );
+        const totalProgressUnits = normalizedDomains.length + 2;
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing certificate checks",
+        });
 
         const results: CertResult[] = [];
         const changeEvents: ChangeEvent[] = [];
@@ -376,6 +388,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let certificateChanges = 0;
         let expiringCertificates = 0;
         let expiredCertificates = 0;
+        let completedDomains = 0;
 
         async function processDomain(domain: string): Promise<void> {
             const result: CertResult = {
@@ -524,6 +537,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
 
             results.push(result);
+            completedDomains += 1;
+            await reportMonitorProgress(monitorExecution, {
+                current: completedDomains,
+                total: totalProgressUnits,
+                currentTarget: domain,
+                phase: "probe",
+                message: `Checking certificate for ${domain}`,
+            });
         }
 
         let currentIndex = 0;
@@ -536,6 +557,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         });
         await Promise.all(workers);
+
+        await reportMonitorProgress(monitorExecution, {
+            current: normalizedDomains.length + 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Comparing certificate snapshots",
+        });
 
         const certificates = results
             .filter((result) => result.success && result.certInfo)
@@ -558,6 +586,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const discoveredSubdomains = new Set<string>(
             certificates.flatMap((cert) => [cert.domain, ...cert.san]),
         );
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building certificate artifacts",
+        });
 
         return {
             success: true,

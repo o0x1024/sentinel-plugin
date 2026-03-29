@@ -11,6 +11,8 @@
  * @description Monitor exposed services for availability, banner, product, and version changes with structured snapshots and change events
  */
 
+import { reportMonitorProgress } from "./monitor_progress.ts";
+
 declare const Sentinel: {
     Dictionary?: {
         getEntries?(idOrName: string, limit?: number): Promise<any[]>;
@@ -947,6 +949,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
             results = await runWithConcurrency(tasks, concurrency);
         }
+
+        await reportMonitorProgress(monitorExecution, {
+            current: normalizedTargets.length + 1,
+            total: normalizedTargets.length + 2,
+            phase: "compare",
+            message: "Comparing service snapshots",
+        });
         const changeEvents: ChangeEvent[] = [];
         const snapshots: Record<string, ServiceSnapshot> = {};
 
@@ -1030,6 +1039,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             source: "service_monitor",
             confidence: 0.94,
         }));
+
+        await reportMonitorProgress(monitorExecution, {
+            current: normalizedTargets.length + 2,
+            total: normalizedTargets.length + 2,
+            phase: "build",
+            message: "Building service monitoring results",
+        });
 
         return {
             success: true,

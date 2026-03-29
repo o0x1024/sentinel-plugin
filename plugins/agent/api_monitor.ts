@@ -11,6 +11,8 @@
  * @description Monitor API endpoints for changes (new endpoints, removed endpoints, response changes), generating ChangeEvents for workflow automation
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 // Declare Sentinel API for JS analysis
 declare const Sentinel: {
     AST: {
@@ -31,6 +33,7 @@ interface ToolInput {
     includeGraphQL?: boolean;
     includeOpenAPI?: boolean;
     previousSnapshots?: Record<string, ApiSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface ApiEndpoint {
@@ -412,6 +415,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const includeGraphQL = input.includeGraphQL !== false;
         const includeOpenAPI = input.includeOpenAPI !== false;
         const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
+        const totalProgressUnits = validTargets.length + 2;
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing API discovery",
+        });
         
         const results: ApiResult[] = [];
         const changeEvents: ChangeEvent[] = [];
@@ -423,6 +435,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let addedEndpointsCount = 0;
         let removedEndpointsCount = 0;
         let apiChanges = 0;
+        let completedTargets = 0;
         
         const targetTasks = validTargets.map((target) => async () => {
             let baseUrl = target;
@@ -736,9 +749,31 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             
             results.push(result);
+            completedTargets += 1;
+            await reportMonitorProgress(monitorExecution, {
+                current: completedTargets,
+                total: totalProgressUnits,
+                currentTarget: baseUrl,
+                phase: "discover",
+                message: `Discovering APIs for ${baseUrl}`,
+            });
         });
 
         await runWithConcurrency(targetTasks, concurrency);
+
+        await reportMonitorProgress(monitorExecution, {
+            current: validTargets.length + 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Comparing API snapshots",
+        });
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building API results",
+        });
         
         return {
             success: true,

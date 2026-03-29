@@ -11,6 +11,8 @@
  * @description Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, and structured evidence.
  */
 
+import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
+
 declare const Sentinel: {
     Dictionary?: {
         get?(idOrName: string): Promise<any>;
@@ -34,6 +36,7 @@ interface ToolInput {
     concurrency?: number;
     stopOnFirstHit?: boolean;
     variables?: Record<string, any>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface RuleEntry {
@@ -739,6 +742,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             stopOnFirstHit,
             dictionaryId: getInputString(input, "dictionaryId", "dictionary_id") || input.dictionaryId,
         };
+        const monitorExecution = input.__monitorExecution;
         const targets = Array.from(new Set([
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
@@ -765,6 +769,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 return ruleMatchesFingerprintScope(rule, observedFingerprints);
             })
             .slice(0, maxRules);
+        const totalProgressUnits = (targets.length * Math.max(rules.length, 1)) + 2;
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing risk verification",
+        });
 
         const findings: Finding[] = [];
         const evidence: any[] = [];
@@ -785,6 +797,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 executedRuleCount += 1;
 
                 const result = await executeRule(target, rule, normalizedInput);
+                await reportMonitorProgress(monitorExecution, {
+                    current: executedRuleCount,
+                    total: totalProgressUnits,
+                    currentTarget: target,
+                    phase: "probe",
+                    message: `Executing verification rules for ${target}`,
+                });
                 if (result.evidence) evidence.push(result.evidence);
                 if (!result.matched || !result.finding) return;
 
@@ -805,6 +824,20 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }),
             concurrency,
         );
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits - 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Summarizing risk verification results",
+        });
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building risk scan results",
+        });
 
         return {
             success: true,
