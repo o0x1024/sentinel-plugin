@@ -1,5 +1,5 @@
 {
-  "version": "2.3.11",
+  "version": "2.3.12",
   "updated_at": "2026-03-29",
   "plugins": [
     {
@@ -89,7 +89,7 @@
     {
       "id": "http_prober",
       "name": "HTTP Prober",
-      "version": "1.4.1",
+      "version": "1.4.2",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
