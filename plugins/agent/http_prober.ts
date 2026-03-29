@@ -3,15 +3,13 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.0
+ * @version 1.4.1
  * @author Sentinel Team
  * @category recon
  * @default_severity info
  * @tags http, probe, alive, discovery, web
  * @description Probe HTTP/HTTPS endpoints from URLs and service endpoints to confirm live websites, collect status code, title, headers, technologies, and structured web artifacts
  */
-
-import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
 
 interface ToolInput {
     targets: string[];
@@ -107,6 +105,45 @@ interface ToolOutput {
         surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
 }
 
 const DEFAULT_TIMEOUT = 3000;

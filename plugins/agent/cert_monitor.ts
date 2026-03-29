@@ -3,15 +3,13 @@
  * 
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.0
+ * @version 1.2.1
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
  * @tags certificate, ssl, tls, monitor, change-detection, expiry
  * @description Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation
  */
-
-import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
 
 interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
@@ -91,6 +89,45 @@ interface ToolOutput {
         surface_artifacts?: Record<string, any[]>;
     };
     error?: string;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
 }
 
 type PluginGlobals = typeof globalThis & {

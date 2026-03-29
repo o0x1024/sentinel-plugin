@@ -3,15 +3,13 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.0
+ * @version 1.2.1
  * @author Sentinel Team
  * @category recon
  * @default_severity info
  * @tags service, probe, fingerprint, banner, asm
  * @description Identify exposed services from host/port targets with the native Rust service identification engine, normalized fingerprint artifacts, and structured service evidence
  */
-
-import { reportMonitorProgress } from "./monitor_progress.ts";
 
 declare const Sentinel: {
     Dictionary?: {
@@ -168,6 +166,32 @@ interface MonitorExecutionContext {
     completed_steps: number;
     total_steps: number;
     imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
 }
 
 const HTTP_PORTS = new Set([80, 81, 443, 8000, 8080, 8081, 8443, 8888, 9000]);

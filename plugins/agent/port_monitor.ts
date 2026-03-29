@@ -3,15 +3,13 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.1
+ * @version 1.3.2
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
  * @tags port, service, monitor, change-detection, scan
  * @description Monitor typed host and IP targets for port exposure changes using native Rust-backed port discovery, prioritizing structured monitor targets and preserving strict IP-only execution semantics for ASM workflows
  */
-
-import { reportMonitorProgress } from "./monitor_progress.ts";
 
 interface ToolInput {
     targets?: Array<string | ServiceTarget>;  // Legacy host list or service endpoints
@@ -133,6 +131,32 @@ interface MonitorExecutionContext {
     completed_steps: number;
     total_steps: number;
     imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
 }
 
 type NormalizedTargetType = "generic" | "service" | "host" | "ip";

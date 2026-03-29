@@ -3,15 +3,13 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.3.1
+ * @version 1.3.2
  * @author Sentinel Team
  * @category risk
  * @default_severity medium
  * @tags risk, exposure, file, dictionary, web
  * @description Scan web targets for exposed sensitive files using structured dictionary rules.
  */
-
-import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
 
 declare const Sentinel: {
     Dictionary?: {
@@ -20,6 +18,45 @@ declare const Sentinel: {
         getEntries?(idOrName: string, limit?: number): Promise<any[]>;
     };
 };
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
 
 interface ToolInput {
     url?: string;

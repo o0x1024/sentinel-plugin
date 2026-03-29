@@ -1,5 +1,5 @@
 {
-  "version": "2.3.9",
+  "version": "2.3.10",
   "updated_at": "2026-03-29",
   "plugins": [
     {
@@ -41,7 +41,7 @@
     {
       "id": "nextjs_rce_scanner",
       "name": "Next.js RCE Scanner",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "exploit",
@@ -89,7 +89,7 @@
     {
       "id": "http_prober",
       "name": "HTTP Prober",
-      "version": "1.4.0",
+      "version": "1.4.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
@@ -113,7 +113,7 @@
     {
       "id": "sensitive_file_scanner",
       "name": "Sensitive File Scanner",
-      "version": "1.3.1",
+      "version": "1.3.2",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
@@ -125,7 +125,7 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "risk",
@@ -149,7 +149,7 @@
     {
       "id": "service_monitor",
       "name": "Service Monitor",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
@@ -161,7 +161,7 @@
     {
       "id": "service_probe",
       "name": "Service Probe",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "recon",
@@ -173,7 +173,7 @@
     {
       "id": "directory_bruteforcer",
       "name": "Directory Bruteforcer",
-      "version": "1.1.0",
+      "version": "1.2.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "discovery",
@@ -209,7 +209,7 @@
     {
       "id": "subdomain_takeover",
       "name": "Subdomain Takeover Detector",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
@@ -221,7 +221,7 @@
     {
       "id": "cors_misconfiguration",
       "name": "CORS Misconfiguration Detector",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
@@ -305,7 +305,7 @@
     {
       "id": "port_monitor",
       "name": "Port Monitor",
-      "version": "1.3.1",
+      "version": "1.3.2",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",

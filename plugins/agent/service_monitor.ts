@@ -3,15 +3,13 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.0
+ * @version 1.0.1
  * @author Sentinel Team
  * @category monitor
  * @default_severity medium
  * @tags service, monitor, change-detection, banner, version, asm
  * @description Monitor exposed services for availability, banner, product, and version changes with structured snapshots and change events
  */
-
-import { reportMonitorProgress } from "./monitor_progress.ts";
 
 declare const Sentinel: {
     Dictionary?: {
@@ -205,6 +203,32 @@ interface MonitorExecutionContext {
     completed_steps: number;
     total_steps: number;
     imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
 }
 
 type PluginGlobals = typeof globalThis & {

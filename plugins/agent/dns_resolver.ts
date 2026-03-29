@@ -3,7 +3,7 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.0.0
+ * @version 1.0.1
  * @author Sentinel Team
  * @category recon
  * @default_severity info
@@ -11,9 +11,46 @@
  * @description Resolve DNS records for domains and produce typed surface graph artifacts for ASM and network asset mapping
  */
 
-import { reportMonitorProgress, type MonitorExecutionContext } from "./monitor_progress.ts";
-
 type RecordType = "A" | "AAAA" | "CNAME" | "MX" | "NS" | "TXT";
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
 
 interface ToolInput {
     targets: string[];
