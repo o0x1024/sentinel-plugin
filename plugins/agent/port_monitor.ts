@@ -133,6 +133,14 @@ interface MonitorExecutionContext {
     imported_assets?: number;
 }
 
+type NormalizedTargetType = "generic" | "service" | "host" | "ip";
+
+interface NormalizedHostTarget {
+    host: string;
+    ports?: number[];
+    sourceType: NormalizedTargetType;
+}
+
 type PluginGlobals = typeof globalThis & {
     get_input_schema?: typeof get_input_schema;
     get_output_schema?: typeof get_output_schema;
@@ -168,7 +176,7 @@ function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
-function normalizeHostTarget(target: string | ServiceTarget): { host: string; ports?: number[] } | null {
+function normalizeHostTarget(target: string | ServiceTarget): NormalizedHostTarget | null {
     if (typeof target === "string") {
         const trimmed = target.trim();
         if (!trimmed) return null;
@@ -178,7 +186,7 @@ function normalizeHostTarget(target: string | ServiceTarget): { host: string; po
                 const parsed = new URL(trimmed);
                 const host = parsed.hostname;
                 const port = parsed.port ? Number(parsed.port) : 0;
-                return host ? { host, ports: port > 0 ? [port] : undefined } : null;
+                return host ? { host, ports: port > 0 ? [port] : undefined, sourceType: "generic" } : null;
             }
         } catch {
             // Fall through to host:port parsing.
@@ -189,32 +197,55 @@ function normalizeHostTarget(target: string | ServiceTarget): { host: string; po
 
         const colonParts = base.split(":");
         if (colonParts.length === 2 && /^\d+$/.test(colonParts[1])) {
-            return { host: colonParts[0], ports: [Number(colonParts[1])] };
+            return { host: colonParts[0], ports: [Number(colonParts[1])], sourceType: "generic" };
         }
 
-        return { host: base };
+        return { host: base, sourceType: "generic" };
     }
 
     if (!target || typeof target !== "object") {
         return null;
     }
 
+    const sourceType = String(target.type || "").trim().toLowerCase() as NormalizedTargetType | "";
+
     if (typeof target.value === "string" && target.value.trim()) {
-        return normalizeHostTarget(target.value);
+        const normalized = normalizeHostTarget(target.value);
+        if (!normalized) return null;
+        if (sourceType === "ip" && !isIpLiteral(normalized.host)) {
+            return null;
+        }
+        return {
+            ...normalized,
+            sourceType: sourceType || normalized.sourceType,
+        };
     }
 
     const host = String(target.host || target.ip_or_host || target.host_key || "").trim();
     const port = Number(target.port ?? target.port_number ?? 0);
     if (!host) return null;
-    return { host, ports: port > 0 ? [port] : undefined };
+    if (sourceType === "ip" && !isIpLiteral(host)) {
+        return null;
+    }
+    return {
+        host,
+        ports: port > 0 ? [port] : undefined,
+        sourceType: sourceType || "generic",
+    };
 }
 
 function collectRawTargets(input: ToolInput): Array<string | ServiceTarget> {
-    return [
-        ...(Array.isArray(input.service_targets) ? input.service_targets : []),
-        ...(Array.isArray(input.target_objects) ? input.target_objects : []),
-        ...(Array.isArray(input.targets) ? input.targets : []),
-    ].filter((target) => {
+    const serviceTargets = Array.isArray(input.service_targets) ? input.service_targets : [];
+    const typedTargets = Array.isArray(input.target_objects) ? input.target_objects : [];
+    const legacyTargets = Array.isArray(input.targets) ? input.targets : [];
+
+    const selectedTargets = serviceTargets.length > 0
+        ? [...serviceTargets, ...typedTargets]
+        : typedTargets.length > 0
+            ? typedTargets
+            : legacyTargets;
+
+    return selectedTargets.filter((target) => {
         if (typeof target === "string") {
             return target.trim().length > 0;
         }
