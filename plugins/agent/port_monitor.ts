@@ -20,6 +20,7 @@ interface ToolInput {
     concurrency?: number;
     detectService?: boolean;
     previousSnapshots?: Record<string, PortSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface PortInfo {
@@ -119,6 +120,19 @@ interface NativePortScanResponse {
     error?: string;
 }
 
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
 type PluginGlobals = typeof globalThis & {
     get_input_schema?: typeof get_input_schema;
     get_output_schema?: typeof get_output_schema;
@@ -138,8 +152,8 @@ const HIGH_RISK_PORTS = new Set([
     21, 22, 23, 25, 135, 139, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 27017
 ]);
 
-const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 128;
+const DEFAULT_CONCURRENCY = 500;
+const MAX_CONCURRENCY = 1000;
 
 // Generate UUID
 function generateId(): string {
@@ -355,7 +369,8 @@ async function scanPortsWithNativeEngine(
     targets: NativePortScanTarget[],
     defaultPorts: number[],
     timeout: number,
-    concurrency: number
+    concurrency: number,
+    monitorExecution?: MonitorExecutionContext
 ): Promise<NativePortScanResponse> {
     if (typeof Sentinel === "undefined" || !Sentinel.Network || typeof Sentinel.Network.scanPorts !== "function") {
         throw new Error("Native port scanning engine is not available");
@@ -367,6 +382,18 @@ async function scanPortsWithNativeEngine(
         timeout_ms: timeout,
         concurrency,
         tries: 1,
+        monitor_progress: monitorExecution ? {
+            task_id: monitorExecution.task_id,
+            task_name: monitorExecution.task_name,
+            program_id: monitorExecution.program_id,
+            execution_mode: monitorExecution.execution_mode,
+            started_at: monitorExecution.started_at,
+            current_plugin: monitorExecution.current_plugin,
+            current_plugin_index: monitorExecution.current_plugin_index,
+            completed_steps: monitorExecution.completed_steps,
+            total_steps: monitorExecution.total_steps,
+            imported_assets: monitorExecution.imported_assets || 0,
+        } : undefined,
     });
 }
 
@@ -410,6 +437,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const timeout = input.timeout || 1500;
         const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
         
         const results: PortResult[] = [];
         const changeEvents: ChangeEvent[] = [];
@@ -424,7 +452,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             host,
             ports: [...(targetPortMap.get(host) || new Set<number>())].sort((left, right) => left - right),
         }));
-        const nativeScan = await scanPortsWithNativeEngine(nativeTargets, defaultPorts, timeout, concurrency);
+        const nativeScan = await scanPortsWithNativeEngine(
+            nativeTargets,
+            defaultPorts,
+            timeout,
+            concurrency,
+            monitorExecution,
+        );
         if (!nativeScan.success && (!nativeScan.results || nativeScan.results.length === 0)) {
             return {
                 success: false,

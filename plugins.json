@@ -167,7 +167,7 @@
       "category": "recon",
       "description": "Identify exposed services from host/port targets with pluggable probe engines, normalized fingerprint artifacts, and structured service evidence for ASM workflows.",
       "default_severity": "info",
-      "tags": ["service", "probe", "fingerprint", "banner", "asm", "network", "dictionary", "normalized", "pistol"],
+      "tags": ["service", "probe", "fingerprint", "banner", "asm", "network", "dictionary", "normalized", "native"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_probe.ts"
     },
     {

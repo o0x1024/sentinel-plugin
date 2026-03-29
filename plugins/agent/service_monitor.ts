@@ -12,17 +12,25 @@
  */
 
 declare const Sentinel: {
+    Dictionary?: {
+        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
+        getDefaultId?(dictType: string): Promise<string | null>;
+    };
     Network?: {
         probeServices?(request: {
             targets: Array<{ host: string; port: number; protocol: string }>;
+            rules?: Array<{ id?: string; word: string; category?: string | null; metadata?: any }>;
+            dictionaryId?: string;
             timeoutMs?: number;
             concurrency?: number;
             followHttpRedirects?: boolean;
             readBanner?: boolean;
             engine?: string;
+            monitorProgress?: MonitorExecutionContext;
         }): Promise<{
             success: boolean;
             results: Array<MonitorResult>;
+            ruleCount?: number;
             engineRequested: string;
             engineUsed: string;
             engineExperimental: boolean;
@@ -58,12 +66,15 @@ interface ToolInput {
     targets?: Array<string | PortLikeTarget>;
     target_objects?: Array<string | PortLikeTarget>;
     service_targets?: Array<string | PortLikeTarget>;
+    dictionaryId?: string;
+    dictionaryEntries?: RuleEntry[];
     timeout?: number;
     concurrency?: number;
     followHttpRedirects?: boolean;
     readBanner?: boolean;
     serviceProbeEngine?: string;
     previousSnapshots?: Record<string, ServiceSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
 }
 
 interface MonitorResult {
@@ -81,7 +92,16 @@ interface MonitorResult {
     serverHeader?: string;
     title?: string;
     statusCode?: number;
+    confidence?: number;
+    matchedRuleId?: string;
     error?: string;
+}
+
+interface RuleEntry {
+    id?: string;
+    word: string;
+    category?: string | null;
+    metadata?: any;
 }
 
 interface ServiceSnapshot {
@@ -164,11 +184,25 @@ interface ResolvedServiceProbeEngine {
 interface NativeServiceProbeResponse {
     success: boolean;
     results: MonitorResult[];
+    ruleCount?: number;
     engineRequested: string;
     engineUsed: string;
     engineExperimental: boolean;
     fallbackReason?: string;
     error?: string;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
 }
 
 type PluginGlobals = typeof globalThis & {
@@ -207,6 +241,91 @@ const DEFAULT_SERVICE_NAMES: Record<number, string> = {
     9200: "elasticsearch",
     27017: "mongodb",
 };
+
+function parseMetadata(value: any): Record<string, any> {
+    if (!value) return {};
+    if (typeof value === "string") {
+        try {
+            return JSON.parse(value);
+        } catch {
+            return {};
+        }
+    }
+    return typeof value === "object" ? value : {};
+}
+
+async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
+    if (!Sentinel?.Dictionary?.getEntries) return [];
+    try {
+        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
+        return entries
+            .filter((item: any) => item && typeof item.word === "string")
+            .map((item: any) => ({
+                id: typeof item.id === "string" ? item.id : undefined,
+                word: item.word,
+                category: typeof item.category === "string" ? item.category : null,
+                metadata: parseMetadata(item.metadata),
+            }));
+    } catch {
+        return [];
+    }
+}
+
+async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
+    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
+        return input.dictionaryEntries.map((entry) => ({
+            ...entry,
+            metadata: parseMetadata(entry.metadata),
+        }));
+    }
+
+    const resolvedDictionaryId = await resolveRuleDictionaryId(input);
+    const candidates = [
+        input.dictionaryId,
+        resolvedDictionaryId,
+        "builtin_service_fingerprint_rules",
+        "Service Fingerprint Rules",
+    ].filter((value, index, array): value is string =>
+        typeof value === "string"
+        && value.trim().length > 0
+        && array.indexOf(value) === index
+    );
+
+    for (const candidate of candidates) {
+        const rules = await loadDictionaryEntries(candidate);
+        if (rules.length > 0) {
+            return rules;
+        }
+    }
+
+    return [];
+}
+
+async function resolveRuleDictionaryId(input: ToolInput): Promise<string | null> {
+    if (typeof input.dictionaryId === "string" && input.dictionaryId.trim()) {
+        return input.dictionaryId.trim();
+    }
+
+    try {
+        const defaultId = await Sentinel?.Dictionary?.getDefaultId?.("service_probe_rule");
+        if (typeof defaultId === "string" && defaultId.trim()) {
+            return defaultId.trim();
+        }
+    } catch {
+        // ignore and continue with builtin fallback
+    }
+
+    try {
+        const fallbackId = await Sentinel?.Dictionary?.getDefaultId?.("fingerprint_rule");
+        if (typeof fallbackId === "string" && fallbackId.trim()) {
+            return fallbackId.trim();
+        }
+    } catch {
+        // ignore and continue with builtin fallback
+    }
+
+    return "builtin_service_fingerprint_rules";
+}
 
 function normalizeTarget(raw: string | PortLikeTarget): { host: string; port: number; protocol: string } | null {
     if (typeof raw === "string") {
@@ -560,72 +679,42 @@ function isIpLiteral(value: string): boolean {
 }
 
 async function resolveServiceProbeEngine(requestedEngine?: string): Promise<ResolvedServiceProbeEngine> {
-    const normalizedRequested = String(requestedEngine || "pistol").trim().toLowerCase() || "pistol";
-    if (normalizedRequested === "builtin") {
+    const normalizedRequested = String(requestedEngine || "native").trim().toLowerCase() || "native";
+    if (normalizedRequested === "native") {
         return {
-            requested: "builtin",
-            used: "builtin",
+            requested: normalizedRequested,
+            used: "native",
             experimental: false,
         };
     }
 
-    try {
-        const capabilities = typeof Sentinel !== "undefined"
-            && Sentinel.Network
-            && typeof Sentinel.Network.getServiceProbeCapabilities === "function"
-            ? await Sentinel.Network.getServiceProbeCapabilities() as ServiceProbeCapabilitiesResponse
-            : null;
-        const engine = capabilities?.engines?.find((item) => item.id === normalizedRequested);
-
-        if (!engine) {
-            return {
-                requested: normalizedRequested,
-                used: "builtin",
-                experimental: false,
-                fallbackReason: `Unknown service probe engine: ${normalizedRequested}`,
-            };
-        }
-
-        if (!engine.available) {
-            return {
-                requested: normalizedRequested,
-                used: "builtin",
-                experimental: Boolean(engine.experimental),
-                fallbackReason: `${normalizedRequested} engine is not available in this build`,
-            };
-        }
-
-        if (!engine.implemented) {
-            return {
-                requested: normalizedRequested,
-                used: "builtin",
-                experimental: Boolean(engine.experimental),
-                fallbackReason: `${normalizedRequested} engine is experimental but not implemented yet`,
-            };
-        }
-
+    if (normalizedRequested === "builtin" || normalizedRequested === "pistol") {
         return {
             requested: normalizedRequested,
-            used: normalizedRequested,
-            experimental: Boolean(engine.experimental),
-        };
-    } catch (error: any) {
-        return {
-            requested: normalizedRequested,
-            used: "builtin",
-            experimental: normalizedRequested !== "builtin",
-            fallbackReason: error instanceof Error ? error.message : String(error),
+            used: "native",
+            experimental: false,
+            fallbackReason: `Legacy service probe engine '${normalizedRequested}' was migrated to native`,
         };
     }
+
+    return {
+        requested: normalizedRequested,
+        used: "native",
+        experimental: false,
+        fallbackReason: `Unknown service probe engine: ${normalizedRequested}; using native`,
+    };
 }
 
 async function probeServicesWithNativeEngine(
     targets: Array<{ host: string; port: number; protocol: string }>,
+    dictionaryId: string | null,
+    rules: RuleEntry[],
     timeout: number,
     concurrency: number,
     followHttpRedirects: boolean,
     readBanner: boolean,
     engine: string,
+    monitorExecution?: MonitorExecutionContext,
 ): Promise<NativeServiceProbeResponse | null> {
     if (
         typeof Sentinel === "undefined"
@@ -637,11 +726,25 @@ async function probeServicesWithNativeEngine(
 
     return await Sentinel.Network.probeServices({
         targets,
+        rules,
+        dictionaryId: dictionaryId || undefined,
         timeoutMs: timeout,
         concurrency,
         followHttpRedirects,
         readBanner,
         engine,
+        monitorProgress: monitorExecution ? {
+            task_id: monitorExecution.task_id,
+            task_name: monitorExecution.task_name,
+            program_id: monitorExecution.program_id,
+            execution_mode: monitorExecution.execution_mode,
+            started_at: monitorExecution.started_at,
+            current_plugin: monitorExecution.current_plugin,
+            current_plugin_index: monitorExecution.current_plugin_index,
+            completed_steps: monitorExecution.completed_steps,
+            total_steps: monitorExecution.total_steps,
+            imported_assets: monitorExecution.imported_assets ?? 0,
+        } : undefined,
     }) as NativeServiceProbeResponse;
 }
 
@@ -660,6 +763,14 @@ export function get_input_schema() {
             service_targets: {
                 type: "array",
                 description: "Structured service endpoints with host, port, and protocol fields",
+            },
+            dictionaryId: {
+                type: "string",
+                description: "Structured service fingerprint dictionary ID or name",
+            },
+            dictionaryEntries: {
+                type: "array",
+                description: "Structured service fingerprint rule entries injected by workflow",
             },
             timeout: {
                 type: "integer",
@@ -683,9 +794,9 @@ export function get_input_schema() {
             },
             serviceProbeEngine: {
                 type: "string",
-                enum: ["builtin", "pistol"],
-                default: "pistol",
-                description: "Service probe engine. Pistol is the default service-identification engine; builtin remains available as a lighter fallback.",
+                enum: ["native"],
+                default: "native",
+                description: "Service probe engine. Native is the built-in Rust service identification engine.",
             },
             previousSnapshots: {
                 type: "object",
@@ -747,17 +858,31 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
         const followHttpRedirects = input.followHttpRedirects !== false;
         const readBanner = input.readBanner !== false;
+        const monitorExecution = input.__monitorExecution;
+        const dictionaryId = await resolveRuleDictionaryId(input);
+        const explicitRules = Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0
+            ? await loadRules(input)
+            : [];
         const requestedProbeEngine = await resolveServiceProbeEngine(input.serviceProbeEngine);
         const previousSnapshots = input.previousSnapshots || {};
         const timestamp = new Date().toISOString();
         const nativeProbe = await probeServicesWithNativeEngine(
             normalizedTargets,
+            dictionaryId,
+            explicitRules,
             timeout,
             concurrency,
             followHttpRedirects,
             readBanner,
             requestedProbeEngine.used,
+            monitorExecution,
         ).catch(() => null);
+        const rules = nativeProbe?.results?.length
+            ? explicitRules
+            : await loadRules({
+                ...input,
+                dictionaryId: dictionaryId || input.dictionaryId,
+            });
         const probeEngine = nativeProbe
             ? {
                 requested: nativeProbe.engineRequested || requestedProbeEngine.requested,
