@@ -694,7 +694,7 @@ export function get_input_schema() {
             },
             timeout: {
                 type: "integer",
-                default: 5000,
+                default: 3000,
                 minimum: 1000,
                 maximum: 30000,
             },
@@ -775,8 +775,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const timeout = Math.max(1000, Math.min(input.timeout || 5000, 30000));
-        const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
+        const timeout = Math.max(1000, Math.min(input.timeout || 3000, 10000));
+        const concurrency = Math.max(1, Math.min(input.concurrency || 200, 500));
         const followHttpRedirects = input.followHttpRedirects !== false;
         const readBanner = input.readBanner === true;
         const monitorExecution = input.__monitorExecution;

@@ -104,9 +104,19 @@ interface MonitorExecutionContext {
     imported_assets?: number;
 }
 
+interface MonitorProgressUpdate {
+    current?: number;
+    total?: number;
+    message?: string;
+    currentTarget?: string;
+    phase?: string;
+    phaseLabel?: string;
+    indeterminate?: boolean;
+}
+
 async function reportMonitorProgress(
     monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
+    update: MonitorProgressUpdate,
 ): Promise<boolean> {
     if (!monitorExecution) return false;
     try {
@@ -128,6 +138,11 @@ async function reportMonitorProgress(
     } catch {
         return false;
     }
+}
+
+function formatTargetLabel(domain: string, index: number, total: number): string {
+    if (total <= 0) return domain;
+    return `${domain} (${index}/${total})`;
 }
 
 type PluginGlobals = typeof globalThis & {
@@ -407,13 +422,27 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     .filter((domain) => domain.length > 0),
             ),
         );
-        const totalProgressUnits = normalizedDomains.length + 2;
+        const probeUnitsPerDomain = 3;
+        const totalProgressUnits = normalizedDomains.length * probeUnitsPerDomain + 2;
+        let completedProgressUnits = 0;
 
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: totalProgressUnits,
+        const advanceProgress = async (update: MonitorProgressUpdate, increment = 0) => {
+            completedProgressUnits = Math.min(
+                totalProgressUnits,
+                completedProgressUnits + Math.max(0, increment),
+            );
+            await reportMonitorProgress(monitorExecution, {
+                total: totalProgressUnits,
+                current: completedProgressUnits,
+                ...update,
+            });
+        };
+
+        await advanceProgress({
             phase: "prepare",
             message: "Preparing certificate checks",
+            phaseLabel: "Preparing certificate checks",
+            indeterminate: true,
         });
 
         const results: CertResult[] = [];
@@ -427,14 +456,35 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let expiredCertificates = 0;
         let completedDomains = 0;
 
-        async function processDomain(domain: string): Promise<void> {
+        async function processDomain(domain: string, domainIndex: number): Promise<void> {
             const result: CertResult = {
                 domain,
                 success: false,
             };
+            const targetLabel = formatTargetLabel(
+                domain,
+                domainIndex + 1,
+                normalizedDomains.length,
+            );
 
             try {
+                await advanceProgress({
+                    currentTarget: targetLabel,
+                    phase: "probe",
+                    phaseLabel: "Connecting",
+                    message: `Connecting to ${domain}`,
+                }, 1);
+
                 const certInfo = await getCertificateInfo(domain, timeout);
+
+                await advanceProgress({
+                    currentTarget: targetLabel,
+                    phase: "probe",
+                    phaseLabel: "Reading certificate",
+                    message: certInfo
+                        ? `Retrieved certificate for ${domain}`
+                        : `Unable to retrieve certificate for ${domain}`,
+                }, 1);
 
                 if (certInfo) {
                     result.success = true;
@@ -574,14 +624,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
 
             results.push(result);
-            completedDomains += 1;
-            await reportMonitorProgress(monitorExecution, {
-                current: completedDomains,
-                total: totalProgressUnits,
-                currentTarget: domain,
+            completedDomains += 1
+            await advanceProgress({
+                currentTarget: targetLabel,
                 phase: "probe",
-                message: `Checking certificate for ${domain}`,
-            });
+                phaseLabel: result.success ? "Completed" : "Failed",
+                message: result.success
+                    ? `Finished certificate check for ${domain}`
+                    : `Certificate check failed for ${domain}`,
+            }, 1);
         }
 
         let currentIndex = 0;
@@ -590,17 +641,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             while (currentIndex < normalizedDomains.length) {
                 const targetIndex = currentIndex;
                 currentIndex++;
-                await processDomain(normalizedDomains[targetIndex]);
+                await processDomain(normalizedDomains[targetIndex], targetIndex);
             }
         });
         await Promise.all(workers);
 
-        await reportMonitorProgress(monitorExecution, {
-            current: normalizedDomains.length + 1,
-            total: totalProgressUnits,
+        await advanceProgress({
             phase: "compare",
             message: "Comparing certificate snapshots",
-        });
+            phaseLabel: "Comparing snapshots",
+        }, 1);
 
         const certificates = results
             .filter((result) => result.success && result.certInfo)
@@ -624,12 +674,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             certificates.flatMap((cert) => [cert.domain, ...cert.san]),
         );
 
-        await reportMonitorProgress(monitorExecution, {
-            current: totalProgressUnits,
-            total: totalProgressUnits,
+        await advanceProgress({
             phase: "build",
             message: "Building certificate artifacts",
-        });
+            phaseLabel: "Building artifacts",
+        }, 1);
 
         return {
             success: true,
