@@ -1,6 +1,6 @@
 {
-  "version": "2.3.12",
-  "updated_at": "2026-03-29",
+  "version": "2.3.13",
+  "updated_at": "2026-03-30",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -293,13 +293,13 @@
     {
       "id": "api_monitor",
       "name": "API Monitor",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "monitor",
-      "description": "Monitor API endpoints for changes (new endpoints, removed endpoints, GraphQL/OpenAPI discovery), generating ChangeEvents for workflow automation with configurable concurrent scanning",
+      "description": "Monitor API endpoints by discovering JavaScript assets from pages and bundles, extracting API paths from JS, and comparing endpoint changes with optional GraphQL/OpenAPI discovery.",
       "default_severity": "high",
-      "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "graphql"],
+      "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "graphql", "javascript", "spa"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/api_monitor.ts"
     },
     {
@@ -313,18 +313,6 @@
       "default_severity": "medium",
       "tags": ["port", "monitor", "network", "asm", "surface", "ip", "host", "change-detection", "native"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/port_monitor.ts"
-    },
-    {
-      "id": "js_link_finder",
-      "name": "JS Link Finder",
-      "version": "2.1.0",
-      "author": "Sentinel Team",
-      "main_category": "agent",
-      "category": "discovery",
-      "description": "Find and collect JavaScript file URLs from web pages with lower default concurrency, worker-pool scheduling, deduplicated targets, and bounded manifest/source-map follow-up fetching",
-      "default_severity": "info",
-      "tags": ["javascript", "discovery", "links", "crawler", "web", "reconnaissance"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/js_link_finder.ts"
     }
   ]
 }
