@@ -93,6 +93,15 @@ interface ScriptContentSource {
     content: string;
 }
 
+interface SourceMapLike {
+    version?: number;
+    file?: string;
+    sourceRoot?: string;
+    sources?: string[];
+    sourcesContent?: Array<string | null>;
+    sections?: Array<{ map?: SourceMapLike }>;
+}
+
 interface FetchResult {
     text: string;
     size: number;
@@ -225,10 +234,177 @@ const COMMON_API_PATHS = [
 const DEFAULT_MAX_JS_FILES = 100;
 const DEFAULT_PAGE_CRAWL_LIMIT = 20;
 
+function stripQuotes(value: string): string {
+    if (value.length >= 2) {
+        const first = value[0];
+        const last = value[value.length - 1];
+        if ((first === "'" && last === "'") || (first === "\"" && last === "\"") || (first === "`" && last === "`")) {
+            return value.slice(1, -1);
+        }
+    }
+    return value;
+}
+
+function splitConcatenatedExpression(expr: string): string[] {
+    const parts: string[] = [];
+    let current = "";
+    let quote: string | null = null;
+    let braceDepth = 0;
+
+    for (let index = 0; index < expr.length; index += 1) {
+        const char = expr[index];
+        const previous = index > 0 ? expr[index - 1] : "";
+
+        if (quote) {
+            current += char;
+            if (char === quote && previous !== "\\") {
+                quote = null;
+            }
+            continue;
+        }
+
+        if (char === "'" || char === "\"" || char === "`") {
+            quote = char;
+            current += char;
+            continue;
+        }
+
+        if (char === "(" || char === "[" || char === "{") {
+            braceDepth += 1;
+            current += char;
+            continue;
+        }
+
+        if (char === ")" || char === "]" || char === "}") {
+            braceDepth = Math.max(0, braceDepth - 1);
+            current += char;
+            continue;
+        }
+
+        if (char === "+" && braceDepth === 0) {
+            const trimmed = current.trim();
+            if (trimmed) parts.push(trimmed);
+            current = "";
+            continue;
+        }
+
+        current += char;
+    }
+
+    const tail = current.trim();
+    if (tail) parts.push(tail);
+    return parts;
+}
+
+function resolveStringExpression(expr: string, constants: Map<string, string>): string | null {
+    const normalizedExpr = expr.trim();
+    if (!normalizedExpr) return null;
+
+    if ((normalizedExpr.startsWith("'") && normalizedExpr.endsWith("'"))
+        || (normalizedExpr.startsWith("\"") && normalizedExpr.endsWith("\""))) {
+        return stripQuotes(normalizedExpr);
+    }
+
+    if (normalizedExpr.startsWith("`") && normalizedExpr.endsWith("`")) {
+        const templateBody = stripQuotes(normalizedExpr);
+        return templateBody.replace(/\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g, (_match, name: string) => {
+            return constants.get(name) ?? "";
+        });
+    }
+
+    if (/^[A-Za-z_$][\w$]*$/.test(normalizedExpr)) {
+        return constants.get(normalizedExpr) ?? null;
+    }
+
+    if (normalizedExpr.includes("+")) {
+        const parts = splitConcatenatedExpression(normalizedExpr);
+        if (parts.length === 0) return null;
+        let resolved = "";
+        for (const part of parts) {
+            const value = resolveStringExpression(part, constants);
+            if (value === null) return null;
+            resolved += value;
+        }
+        return resolved;
+    }
+
+    return null;
+}
+
+function collectResolvableConstants(content: string): Map<string, string> {
+    const rawAssignments = new Map<string, string>();
+    const resolved = new Map<string, string>();
+    const assignmentRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+);?/g;
+    let match;
+
+    while ((match = assignmentRegex.exec(content)) !== null) {
+        rawAssignments.set(match[1], match[2].trim());
+    }
+
+    for (let iteration = 0; iteration < 5; iteration += 1) {
+        let changed = false;
+        for (const [name, expression] of rawAssignments.entries()) {
+            if (resolved.has(name)) continue;
+            const value = resolveStringExpression(expression, resolved);
+            if (typeof value === "string" && value.length > 0) {
+                resolved.set(name, value);
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
+
+    return resolved;
+}
+
+function normalizeEndpointPath(value: string): string | null {
+    const normalizedValue = String(value || "").trim();
+    if (!normalizedValue) return null;
+
+    if (/^https?:\/\/[^\/]+\/(?:api|v[0-9]+|rest|graphql)/i.test(normalizedValue)) {
+        try {
+            return new URL(normalizedValue).pathname;
+        } catch {
+            return null;
+        }
+    }
+
+    for (const pattern of API_PATTERNS) {
+        if (pattern.test(normalizedValue)) {
+            return normalizedValue;
+        }
+    }
+
+    return null;
+}
+
+function pushApiEndpoint(
+    endpoints: ApiEndpoint[],
+    seen: Set<string>,
+    pathCandidate: string,
+    source: string,
+    method?: string,
+) {
+    const normalizedPath = normalizeEndpointPath(pathCandidate);
+    if (!normalizedPath) return;
+
+    const normalizedMethod = method ? method.toUpperCase() : undefined;
+    const key = `${normalizedMethod || ""}:${normalizedPath}`;
+    if (seen.has(key)) return;
+
+    seen.add(key);
+    endpoints.push({
+        path: normalizedPath,
+        method: normalizedMethod,
+        source,
+    });
+}
+
 // Extract API endpoints from JavaScript content
 function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     const endpoints: ApiEndpoint[] = [];
     const seen = new Set<string>();
+    const constants = collectResolvableConstants(content);
     
     // Try to use Sentinel AST API if available
     let literals: Array<{ value: string; line: number }> = [];
@@ -253,50 +429,61 @@ function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     
     for (const literal of literals) {
         const value = literal.value.trim();
-        if (seen.has(value)) continue;
-        
-        // Check API patterns
-        for (const pattern of API_PATTERNS) {
-            if (pattern.test(value)) {
-                seen.add(value);
-                endpoints.push({
-                    path: value,
-                    source,
-                });
-                break;
-            }
-        }
-        
-        // Check for full API URLs
-        if (!seen.has(value) && /^https?:\/\/[^\/]+\/(?:api|v[0-9]+|rest|graphql)/i.test(value)) {
-            seen.add(value);
-            try {
-                const url = new URL(value);
-                endpoints.push({
-                    path: url.pathname,
-                    source,
-                });
-            } catch {
-                // Invalid URL
-            }
-        }
+        pushApiEndpoint(endpoints, seen, value, source);
+    }
+
+    for (const value of constants.values()) {
+        pushApiEndpoint(endpoints, seen, value, source);
     }
     
-    // Extract from fetch/axios calls with method info
-    const fetchPattern = /(?:fetch|axios)\s*\.\s*(get|post|put|delete|patch)\s*\(\s*['"`]([^'"`]+)['"`]/gi;
-    let fetchMatch;
-    while ((fetchMatch = fetchPattern.exec(content)) !== null) {
-        const method = fetchMatch[1].toUpperCase();
-        const path = fetchMatch[2];
-        const key = `${method}:${path}`;
-        if (!seen.has(key)) {
-            seen.add(key);
-            endpoints.push({
-                path,
-                method,
-                source,
-            });
+    const axiosInstances = new Map<string, string>();
+    const axiosCreateRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*\{[\s\S]{0,300}?baseURL\s*:\s*([^,}\n]+)[\s\S]{0,300}?\}\s*\)/g;
+    let axiosCreateMatch;
+    while ((axiosCreateMatch = axiosCreateRegex.exec(content)) !== null) {
+        const baseUrl = resolveStringExpression(axiosCreateMatch[2], constants);
+        if (baseUrl) {
+            axiosInstances.set(axiosCreateMatch[1], baseUrl);
         }
+    }
+
+    const methodCallRegex = /([A-Za-z_$][\w$]*|axios|fetch)\s*(?:\.\s*(get|post|put|delete|patch))?\s*\(\s*([^,\n)]+)(?:,\s*(\{[\s\S]{0,250}?\}))?/g;
+    let methodCallMatch;
+    while ((methodCallMatch = methodCallRegex.exec(content)) !== null) {
+        const clientName = methodCallMatch[1];
+        const explicitMethod = methodCallMatch[2];
+        const targetExpression = methodCallMatch[3];
+        const configExpression = methodCallMatch[4] || "";
+
+        const methodMatch = configExpression.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
+        const method = explicitMethod || methodMatch?.[1] || (clientName === "fetch" ? "GET" : undefined);
+        const resolvedTarget = resolveStringExpression(targetExpression, constants);
+        if (!resolvedTarget) continue;
+
+        const axiosBase = axiosInstances.get(clientName);
+        const combinedTarget = axiosBase && resolvedTarget.startsWith("/")
+            ? `${axiosBase.replace(/\/$/, "")}${resolvedTarget}`
+            : resolvedTarget;
+        pushApiEndpoint(endpoints, seen, combinedTarget, source, method);
+    }
+
+    const requestObjectRegex = /([A-Za-z_$][\w$]*(?:\.\s*request)?|axios)\s*\(\s*\{([\s\S]{0,300}?)\}\s*\)/g;
+    let requestObjectMatch;
+    while ((requestObjectMatch = requestObjectRegex.exec(content)) !== null) {
+        const callee = requestObjectMatch[1].replace(/\s+/g, "");
+        const objectBody = requestObjectMatch[2];
+        const urlMatch = objectBody.match(/\burl\s*:\s*([^,}\n]+)/);
+        if (!urlMatch) continue;
+
+        const methodMatch = objectBody.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
+        const resolvedUrl = resolveStringExpression(urlMatch[1], constants);
+        if (!resolvedUrl) continue;
+
+        const instanceName = callee.replace(/\.request$/, "");
+        const axiosBase = axiosInstances.get(instanceName);
+        const combinedTarget = axiosBase && resolvedUrl.startsWith("/")
+            ? `${axiosBase.replace(/\/$/, "")}${resolvedUrl}`
+            : resolvedUrl;
+        pushApiEndpoint(endpoints, seen, combinedTarget, source, methodMatch?.[1]);
     }
     
     return endpoints;
@@ -479,6 +666,30 @@ function extractInlineScripts(html: string): Array<{ content: string; hash: stri
     return scripts;
 }
 
+function pushDiscoveredJsLink(
+    links: JsLink[],
+    seenUrls: Set<string>,
+    baseUrl: string,
+    candidate: string,
+    type: JsLink["type"],
+    source: string,
+) {
+    const normalizedCandidate = String(candidate || "")
+        .trim()
+        .replace(/\\u002F/gi, "/")
+        .replace(/\\\//g, "/");
+    if (!normalizedCandidate || normalizedCandidate.startsWith("data:") || normalizedCandidate.includes("{{")) {
+        return;
+    }
+
+    const url = resolveUrl(baseUrl, normalizedCandidate);
+    if (!url || seenUrls.has(url)) return;
+    if (type !== "sourcemap" && !looksLikeJs(url)) return;
+
+    seenUrls.add(url);
+    links.push({ url, type, source });
+}
+
 function extractJsFromContent(content: string, baseUrl: string): JsLink[] {
     const links: JsLink[] = [];
     const seenUrls = new Set<string>();
@@ -488,63 +699,107 @@ function extractJsFromContent(content: string, baseUrl: string): JsLink[] {
     while ((match = esImportRegex.exec(content)) !== null) {
         const path = match[1];
         if (looksLikeJs(path) || !path.startsWith(".")) {
-            const url = resolveUrl(baseUrl, path);
-            if (url && !seenUrls.has(url) && looksLikeJs(url)) {
-                seenUrls.add(url);
-                links.push({ url, type: "module", source: "es_import" });
-            }
+            pushDiscoveredJsLink(links, seenUrls, baseUrl, path, "module", "es_import");
         }
     }
 
     const dynamicImportRegex = /import\s*\(\s*["']([^"']+)["']\s*\)/g;
     while ((match = dynamicImportRegex.exec(content)) !== null) {
-        const url = resolveUrl(baseUrl, match[1]);
-        if (url && !seenUrls.has(url) && looksLikeJs(url)) {
-            seenUrls.add(url);
-            links.push({ url, type: "dynamic", source: "dynamic_import" });
-        }
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "dynamic", "dynamic_import");
     }
 
     const requireRegex = /require\s*\(\s*["']([^"']+)["']\s*\)/g;
     while ((match = requireRegex.exec(content)) !== null) {
-        const url = resolveUrl(baseUrl, match[1]);
-        if (url && !seenUrls.has(url) && looksLikeJs(url)) {
-            seenUrls.add(url);
-            links.push({ url, type: "dynamic", source: "require" });
-        }
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "dynamic", "require");
     }
 
     const sourceMapRegex = /\/\/[#@]\s*sourceMappingURL\s*=\s*(\S+)/g;
     while ((match = sourceMapRegex.exec(content)) !== null) {
-        const url = resolveUrl(baseUrl, match[1]);
-        if (url && !seenUrls.has(url)) {
-            seenUrls.add(url);
-            links.push({ url, type: "sourcemap", source: "sourcemap" });
-        }
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "sourcemap", "sourcemap");
     }
 
     const jsUrlRegex = /["']([^"'\s]*?(?:\/assets\/|\/static\/|\/js\/|\/dist\/|\/build\/|\/chunks?\/)?[^"'\s]*?\.[a-f0-9]{6,10}\.js(?:\?[^"'\s]*)?)["']/gi;
     while ((match = jsUrlRegex.exec(content)) !== null) {
-        const path = match[1];
-        if (path && !path.startsWith("data:") && !path.includes("{{")) {
-            const url = resolveUrl(baseUrl, path);
-            if (url && !seenUrls.has(url)) {
-                seenUrls.add(url);
-                links.push({ url, type: "webpack", source: "js_string" });
-            }
-        }
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "webpack", "js_string");
     }
 
     const simpleJsRegex = /["']((?:\/|\.\.?\/)[^"'\s]+\.js(?:\?[^"'\s]*)?)["']/g;
     while ((match = simpleJsRegex.exec(content)) !== null) {
-        const url = resolveUrl(baseUrl, match[1]);
-        if (url && !seenUrls.has(url) && !match[1].startsWith("data:")) {
-            seenUrls.add(url);
-            links.push({ url, type: "dynamic", source: "js_path" });
-        }
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "dynamic", "js_path");
+    }
+
+    const frameworkChunkRegex = /["']((?:https?:\/\/[^"'\\\s]+|(?:\\\/|\/)(?:_next|_nuxt|assets|static|build|dist|js|chunks?|webpack|runtime)[^"'\\\s]+?\.js(?:\?[^"'\\\s]*)?|(?:[A-Za-z0-9_-]+\/)+(?:chunks?|assets|static|js)\/[^"'\\\s]+?\.js(?:\?[^"'\\\s]*)?))["']/gi;
+    while ((match = frameworkChunkRegex.exec(content)) !== null) {
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "webpack", "framework_chunk");
+    }
+
+    const escapedChunkRegex = /((?:\\\/)+(?:_next|_nuxt|assets|static|build|dist|js|chunks?|webpack|runtime)(?:[^"'\\]|\\.)+?\.js(?:\?[^"'\\\s]*)?)/gi;
+    while ((match = escapedChunkRegex.exec(content)) !== null) {
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "webpack", "escaped_chunk");
     }
 
     return links;
+}
+
+function resolveSourceMapSourceUrl(mapUrl: string, sourceRoot: string | undefined, sourcePath: string | undefined): string {
+    const normalizedSourcePath = String(sourcePath || "").trim();
+    if (!normalizedSourcePath) return "";
+
+    const normalizedSourceRoot = String(sourceRoot || "").trim();
+    if (normalizedSourceRoot) {
+        const rootedUrl = resolveUrl(mapUrl, normalizedSourceRoot.endsWith("/")
+            ? `${normalizedSourceRoot}${normalizedSourcePath}`
+            : `${normalizedSourceRoot}/${normalizedSourcePath}`);
+        if (rootedUrl) return rootedUrl;
+    }
+
+    return resolveUrl(mapUrl, normalizedSourcePath);
+}
+
+function parseSourceMapScriptContents(mapText: string, mapUrl: string): ScriptContentSource[] {
+    const scriptContents: ScriptContentSource[] = [];
+    const seenSources = new Set<string>();
+
+    const collectFromMap = (mapValue: SourceMapLike | undefined, parentUrl: string) => {
+        if (!mapValue || typeof mapValue !== "object") return;
+
+        const sources = Array.isArray(mapValue.sources) ? mapValue.sources : [];
+        const sourcesContent = Array.isArray(mapValue.sourcesContent) ? mapValue.sourcesContent : [];
+
+        for (let index = 0; index < sources.length; index += 1) {
+            const sourceContent = sourcesContent[index];
+            if (typeof sourceContent !== "string" || sourceContent.trim().length < 10) {
+                continue;
+            }
+
+            const sourcePath = sources[index];
+            const resolvedSource = resolveSourceMapSourceUrl(parentUrl, mapValue.sourceRoot, sourcePath)
+                || `sourcemap://${parentUrl}#${sourcePath || index}`;
+            if (seenSources.has(resolvedSource)) {
+                continue;
+            }
+
+            seenSources.add(resolvedSource);
+            scriptContents.push({
+                source: resolvedSource,
+                content: sourceContent,
+            });
+        }
+
+        if (Array.isArray(mapValue.sections)) {
+            for (const section of mapValue.sections) {
+                collectFromMap(section?.map, parentUrl);
+            }
+        }
+    };
+
+    try {
+        collectFromMap(JSON.parse(mapText) as SourceMapLike, mapUrl);
+    } catch {
+        return [];
+    }
+
+    return scriptContents;
 }
 
 function parseManifest(content: string, manifestUrl: string): JsLink[] {
@@ -731,7 +986,9 @@ async function discoverJavascriptAssets(
                         link.url,
                         timeout,
                         userAgent,
-                        "application/javascript,text/javascript,text/plain,*/*",
+                        link.type === "sourcemap"
+                            ? "application/json,text/plain,*/*"
+                            : "application/javascript,text/javascript,text/plain,*/*",
                     ),
                 })),
                 Math.min(concurrency, batch.length || 1),
@@ -747,6 +1004,13 @@ async function discoverJavascriptAssets(
                 }
 
                 link.size = result.size;
+                if (link.type === "sourcemap") {
+                    for (const sourceContent of parseSourceMapScriptContents(result.text, link.url)) {
+                        scriptContents.push(sourceContent);
+                    }
+                    continue;
+                }
+
                 scriptContents.push({
                     source: link.url,
                     content: result.text,
