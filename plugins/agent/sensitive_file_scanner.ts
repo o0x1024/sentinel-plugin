@@ -202,15 +202,16 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent file probes",
-                default: 50,
-                minimum: 1,
-                maximum: 50
+                default: 100,
+                minimum: 100,
+                maximum: 500
             },
             maxTargets: {
                 type: "integer",
                 description: "Optional maximum number of normalized targets to scan",
-                minimum: 1,
-                maximum: 100
+                minimum: 100,
+                default: 100,
+                maximum: 500
             },
         },
     };

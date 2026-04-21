@@ -103,9 +103,23 @@ interface SourceMapLike {
 }
 
 interface FetchResult {
+    ok: boolean;
+    status: number | null;
     text: string;
     size: number;
     contentType: string;
+    finalUrl: string;
+    error?: string;
+}
+
+interface HttpProbeResult {
+    ok: boolean;
+    status: number;
+    text: string;
+    size: number;
+    contentType: string;
+    finalUrl: string;
+    fetchedAt: string;
 }
 
 interface JsDiscoveryResult {
@@ -119,6 +133,14 @@ interface ApiEndpoint {
     method?: string;
     source: string;
     parameters?: string[];
+    requestUrl?: string;
+    requestMethod?: string;
+    responseStatus?: number;
+    responseContentType?: string;
+    responsePreview?: string;
+    responseFetchedAt?: string;
+    responseError?: string;
+    responseSize?: number;
 }
 
 interface ApiSnapshot {
@@ -215,24 +237,21 @@ const API_PATTERNS = [
     /^\/(?:users?|auth|login|logout|register|signup|profile|account|settings|config|admin|dashboard|data|search|upload|download|export|import|webhook|token|oauth|callback|notify|events?|messages?|posts?|comments?|items?|products?|orders?|payments?|subscriptions?|notifications?)(?:\/[a-zA-Z0-9_-]*)*$/,
 ];
 
-// Common API file paths to check
-const COMMON_API_PATHS = [
-    "/api",
-    "/api/v1",
-    "/api/v2",
-    "/v1",
-    "/v2",
-    "/rest",
-    "/graphql",
-    "/swagger.json",
-    "/openapi.json",
-    "/api-docs",
-    "/api/swagger.json",
-    "/api/openapi.json",
-];
 
 const DEFAULT_MAX_JS_FILES = 100;
 const DEFAULT_PAGE_CRAWL_LIMIT = 20;
+const MAX_RESPONSE_PREVIEW_CHARS = 4000;
+const MAX_CONSTANT_RESOLUTION_SOURCE_LENGTH = 1_000_000;
+const MAX_LITERAL_SCAN_MATCHES = 5000;
+const LARGE_BUNDLE_SOURCE_LENGTH = 600_000;
+const BUNDLE_SCAN_CHUNK_SIZE = 120_000;
+const BUNDLE_SCAN_CHUNK_OVERLAP = 2_048;
+const MAX_RESOLVABLE_EXPRESSION_LENGTH = 2_048;
+const MAX_RESOLVABLE_CONCAT_PARTS = 64;
+const MAX_RESOLVABLE_TEMPLATE_REFERENCES = 32;
+const MAX_RESOLVE_DEPTH = 8;
+const MAX_CONSTANT_ASSIGNMENTS = 5_000;
+const SAFE_RESPONSE_PROBE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 function stripQuotes(value: string): string {
     if (value.length >= 2) {
@@ -296,9 +315,15 @@ function splitConcatenatedExpression(expr: string): string[] {
     return parts;
 }
 
-function resolveStringExpression(expr: string, constants: Map<string, string>): string | null {
+function resolveStringExpression(
+    expr: string,
+    constants: Map<string, string>,
+    depth = 0,
+): string | null {
     const normalizedExpr = expr.trim();
     if (!normalizedExpr) return null;
+    if (depth > MAX_RESOLVE_DEPTH) return null;
+    if (normalizedExpr.length > MAX_RESOLVABLE_EXPRESSION_LENGTH) return null;
 
     if ((normalizedExpr.startsWith("'") && normalizedExpr.endsWith("'"))
         || (normalizedExpr.startsWith("\"") && normalizedExpr.endsWith("\""))) {
@@ -307,7 +332,12 @@ function resolveStringExpression(expr: string, constants: Map<string, string>): 
 
     if (normalizedExpr.startsWith("`") && normalizedExpr.endsWith("`")) {
         const templateBody = stripQuotes(normalizedExpr);
+        let interpolationCount = 0;
         return templateBody.replace(/\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g, (_match, name: string) => {
+            interpolationCount += 1;
+            if (interpolationCount > MAX_RESOLVABLE_TEMPLATE_REFERENCES) {
+                return "";
+            }
             return constants.get(name) ?? "";
         });
     }
@@ -319,10 +349,14 @@ function resolveStringExpression(expr: string, constants: Map<string, string>): 
     if (normalizedExpr.includes("+")) {
         const parts = splitConcatenatedExpression(normalizedExpr);
         if (parts.length === 0) return null;
+        if (parts.length > MAX_RESOLVABLE_CONCAT_PARTS) return null;
         let resolved = "";
         for (const part of parts) {
-            const value = resolveStringExpression(part, constants);
+            const value = resolveStringExpression(part, constants, depth + 1);
             if (value === null) return null;
+            if ((resolved.length + value.length) > MAX_RESOLVABLE_EXPRESSION_LENGTH) {
+                return null;
+            }
             resolved += value;
         }
         return resolved;
@@ -332,12 +366,16 @@ function resolveStringExpression(expr: string, constants: Map<string, string>): 
 }
 
 function collectResolvableConstants(content: string): Map<string, string> {
+    if (content.length > MAX_CONSTANT_RESOLUTION_SOURCE_LENGTH) {
+        return new Map<string, string>();
+    }
+
     const rawAssignments = new Map<string, string>();
     const resolved = new Map<string, string>();
     const assignmentRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+);?/g;
     let match;
 
-    while ((match = assignmentRegex.exec(content)) !== null) {
+    while ((match = assignmentRegex.exec(content)) !== null && rawAssignments.size < MAX_CONSTANT_ASSIGNMENTS) {
         rawAssignments.set(match[1], match[2].trim());
     }
 
@@ -345,7 +383,7 @@ function collectResolvableConstants(content: string): Map<string, string> {
         let changed = false;
         for (const [name, expression] of rawAssignments.entries()) {
             if (resolved.has(name)) continue;
-            const value = resolveStringExpression(expression, resolved);
+            const value = safeResolveStringExpression(expression, resolved);
             if (typeof value === "string" && value.length > 0) {
                 resolved.set(name, value);
                 changed = true;
@@ -355,6 +393,14 @@ function collectResolvableConstants(content: string): Map<string, string> {
     }
 
     return resolved;
+}
+
+function safeResolveStringExpression(expr: string, constants: Map<string, string>): string | null {
+    try {
+        return resolveStringExpression(expr, constants);
+    } catch {
+        return null;
+    }
 }
 
 function normalizeEndpointPath(value: string): string | null {
@@ -400,6 +446,105 @@ function pushApiEndpoint(
     });
 }
 
+function collectLiteralCandidates(
+    content: string,
+    limit: number,
+): Array<{ value: string; line: number }> {
+    const literals: Array<{ value: string; line: number }> = [];
+    const stringPattern = /(['"`])([^'"`\n]{3,200})\1/g;
+    let match;
+
+    while ((match = stringPattern.exec(content)) !== null && literals.length < limit) {
+        literals.push({ value: match[2], line: 0 });
+    }
+
+    return literals;
+}
+
+function scanDirectApiCallsFromChunk(
+    content: string,
+    source: string,
+    endpoints: ApiEndpoint[],
+    seen: Set<string>,
+) {
+    const emptyConstants = new Map<string, string>();
+    const axiosInstances = new Map<string, string>();
+    const axiosCreateRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*\{[\s\S]{0,300}?baseURL\s*:\s*([^,}\n]+)[\s\S]{0,300}?\}\s*\)/g;
+    let axiosCreateMatch;
+    while ((axiosCreateMatch = axiosCreateRegex.exec(content)) !== null) {
+        const baseUrl = safeResolveStringExpression(axiosCreateMatch[2], emptyConstants);
+        if (baseUrl) {
+            axiosInstances.set(axiosCreateMatch[1], baseUrl);
+        }
+    }
+
+    const methodCallRegex = /([A-Za-z_$][\w$]*|axios|fetch)\s*(?:\.\s*(get|post|put|delete|patch))?\s*\(\s*([^,\n)]+)(?:,\s*(\{[\s\S]{0,250}?\}))?/g;
+    let methodCallMatch;
+    while ((methodCallMatch = methodCallRegex.exec(content)) !== null) {
+        const clientName = methodCallMatch[1];
+        const explicitMethod = methodCallMatch[2];
+        const targetExpression = methodCallMatch[3];
+        const configExpression = methodCallMatch[4] || "";
+
+        const methodMatch = configExpression.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
+        const method = explicitMethod || methodMatch?.[1] || (clientName === "fetch" ? "GET" : undefined);
+        const resolvedTarget = safeResolveStringExpression(targetExpression, emptyConstants);
+        if (!resolvedTarget) continue;
+
+        const axiosBase = axiosInstances.get(clientName);
+        const combinedTarget = axiosBase && resolvedTarget.startsWith("/")
+            ? `${axiosBase.replace(/\/$/, "")}${resolvedTarget}`
+            : resolvedTarget;
+        pushApiEndpoint(endpoints, seen, combinedTarget, source, method);
+    }
+
+    const requestObjectRegex = /([A-Za-z_$][\w$]*(?:\.\s*request)?|axios)\s*\(\s*\{([\s\S]{0,300}?)\}\s*\)/g;
+    let requestObjectMatch;
+    while ((requestObjectMatch = requestObjectRegex.exec(content)) !== null) {
+        const callee = requestObjectMatch[1].replace(/\s+/g, "");
+        const objectBody = requestObjectMatch[2];
+        const urlMatch = objectBody.match(/\burl\s*:\s*([^,}\n]+)/);
+        if (!urlMatch) continue;
+
+        const methodMatch = objectBody.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
+        const resolvedUrl = safeResolveStringExpression(urlMatch[1], emptyConstants);
+        if (!resolvedUrl) continue;
+
+        const instanceName = callee.replace(/\.request$/, "");
+        const axiosBase = axiosInstances.get(instanceName);
+        const combinedTarget = axiosBase && resolvedUrl.startsWith("/")
+            ? `${axiosBase.replace(/\/$/, "")}${resolvedUrl}`
+            : resolvedUrl;
+        pushApiEndpoint(endpoints, seen, combinedTarget, source, methodMatch?.[1]);
+    }
+}
+
+function extractApisFromJsChunked(content: string, source: string): ApiEndpoint[] {
+    const endpoints: ApiEndpoint[] = [];
+    const seen = new Set<string>();
+    const chunkStep = Math.max(1, BUNDLE_SCAN_CHUNK_SIZE - BUNDLE_SCAN_CHUNK_OVERLAP);
+    let collectedLiteralCount = 0;
+
+    for (let start = 0; start < content.length; start += chunkStep) {
+        const chunk = content.slice(start, start + BUNDLE_SCAN_CHUNK_SIZE);
+        if (!chunk) continue;
+
+        if (collectedLiteralCount < MAX_LITERAL_SCAN_MATCHES) {
+            const remaining = MAX_LITERAL_SCAN_MATCHES - collectedLiteralCount;
+            const literals = collectLiteralCandidates(chunk, remaining);
+            for (const literal of literals) {
+                const value = literal.value.trim();
+                pushApiEndpoint(endpoints, seen, value, source);
+            }
+            collectedLiteralCount += literals.length;
+        }
+
+        scanDirectApiCallsFromChunk(chunk, source, endpoints, seen);
+    }
+
+    return endpoints;
+}
+
 // Extract API endpoints from JavaScript content
 function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     const endpoints: ApiEndpoint[] = [];
@@ -419,12 +564,7 @@ function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     }
     
     if (literals.length === 0) {
-        // Regex fallback
-        const stringPattern = /(['"`])([^'"`\n]{3,200})\1/g;
-        let match;
-        while ((match = stringPattern.exec(content)) !== null) {
-            literals.push({ value: match[2], line: 0 });
-        }
+        literals = collectLiteralCandidates(content, MAX_LITERAL_SCAN_MATCHES);
     }
     
     for (const literal of literals) {
@@ -440,7 +580,7 @@ function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     const axiosCreateRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*\{[\s\S]{0,300}?baseURL\s*:\s*([^,}\n]+)[\s\S]{0,300}?\}\s*\)/g;
     let axiosCreateMatch;
     while ((axiosCreateMatch = axiosCreateRegex.exec(content)) !== null) {
-        const baseUrl = resolveStringExpression(axiosCreateMatch[2], constants);
+        const baseUrl = safeResolveStringExpression(axiosCreateMatch[2], constants);
         if (baseUrl) {
             axiosInstances.set(axiosCreateMatch[1], baseUrl);
         }
@@ -456,7 +596,7 @@ function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
 
         const methodMatch = configExpression.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
         const method = explicitMethod || methodMatch?.[1] || (clientName === "fetch" ? "GET" : undefined);
-        const resolvedTarget = resolveStringExpression(targetExpression, constants);
+        const resolvedTarget = safeResolveStringExpression(targetExpression, constants);
         if (!resolvedTarget) continue;
 
         const axiosBase = axiosInstances.get(clientName);
@@ -475,7 +615,7 @@ function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
         if (!urlMatch) continue;
 
         const methodMatch = objectBody.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
-        const resolvedUrl = resolveStringExpression(urlMatch[1], constants);
+        const resolvedUrl = safeResolveStringExpression(urlMatch[1], constants);
         if (!resolvedUrl) continue;
 
         const instanceName = callee.replace(/\.request$/, "");
@@ -487,6 +627,18 @@ function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     }
     
     return endpoints;
+}
+
+function safeExtractApisFromJs(content: string, source: string): ApiEndpoint[] {
+    if (content.length > LARGE_BUNDLE_SOURCE_LENGTH) {
+        return extractApisFromJsChunked(content, source);
+    }
+
+    try {
+        return extractApisFromJs(content, source);
+    } catch {
+        return extractApisFromJsChunked(content, source);
+    }
 }
 
 function simpleHash(str: string): string {
@@ -553,20 +705,171 @@ async function fetchWithTimeout(
         });
 
         clearTimeout(timeoutId);
-        if (!response.ok) {
-            return null;
-        }
-
         const text = await response.text();
+        return { ok: response.ok, status: response.status, text, size: text.length, contentType: response.headers.get("content-type") || "", finalUrl: response.url || url };
+    } catch (error: any) {
+        clearTimeout(timeoutId);
+        const message = error?.name === "AbortError"
+            ? `Request timed out after ${timeout}ms`
+            : (error?.message || String(error) || "Unknown fetch error");
+        return { ok: false, status: null, text: "", size: 0, contentType: "", finalUrl: url, error: message };
+    }
+}
+
+function canAnalyzePageResponse(result: FetchResult): boolean {
+    const text = String(result.text || "").trim();
+    const contentType = String(result.contentType || "").toLowerCase();
+    return Boolean(text) && (!contentType || contentType.includes("text/html") || contentType.includes("application/xhtml+xml") || contentType.includes("javascript") || contentType.includes("ecmascript") || contentType.includes("text/plain"));
+}
+function describeTargetFetchFailure(result: FetchResult | null): string {
+    if (!result) return "Failed to fetch target page";
+    if (result.error) return `Failed to fetch target page: ${result.error}`;
+    if (typeof result.status === "number") return `Target page returned HTTP ${result.status}`;
+    return "Failed to fetch target page";
+}
+function looksLikeHtmlDocument(contentType: string, text: string): boolean {
+    const normalized = String(contentType || "").toLowerCase();
+    const preview = String(text || "").trim().slice(0, 256).toLowerCase();
+    return normalized.includes("text/html") || normalized.includes("application/xhtml+xml")
+        || preview.startsWith("<!doctype html") || preview.startsWith("<html")
+        || preview.includes("<head") || preview.includes("<body");
+}
+function isLikelyApiProbeResponse(requestUrl: string, path: string, response: HttpProbeResult): boolean {
+    const content = String(response.text || "").trim();
+    const contentType = String(response.contentType || "").toLowerCase();
+    if (!content || looksLikeHtmlDocument(contentType, content)) return false;
+    try {
+        const requestedPath = new URL(requestUrl).pathname;
+        const finalPath = new URL(response.finalUrl || requestUrl).pathname;
+        if (requestedPath !== finalPath && (finalPath === "/" || finalPath === "/index.html")) return false;
+    } catch {}
+    if (path.includes("swagger") || path.includes("openapi") || path.includes("api-docs")) {
+        const lowered = content.toLowerCase();
+        return lowered.includes("\"openapi\"") || lowered.includes("\"swagger\"") || lowered.includes("openapi:") || lowered.includes("swagger:");
+    }
+    return contentType.includes("json") || contentType.includes("xml") || contentType.includes("graphql") || content.startsWith("{") || content.startsWith("[") || content.startsWith("<?xml") || ((response.status === 401 || response.status === 403 || response.status === 405) && !content.includes("<"));
+}
+function isPreviewableContentType(contentType: string): boolean {
+    const normalized = String(contentType || "").toLowerCase();
+    if (!normalized) return true;
+    return normalized.includes("json") || normalized.includes("text/") || normalized.includes("javascript") || normalized.includes("xml") || normalized.includes("html") || normalized.includes("graphql") || normalized.includes("x-www-form-urlencoded");
+}
+function normalizeResponsePreview(text: string): string {
+    const normalized = String(text || "").replace(/\0/g, "").trim();
+    if (normalized.length <= MAX_RESPONSE_PREVIEW_CHARS) return normalized;
+    return `${normalized.slice(0, MAX_RESPONSE_PREVIEW_CHARS)}\n...[truncated]`;
+}
+async function fetchHttpProbe(
+    url: string,
+    timeout: number,
+    userAgent: string,
+    method = "GET",
+    accept = "application/json,text/plain,*/*",
+    body?: string,
+): Promise<HttpProbeResult | null> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+    try {
+        const response = await fetch(url, {
+            method,
+            headers: {
+                "User-Agent": userAgent,
+                "Accept": accept,
+                "Accept-Language": "en-US,en;q=0.5",
+                ...(body ? { "Content-Type": "application/json" } : {}),
+            },
+            ...(body ? { body } : {}),
+            signal: controller.signal,
+            redirect: "follow",
+        });
+
+        clearTimeout(timeoutId);
+
+        const contentType = response.headers.get("content-type") || "";
+        const previewable = isPreviewableContentType(contentType);
+        const text = previewable
+            ? await response.text()
+            : `[non-text content omitted: ${contentType || "unknown"}]`;
+
         return {
+            ok: response.ok,
+            status: response.status,
             text,
-            size: text.length,
-            contentType: response.headers.get("content-type") || "",
+            size: Number(response.headers.get("content-length")) || text.length,
+            contentType,
+            finalUrl: response.url || url,
+            fetchedAt: new Date().toISOString(),
         };
     } catch {
         clearTimeout(timeoutId);
         return null;
     }
+}
+
+function resolveEndpointRequestUrl(baseUrl: string, path: string): string {
+    return resolveUrl(baseUrl, path) || path;
+}
+
+function isDynamicEndpointPath(path: string): boolean {
+    return /(^|\/)(:\w+|\{\w+\}|\*)/.test(String(path || ""));
+}
+
+async function captureEndpointResponse(
+    endpoint: ApiEndpoint,
+    baseUrl: string,
+    timeout: number,
+    userAgent: string,
+): Promise<ApiEndpoint> {
+    const enriched: ApiEndpoint = { ...endpoint };
+    const requestUrl = resolveEndpointRequestUrl(baseUrl, endpoint.path);
+    const requestMethod = String(endpoint.method || "GET").trim().toUpperCase() || "GET";
+
+    enriched.requestUrl = requestUrl;
+    enriched.requestMethod = requestMethod;
+
+    if (
+        enriched.responseFetchedAt
+        || enriched.responseError
+        || typeof enriched.responseStatus === "number"
+    ) {
+        return enriched;
+    }
+
+    if (!SAFE_RESPONSE_PROBE_METHODS.has(requestMethod)) {
+        enriched.responseError = `Skipped unsafe method probing for ${requestMethod}`;
+        return enriched;
+    }
+
+    if (isDynamicEndpointPath(endpoint.path)) {
+        enriched.responseError = "Skipped probing dynamic endpoint template";
+        return enriched;
+    }
+
+    const response = await fetchHttpProbe(
+        requestUrl,
+        timeout,
+        userAgent,
+        requestMethod,
+        "application/json,text/plain,text/html,application/xml,*/*",
+    );
+
+    if (!response) {
+        enriched.responseError = "Failed to fetch endpoint response";
+        return enriched;
+    }
+
+    enriched.responseStatus = response.status;
+    enriched.responseContentType = response.contentType;
+    enriched.responseSize = response.size;
+    enriched.responseFetchedAt = response.fetchedAt;
+    enriched.requestUrl = response.finalUrl || requestUrl;
+    enriched.responsePreview = normalizeResponsePreview(response.text);
+    if (!response.ok) {
+        enriched.responseError = `Received HTTP ${response.status}`;
+    }
+
+    return enriched;
 }
 
 function extractScriptTags(html: string, baseUrl: string): JsLink[] {
@@ -760,41 +1063,46 @@ function parseSourceMapScriptContents(mapText: string, mapUrl: string): ScriptCo
     const scriptContents: ScriptContentSource[] = [];
     const seenSources = new Set<string>();
 
-    const collectFromMap = (mapValue: SourceMapLike | undefined, parentUrl: string) => {
-        if (!mapValue || typeof mapValue !== "object") return;
-
-        const sources = Array.isArray(mapValue.sources) ? mapValue.sources : [];
-        const sourcesContent = Array.isArray(mapValue.sourcesContent) ? mapValue.sourcesContent : [];
-
-        for (let index = 0; index < sources.length; index += 1) {
-            const sourceContent = sourcesContent[index];
-            if (typeof sourceContent !== "string" || sourceContent.trim().length < 10) {
-                continue;
-            }
-
-            const sourcePath = sources[index];
-            const resolvedSource = resolveSourceMapSourceUrl(parentUrl, mapValue.sourceRoot, sourcePath)
-                || `sourcemap://${parentUrl}#${sourcePath || index}`;
-            if (seenSources.has(resolvedSource)) {
-                continue;
-            }
-
-            seenSources.add(resolvedSource);
-            scriptContents.push({
-                source: resolvedSource,
-                content: sourceContent,
-            });
-        }
-
-        if (Array.isArray(mapValue.sections)) {
-            for (const section of mapValue.sections) {
-                collectFromMap(section?.map, parentUrl);
-            }
-        }
-    };
-
     try {
-        collectFromMap(JSON.parse(mapText) as SourceMapLike, mapUrl);
+        const queue: SourceMapLike[] = [JSON.parse(mapText) as SourceMapLike];
+        let queueIndex = 0;
+        while (queueIndex < queue.length) {
+            const mapValue = queue[queueIndex++];
+            if (!mapValue || typeof mapValue !== "object") {
+                continue;
+            }
+
+            const sources = Array.isArray(mapValue.sources) ? mapValue.sources : [];
+            const sourcesContent = Array.isArray(mapValue.sourcesContent) ? mapValue.sourcesContent : [];
+
+            for (let index = 0; index < sources.length; index += 1) {
+                const sourceContent = sourcesContent[index];
+                if (typeof sourceContent !== "string" || sourceContent.trim().length < 10) {
+                    continue;
+                }
+
+                const sourcePath = sources[index];
+                const resolvedSource = resolveSourceMapSourceUrl(mapUrl, mapValue.sourceRoot, sourcePath)
+                    || `sourcemap://${mapUrl}#${sourcePath || index}`;
+                if (seenSources.has(resolvedSource)) {
+                    continue;
+                }
+
+                seenSources.add(resolvedSource);
+                scriptContents.push({
+                    source: resolvedSource,
+                    content: sourceContent,
+                });
+            }
+
+            if (Array.isArray(mapValue.sections)) {
+                for (const section of mapValue.sections) {
+                    if (section?.map && typeof section.map === "object") {
+                        queue.push(section.map);
+                    }
+                }
+            }
+        }
     } catch {
         return [];
     }
@@ -808,20 +1116,28 @@ function parseManifest(content: string, manifestUrl: string): JsLink[] {
 
     try {
         const json = JSON.parse(content);
-        const extractFromObj = (obj: unknown) => {
-            if (typeof obj === "string" && looksLikeJs(obj)) {
-                const url = resolveUrl(manifestUrl, obj);
+        const queue: unknown[] = [json];
+        let queueIndex = 0;
+        while (queueIndex < queue.length) {
+            const current = queue[queueIndex++];
+            if (typeof current === "string" && looksLikeJs(current)) {
+                const url = resolveUrl(manifestUrl, current);
                 if (url && !seenUrls.has(url)) {
                     seenUrls.add(url);
                     links.push({ url, type: "manifest", source: "manifest" });
                 }
-            } else if (Array.isArray(obj)) {
-                obj.forEach(extractFromObj);
-            } else if (obj && typeof obj === "object") {
-                Object.values(obj as Record<string, unknown>).forEach(extractFromObj);
+                continue;
             }
-        };
-        extractFromObj(json);
+
+            if (Array.isArray(current)) {
+                queue.push(...current);
+                continue;
+            }
+
+            if (current && typeof current === "object") {
+                queue.push(...Object.values(current as Record<string, unknown>));
+            }
+        }
     } catch {
         const jsRegex = /["']([^"']+\.js(?:\?[^"']*)?)["']/gi;
         let match;
@@ -919,7 +1235,7 @@ async function discoverJavascriptAssets(
         let html = current.html;
         if (typeof html !== "string") {
             const pageResult = await fetchWithTimeout(current.url, timeout, userAgent);
-            if (!pageResult) {
+            if (!pageResult || !pageResult.ok) {
                 continue;
             }
             html = pageResult.text;
@@ -962,7 +1278,7 @@ async function discoverJavascriptAssets(
         );
 
         for (const { manifestUrl, result } of manifestResults) {
-            if (!result || !result.contentType.includes("json")) {
+            if (!result || !result.ok || !result.contentType.includes("json")) {
                 continue;
             }
             for (const link of parseManifest(result.text, manifestUrl)) {
@@ -999,7 +1315,7 @@ async function discoverJavascriptAssets(
                     continue;
                 }
                 visitedScriptUrls.add(link.url);
-                if (!result) {
+                if (!result || !result.ok) {
                     continue;
                 }
 
@@ -1086,9 +1402,9 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Request timeout in milliseconds",
-                default: 15000,
-                minimum: 5000,
-                maximum: 60000
+                default: 3000,
+                minimum: 3000,
+                maximum: 5000
             },
             userAgent: {
                 type: "string",
@@ -1097,9 +1413,9 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Number of targets to scan concurrently",
-                default: 5,
-                minimum: 1,
-                maximum: 20
+                default: 200,
+                minimum: 200,
+                maximum: 500
             },
             crawlDepth: {
                 type: "integer",
@@ -1133,12 +1449,12 @@ export function get_input_schema() {
             includeGraphQL: {
                 type: "boolean",
                 description: "Check for GraphQL endpoints",
-                default: true
+                default: false
             },
             includeOpenAPI: {
                 type: "boolean",
                 description: "Check for OpenAPI/Swagger specs",
-                default: true
+                default: false
             },
             previousSnapshots: {
                 type: "object",
@@ -1168,7 +1484,34 @@ export function get_output_schema() {
                             properties: {
                                 baseUrl: { type: "string" },
                                 success: { type: "boolean" },
-                                snapshot: { type: "object" },
+                                snapshot: {
+                                    type: "object",
+                                    properties: {
+                                        baseUrl: { type: "string" },
+                                        graphqlEndpoint: { type: "string" },
+                                        openApiSpec: { type: "string" },
+                                        lastChecked: { type: "string" },
+                                        endpoints: {
+                                            type: "array",
+                                            items: {
+                                                type: "object",
+                                                properties: {
+                                                    path: { type: "string" },
+                                                    method: { type: "string" },
+                                                    source: { type: "string" },
+                                                    requestUrl: { type: "string" },
+                                                    requestMethod: { type: "string" },
+                                                    responseStatus: { type: "integer" },
+                                                    responseContentType: { type: "string" },
+                                                    responsePreview: { type: "string" },
+                                                    responseFetchedAt: { type: "string" },
+                                                    responseError: { type: "string" },
+                                                    responseSize: { type: "integer" },
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
                                 addedEndpoints: { type: "array" },
                                 removedEndpoints: { type: "array" }
                             }
@@ -1217,9 +1560,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = input.timeout || 15000;
+        const timeout = Math.max(3000, Math.min(input.timeout || 3000, 5000));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || 5, 20));
+        const concurrency = Math.max(1, Math.min(input.concurrency || 200, 500));
         const crawlDepth = input.crawlDepth ?? 1;
         const maxJsFiles = Math.max(10, Math.min(input.maxJsFiles || DEFAULT_MAX_JS_FILES, 300));
         const includeSameOriginOnly = input.includeSameOriginOnly === true;
@@ -1275,8 +1618,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     "text/html,application/xhtml+xml,*/*",
                 );
 
-                if (!pageResult) {
-                    result.error = "Failed to fetch target page";
+                if (pageResult.status === null) {
+                    result.error = describeTargetFetchFailure(pageResult);
                     failedChecks++;
                     results.push(result);
                     return;
@@ -1284,21 +1627,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 
                 successfulChecks++;
 
-                const directJsTarget = looksLikeJs(baseUrl) || pageResult.contentType.includes("javascript");
-                const scriptSources = directJsTarget
-                    ? [{ source: baseUrl, content: pageResult.text }]
-                    : (await discoverJavascriptAssets(
-                        baseUrl,
-                        pageResult.text,
-                        timeout,
-                        userAgent,
-                        crawlDepth,
-                        maxJsFiles,
-                        includeSameOriginOnly,
-                        followSourceMaps,
-                        probeSpaManifests,
-                        concurrency,
-                    )).scriptContents;
+                const pageContent = canAnalyzePageResponse(pageResult) ? pageResult.text : "";
+                const directJsTarget = Boolean(pageContent) && (looksLikeJs(baseUrl) || pageResult.contentType.includes("javascript"));
+                const scriptSources = !pageContent ? [] : directJsTarget ? [{ source: baseUrl, content: pageContent }] : (await discoverJavascriptAssets(baseUrl, pageContent, timeout, userAgent, crawlDepth, maxJsFiles, includeSameOriginOnly, followSourceMaps, probeSpaManifests, concurrency)).scriptContents;
 
                 jsFilesAnalyzed = directJsTarget
                     ? 1
@@ -1306,67 +1637,43 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 totalJsFiles += jsFilesAnalyzed;
 
                 for (const source of scriptSources) {
-                    const endpoints = extractApisFromJs(source.content, source.source);
-                    allEndpoints.push(...endpoints);
+                    try {
+                        const endpoints = safeExtractApisFromJs(source.content, source.source);
+                        allEndpoints.push(...endpoints);
+                    } catch {
+                        continue;
+                    }
                 }
                 
                 // Check common API paths
                 const urlObj = new URL(baseUrl);
-                await runWithConcurrency(
-                    COMMON_API_PATHS.map((path) => async () => {
-                        try {
-                            const apiUrl = `${urlObj.origin}${path}`;
-                            const apiResponse = await fetch(apiUrl, {
-                                method: "GET",
-                                headers: {
-                                    "User-Agent": userAgent,
-                                    "Accept": "application/json,*/*",
-                                },
-                                // @ts-ignore
-                                timeout: 5000,
-                            });
-
-                            if (apiResponse.ok) {
-                                allEndpoints.push({
-                                    path,
-                                    source: "probe",
-                                });
-
-                                if (includeOpenAPI && !openApiSpec && (path.includes("swagger") || path.includes("openapi"))) {
-                                    const specContent = await apiResponse.text();
-                                    if (specContent.includes("openapi") || specContent.includes("swagger")) {
-                                        openApiSpec = apiUrl;
-                                    }
-                                }
-                            }
-                        } catch {
-                            // Path doesn't exist
-                        }
-                    }),
-                    concurrency,
-                );
-                
                 // Check GraphQL
                 if (includeGraphQL) {
                     const graphqlMatches = await runWithConcurrency(
                         ["/graphql", "/gql", "/api/graphql"].map((gqlPath) => async () => {
                             try {
                                 const gqlUrl = `${urlObj.origin}${gqlPath}`;
-                                const gqlResponse = await fetch(gqlUrl, {
-                                    method: "POST",
-                                    headers: {
-                                        "User-Agent": userAgent,
-                                        "Content-Type": "application/json",
-                                    },
-                                    body: JSON.stringify({ query: "{ __typename }" }),
-                                    // @ts-ignore
-                                    timeout: 5000,
-                                });
+                                const gqlResponse = await fetchHttpProbe(
+                                    gqlUrl,
+                                    3000,
+                                    userAgent,
+                                    "POST",
+                                    "application/json,*/*",
+                                    JSON.stringify({ query: "{ __typename }" }),
+                                );
 
-                                if (!gqlResponse.ok) return null;
-                                const gqlResult = await gqlResponse.text();
+                                if (!gqlResponse?.ok) return null;
+                                const gqlResult = gqlResponse.text;
                                 if (gqlResult.includes("__typename") || gqlResult.includes("data")) {
-                                    return gqlPath;
+                                    return {
+                                        path: gqlPath,
+                                        requestUrl: gqlResponse.finalUrl || gqlUrl,
+                                        responseStatus: gqlResponse.status,
+                                        responseContentType: gqlResponse.contentType,
+                                        responsePreview: normalizeResponsePreview(gqlResult),
+                                        responseFetchedAt: gqlResponse.fetchedAt,
+                                        responseSize: gqlResponse.size,
+                                    };
                                 }
                             } catch {
                                 // GraphQL not available
@@ -1376,13 +1683,28 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         concurrency,
                     );
 
-                    const discoveredGraphql = graphqlMatches.find((value): value is string => Boolean(value));
+                    const discoveredGraphql = graphqlMatches.find((value): value is {
+                        path: string;
+                        requestUrl: string;
+                        responseStatus: number;
+                        responseContentType: string;
+                        responsePreview: string;
+                        responseFetchedAt: string;
+                        responseSize: number;
+                    } => Boolean(value));
                     if (discoveredGraphql) {
-                        graphqlEndpoint = discoveredGraphql;
+                        graphqlEndpoint = discoveredGraphql.requestUrl || discoveredGraphql.path;
                         allEndpoints.push({
-                            path: discoveredGraphql,
+                            path: discoveredGraphql.path,
                             method: "POST",
                             source: "graphql-probe",
+                            requestUrl: discoveredGraphql.requestUrl,
+                            requestMethod: "POST",
+                            responseStatus: discoveredGraphql.responseStatus,
+                            responseContentType: discoveredGraphql.responseContentType,
+                            responsePreview: discoveredGraphql.responsePreview,
+                            responseFetchedAt: discoveredGraphql.responseFetchedAt,
+                            responseSize: discoveredGraphql.responseSize,
                         });
                     }
                 }
@@ -1398,12 +1720,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     }
                 }
                 
-                totalEndpoints += uniqueEndpoints.length;
+                const enrichedEndpoints = await runWithConcurrency(
+                    uniqueEndpoints.map((endpoint) => async () =>
+                        captureEndpointResponse(endpoint, baseUrl, timeout, userAgent)
+                    ),
+                    Math.max(1, Math.min(concurrency, 25)),
+                );
+
+                totalEndpoints += enrichedEndpoints.length;
                 
                 // Create snapshot
                 const snapshot: ApiSnapshot = {
                     baseUrl,
-                    endpoints: uniqueEndpoints,
+                    endpoints: enrichedEndpoints,
                     graphqlEndpoint,
                     openApiSpec,
                     lastChecked: new Date().toISOString(),
@@ -1418,17 +1747,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     total: totalProgressUnits,
                     phase: "scan",
                     currentTarget: baseUrl,
-                    message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${uniqueEndpoints.length} API endpoints`,
+                    message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${enrichedEndpoints.length} API endpoints`,
                 });
                 
                 // Compare with previous snapshot
                 const prevSnapshot = previousSnapshots[baseUrl];
                 if (prevSnapshot) {
                     const prevPaths = new Set(prevSnapshot.endpoints.map(e => `${e.method || ""}:${e.path}`));
-                    const newPaths = new Set(uniqueEndpoints.map(e => `${e.method || ""}:${e.path}`));
+                    const newPaths = new Set(enrichedEndpoints.map(e => `${e.method || ""}:${e.path}`));
                     
                     // Find added endpoints
-                    const addedEndpoints = uniqueEndpoints.filter(e => !prevPaths.has(`${e.method || ""}:${e.path}`));
+                    const addedEndpoints = enrichedEndpoints.filter(e => !prevPaths.has(`${e.method || ""}:${e.path}`));
                     const removedEndpoints = prevSnapshot.endpoints.filter(e => !newPaths.has(`${e.method || ""}:${e.path}`));
                     
                     result.addedEndpoints = addedEndpoints;
@@ -1526,26 +1855,26 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     }
                 } else {
                     // First scan - report all as discovered
-                    if (uniqueEndpoints.length > 0) {
+                    if (enrichedEndpoints.length > 0) {
                         const event: ChangeEvent = {
                             id: generateId(),
                             assetId: baseUrl,
                             eventType: "api_endpoints_discovered",
                             severity: "medium",
                             title: `API Endpoints Discovered: ${urlObj.hostname}`,
-                            description: `Initial scan discovered ${uniqueEndpoints.length} API endpoint(s).`,
-                            newValue: JSON.stringify(uniqueEndpoints.map(e => e.path)),
+                            description: `Initial scan discovered ${enrichedEndpoints.length} API endpoint(s).`,
+                            newValue: JSON.stringify(enrichedEndpoints.map(e => e.path)),
                             detectionMethod: "api_monitor",
                             tags: ["api", "endpoint", "initial-scan"],
                             autoTriggerEnabled: false,
                             riskScore: 0,
                             metadata: {
-                                endpoints: uniqueEndpoints,
+                                endpoints: enrichedEndpoints,
                                 graphqlEndpoint,
                                 openApiSpec,
                             },
                         };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueEndpoints.length);
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, enrichedEndpoints.length);
                         changeEvents.push(event);
                     }
                 }

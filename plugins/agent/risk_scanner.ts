@@ -126,8 +126,8 @@ const pluginGlobals = globalThis as PluginGlobals;
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
 
-const DEFAULT_CONCURRENCY = 4;
-const MAX_CONCURRENCY = 20;
+const DEFAULT_CONCURRENCY = 100;
+const MAX_CONCURRENCY = 500;
 
 export function get_input_schema() {
     return {
@@ -214,9 +214,9 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Request timeout in milliseconds",
-                default: 8000,
-                minimum: 1000,
-                maximum: 60000
+                default: 3000,
+                minimum: 3000,
+                maximum: 5000
             },
             userAgent: {
                 type: "string",
@@ -227,7 +227,7 @@ export function get_input_schema() {
                 type: "integer",
                 description: "Number of concurrent rule executions",
                 default: DEFAULT_CONCURRENCY,
-                minimum: 1,
+                minimum: 100,
                 maximum: MAX_CONCURRENCY
             },
             stopOnFirstHit: {
@@ -765,7 +765,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const safeMode = getInputBoolean(input, "safe_mode", "safe_mode", true);
         const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
-        const timeout = getInputNumber(input, "timeout", "timeout_ms", 8000);
+        const timeout = getInputNumber(input, "timeout", "timeout_ms", 3000);
         const userAgent = getInputString(input, "userAgent", "user_agent", "Sentinel-Risk-Scanner/2.0");
         const concurrency = Math.max(1, Math.min(getInputNumber(input, "concurrency", "concurrency", DEFAULT_CONCURRENCY), MAX_CONCURRENCY));
         const stopOnFirstHit = getInputBoolean(input, "stopOnFirstHit", "stop_on_first_hit", false);
