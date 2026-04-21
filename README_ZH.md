@@ -39,7 +39,7 @@ Sentinel 插件运行在基于 Deno 的 JavaScript/TypeScript 运行时中，完
 |-----|------|
 | `Sentinel.emitFinding(finding)` | 上报安全漏洞发现 |
 | `Sentinel.log(level, message)` | 日志输出 (level: "debug", "info", "warn", "error") |
-| `fetch(url, options)` | HTTP 客户端，支持超时设置 |
+| `fetch(url, options)` | HTTP 客户端，支持超时设置，也支持流量插件的受限主动验证 |
 
 #### Web 标准 API
 

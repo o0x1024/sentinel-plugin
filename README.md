@@ -39,7 +39,7 @@ Sentinel plugins run in a Deno-based JavaScript/TypeScript runtime with full Web
 |-----|-------------|
 | `Sentinel.emitFinding(finding)` | Report a security vulnerability finding |
 | `Sentinel.log(level, message)` | Log messages (level: "debug", "info", "warn", "error") |
-| `fetch(url, options)` | HTTP client with timeout support |
+| `fetch(url, options)` | HTTP client with timeout support, including bounded active verification for traffic plugins |
 
 #### Web Standard APIs
 
