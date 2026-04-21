@@ -18,7 +18,7 @@ sentinel-plugin/
 ├── README_ZH.md           # Chinese documentation
 ├── plugins.json           # Plugin manifest (required)
 └── plugins/
-    ├── passive/           # Passive scan plugins
+    ├── traffic/           # Traffic/passive scan plugins
     │   ├── sql_injection_detector.ts
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
@@ -490,7 +490,7 @@ Sentinel.emitFinding({
 ## Contributing
 
 1. Fork this repository
-2. Create your plugin in `plugins/passive/` or `plugins/agent/`
+2. Create your plugin in `plugins/traffic/` or `plugins/agent/`
 3. Add your plugin entry to `plugins.json`
 4. Submit a Pull Request
 

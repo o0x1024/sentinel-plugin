@@ -1,6 +1,6 @@
 {
-  "version": "2.3.13",
-  "updated_at": "2026-03-30",
+  "version": "2.3.14",
+  "updated_at": "2026-04-21",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -12,7 +12,7 @@
       "description": "Detects SQL injection vulnerabilities through pattern matching and active payload verification (error-based, time-based, boolean-based)",
       "default_severity": "critical",
       "tags": ["sql", "injection", "security", "owasp", "active-scan"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/sql_injection_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/traffic/sql_injection_detector.ts"
     },
     {
       "id": "xss_detector",
@@ -24,7 +24,7 @@
       "description": "Detects Cross-Site Scripting vulnerabilities through passive analysis and active payload verification",
       "default_severity": "high",
       "tags": ["xss", "cross-site-scripting", "security", "owasp", "active-scan"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/xss_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/traffic/xss_detector.ts"
     },
     {
       "id": "sensitive_info_detector",
@@ -36,7 +36,7 @@
       "description": "Detects sensitive information disclosure in HTTP responses including API keys, credentials, PII, and debug information",
       "default_severity": "medium",
       "tags": ["information-disclosure", "secrets", "api-keys", "credentials", "pii"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/passive/sensitive_info_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/traffic/sensitive_info_detector.ts"
     },
     {
       "id": "nextjs_rce_scanner",

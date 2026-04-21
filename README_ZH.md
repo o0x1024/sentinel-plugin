@@ -18,7 +18,7 @@ sentinel-plugin/
 ├── README_ZH.md           # 中文文档
 ├── plugins.json           # 插件清单（必需）
 └── plugins/
-    ├── passive/           # 被动扫描插件
+    ├── traffic/           # 流量/被动扫描插件
     │   ├── sql_injection_detector.ts
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
@@ -490,7 +490,7 @@ Sentinel.emitFinding({
 ## 贡献插件
 
 1. Fork 本仓库
-2. 在 `plugins/passive/` 或 `plugins/agent/` 创建插件
+2. 在 `plugins/traffic/` 或 `plugins/agent/` 创建插件
 3. 在 `plugins.json` 中添加插件信息
 4. 提交 Pull Request
 
