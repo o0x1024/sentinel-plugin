@@ -5,13 +5,13 @@
     {
       "id": "sql_injection_detector",
       "name": "SQL Injection Detector",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": "Sentinel Team",
       "main_category": "passive",
       "category": "sqli",
-      "description": "Detects SQL injection vulnerabilities through pattern matching and active payload verification (error-based, time-based, boolean-based)",
-      "default_severity": "critical",
-      "tags": ["sql", "injection", "security", "owasp", "active-scan"],
+      "description": "Replays every safe parameter with a simple single-quote probe under bounded active verification controls",
+      "default_severity": "high",
+      "tags": ["sql", "injection", "security", "owasp", "active-probe", "traffic"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/traffic/sql_injection_detector.ts"
     },
     {
