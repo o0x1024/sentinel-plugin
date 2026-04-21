@@ -1,11 +1,11 @@
 {
-  "version": "2.3.14",
+  "version": "2.3.15",
   "updated_at": "2026-04-21",
   "plugins": [
     {
       "id": "sql_injection_detector",
       "name": "SQL Injection Detector",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "author": "Sentinel Team",
       "main_category": "passive",
       "category": "sqli",
