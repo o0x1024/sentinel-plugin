@@ -77,11 +77,11 @@
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
-      "description": "Comprehensive subdomain enumeration using 50 data sources with effective request timeouts, lightweight retry handling for transient failures, runtime-scheduled request pacing, and automatic skipping of unconfigured premium sources in default mode.",
+      "description": "Comprehensive subdomain enumeration using 50 data sources with batch-submitted runtime scheduling, source-level timing, lightweight retry handling for transient failures, and automatic skipping of unconfigured premium sources in default mode.",
       "default_severity": "info",
       "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint", "certificate-transparency", "threat-intelligence", "passive-dns", "api"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_enumerator.ts"

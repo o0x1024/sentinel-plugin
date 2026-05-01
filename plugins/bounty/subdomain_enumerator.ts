@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.0
+ * @version 2.2.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -62,6 +62,7 @@ interface ToolOutput {
         domain: string;
         subdomains: string[];
         sourceResults: SourceResult[];
+        slowSources?: SourceResult[];
         skippedSources?: string[];
         changeEvents: ChangeEvent[];
         snapshots: Record<string, SubdomainSnapshot>;
@@ -156,9 +157,9 @@ const AVAILABLE_SOURCES = [
 
 type DataSource = typeof AVAILABLE_SOURCES[number];
 
-const DEFAULT_CONCURRENCY = 8;
-const MAX_CONCURRENCY = 12;
 const DEFAULT_TIMEOUT = 20000;
+const RUNTIME_QUEUE_TIMEOUT_MULTIPLIER = 6;
+const MAX_RUNTIME_QUEUE_TIMEOUT = 120000;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 const SOURCE_PRIORITY: Partial<Record<DataSource, number>> = {
@@ -353,6 +354,10 @@ export function get_output_schema() {
                         type: "array",
                         description: "Results from each data source"
                     },
+                    slowSources: {
+                        type: "array",
+                        description: "Slowest data source results ordered by response time"
+                    },
                     changeEvents: {
                         type: "array",
                         description: "Detected subdomain change events"
@@ -426,13 +431,17 @@ function isRetryableError(error: any): boolean {
 async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
     const nativeFetch = globalThis.fetch.bind(globalThis);
     const timeout = Math.max(1000, Math.min(Number(init.timeout || DEFAULT_TIMEOUT), 120000));
+    const runtimeQueueTimeout = Math.max(
+        timeout,
+        Math.min(MAX_RUNTIME_QUEUE_TIMEOUT, timeout * RUNTIME_QUEUE_TIMEOUT_MULTIPLIER)
+    );
     const method = String(init.method || "GET").toUpperCase();
     const maxAttempts = isRetryableMethod(method) ? 2 : 1;
     let lastError: any;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        const timeoutId = setTimeout(() => controller.abort(), runtimeQueueTimeout);
         const upstreamSignal = init.signal;
         const abortListener = () => controller.abort();
 
@@ -449,7 +458,7 @@ async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}):
                 ...init,
                 signal: controller.signal,
             };
-            delete (requestInit as FetchWithTimeoutInit).timeout;
+            (requestInit as FetchWithTimeoutInit).timeout = runtimeQueueTimeout;
 
             const response = await nativeFetch(input, requestInit);
             if (attempt < maxAttempts && RETRYABLE_STATUSES.has(response.status)) {
@@ -469,7 +478,7 @@ async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}):
             const timedOut = controller.signal.aborted && !(upstreamSignal?.aborted);
             if (attempt >= maxAttempts || !(timedOut || isRetryableError(error))) {
                 if (timedOut) {
-                    throw new Error(`Request timeout after ${timeout}ms`);
+                    throw new Error(`Runtime queue timeout after ${runtimeQueueTimeout}ms`);
                 }
                 throw error;
             }
@@ -506,6 +515,19 @@ function prioritizeSources(sources: DataSource[]): DataSource[] {
         }
         return left.localeCompare(right);
     });
+}
+
+function logSourceResult(result: SourceResult): void {
+    const status = result.error ? "failed" : "completed";
+    const suffix = result.error ? ` error=${String(result.error).slice(0, 160)}` : "";
+    try {
+        (globalThis as any).Sentinel?.log?.(
+            "info",
+            `[subdomain_enumerator] source=${result.source} ${status} count=${result.count} duration_ms=${result.responseTime}${suffix}`
+        );
+    } catch {
+        // Logging must never affect enumeration results.
+    }
 }
 
 function buildSubdomainEventId(domain: string, eventType: string, timestamp: string): string {
@@ -2462,15 +2484,14 @@ async function querySource(
 }
 
 /**
- * Run tasks sequentially through runtime scheduling
+ * Submit source work together so Rust can own request pacing and concurrency.
  */
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
-    }
-    return results;
+async function runThroughRuntimeQueue(tasks: Array<() => Promise<SourceResult>>): Promise<SourceResult[]> {
+    return Promise.all(tasks.map(async (task) => {
+        const result = await task();
+        logSourceResult(result);
+        return result;
+    }));
 }
 
 /**
@@ -2495,7 +2516,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const timeout = Math.max(5000, Math.min(input.timeout || DEFAULT_TIMEOUT, 120000));
-                const removeDuplicates = input.removeDuplicates !== false;
+        const removeDuplicates = input.removeDuplicates !== false;
         const requestedSourceList = Array.isArray(input.sources) ? input.sources : [];
         const requestedSources = requestedSourceList.length > 0;
         const skippedSources: DataSource[] = [];
@@ -2527,8 +2548,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         sources = prioritizeSources(sources);
+        try {
+            (globalThis as any).Sentinel?.log?.(
+                "info",
+                `[subdomain_enumerator] start domain=${domain} sources=${sources.length} timeout_ms=${timeout}`
+            );
+        } catch {
+            // Ignore logging failures.
+        }
         const tasks = sources.map(source => () => querySource(source, domain, timeout, input.apiConfig));
-        const sourceResults = await runSequentially(tasks);
+        const sourceResults = await runThroughRuntimeQueue(tasks);
         
         const allSubdomains: string[] = [];
         let sourcesSucceeded = 0;
@@ -2542,6 +2571,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             allSubdomains.push(...result.subdomains);
         }
+
+        const slowSources = [...sourceResults]
+            .sort((a, b) => b.responseTime - a.responseTime)
+            .slice(0, 10);
         
         const finalSubdomains = removeDuplicates 
             ? [...new Set(allSubdomains)].sort()
@@ -2580,6 +2613,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 domain,
                 subdomains: finalSubdomains,
                 sourceResults: sourceResults.sort((a, b) => b.count - a.count),
+                slowSources,
                 skippedSources,
                 changeEvents,
                 snapshots,
