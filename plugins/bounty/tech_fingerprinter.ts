@@ -5,6 +5,7 @@
  * @name Technology Fingerprinter
  * @version 2.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags fingerprint, technology, dictionary, web

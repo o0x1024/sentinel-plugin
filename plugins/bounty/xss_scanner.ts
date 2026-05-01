@@ -5,6 +5,7 @@
  * @name XSS Scanner
  * @version 1.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category vuln
  * @default_severity high
  * @tags xss, cross-site-scripting, vulnerability, security, web, owasp

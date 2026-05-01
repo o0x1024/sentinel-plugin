@@ -5,6 +5,7 @@
  * @name Sensitive File Scanner
  * @version 1.3.2
  * @author Sentinel Team
+ * @main_category bounty
  * @category risk
  * @default_severity medium
  * @tags risk, exposure, file, dictionary, web
@@ -16,6 +17,9 @@ declare const Sentinel: {
         get?(idOrName: string): Promise<any>;
         getDefaultId?(dictType: string): Promise<string | null>;
         getEntries?(idOrName: string, limit?: number): Promise<any[]>;
+    };
+    Monitor?: {
+        reportProgress?(update: Record<string, unknown>): Promise<boolean>;
     };
 };
 
@@ -103,6 +107,7 @@ interface ToolOutput {
             skippedTargets: number;
             skippedDeadTargetProbes: number;
             heuristicFiltered: number;
+            soft404Filtered: number;
             statusBuckets: Record<string, number>;
         };
         surface_artifacts?: Record<string, any[]>;
@@ -118,6 +123,7 @@ interface ScanStats {
     skippedTargets: number;
     skippedDeadTargetProbes: number;
     heuristicFiltered: number;
+    soft404Filtered: number;
     statusBuckets: Record<string, number>;
 }
 
@@ -131,11 +137,19 @@ interface PreparedRule {
 
 interface ResponseContext {
     url: string;
+    finalUrl: string;
+    redirected: boolean;
     status: number;
     headers: Record<string, string>;
     contentType: string;
     title: string;
     body: string;
+    bodyText: string;
+    contentLength: number;
+}
+
+interface TargetBaseline {
+    soft404: ResponseContext | null;
 }
 
 const pluginGlobals = globalThis as typeof globalThis & {
@@ -261,6 +275,7 @@ export function get_output_schema() {
                             skippedTargets: { type: "integer" },
                             skippedDeadTargetProbes: { type: "integer" },
                             heuristicFiltered: { type: "integer" },
+                            soft404Filtered: { type: "integer" },
                             statusBuckets: { type: "object" }
                         },
                         description: "High-level scan summary"
@@ -354,7 +369,12 @@ async function fetchWithTimeout(url: string, timeout: number, userAgent: string,
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-        return await fetch(url, { method, signal: controller.signal, headers: { "User-Agent": userAgent } });
+        return await fetch(url, {
+            method,
+            redirect: "manual",
+            signal: controller.signal,
+            headers: { "User-Agent": userAgent },
+        });
     } finally {
         clearTimeout(timer);
     }
@@ -391,6 +411,22 @@ function extractTitle(html: string): string {
     return match?.[1]?.trim() || "";
 }
 
+function stripHtml(body: string): string {
+    return body
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+        .replace(/<!--[\s\S]*?-->/g, " ")
+        .replace(/<[^>]+>/g, " ");
+}
+
+function normalizeComparableText(value: string, limit = 4000): string {
+    return stripHtml(String(value || ""))
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, limit);
+}
+
 function buildHeadersObject(response: Response): Record<string, string> {
     const headers: Record<string, string> = {};
     response.headers.forEach((value: string, key: string) => {
@@ -400,13 +436,19 @@ function buildHeadersObject(response: Response): Record<string, string> {
 }
 
 function buildResponseContext(url: string, response: Response, body: string | null): ResponseContext {
+    const finalUrl = response.url || url;
+    const rawBody = body || "";
     return {
         url,
+        finalUrl,
+        redirected: finalUrl !== url,
         status: response.status,
         headers: buildHeadersObject(response),
         contentType: response.headers.get("content-type") || "",
-        title: body ? extractTitle(body) : "",
-        body: body || "",
+        title: rawBody ? extractTitle(rawBody) : "",
+        body: rawBody,
+        bodyText: normalizeComparableText(rawBody),
+        contentLength: rawBody.length,
     };
 }
 
@@ -467,6 +509,92 @@ function classifyError(error: any): "timeout" | "network" {
     const message = String(error?.message || error || "").toLowerCase();
     if (message.includes("abort") || message.includes("timeout")) return "timeout";
     return "network";
+}
+
+function randomProbePath(): string {
+    const seed = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    return `.sentinel-soft404-${seed}.txt`;
+}
+
+async function buildTargetBaseline(target: string, timeout: number, userAgent: string): Promise<TargetBaseline> {
+    const baselineUrl = joinUrl(target, randomProbePath());
+    let response: Response | null = null;
+    try {
+        response = await fetchWithTimeout(baselineUrl, timeout, userAgent, "GET");
+        const body = await response.text();
+        if (response.status !== 200) {
+            return { soft404: null };
+        }
+        return {
+            soft404: buildResponseContext(baselineUrl, response, body),
+        };
+    } catch {
+        await discardResponse(response);
+        return { soft404: null };
+    }
+}
+
+function tokenizeComparableText(value: string): string[] {
+    return normalizeComparableText(value, 2000).match(/[a-z0-9_/-]{3,}/g) || [];
+}
+
+function jaccardSimilarity(left: string[], right: string[]): number {
+    if (left.length === 0 || right.length === 0) return 0;
+    const leftSet = new Set(left);
+    const rightSet = new Set(right);
+    let intersection = 0;
+    for (const token of leftSet) {
+        if (rightSet.has(token)) {
+            intersection += 1;
+        }
+    }
+    const union = new Set([...leftSet, ...rightSet]).size;
+    return union === 0 ? 0 : intersection / union;
+}
+
+function hasSoft404Markers(context: ResponseContext): boolean {
+    const probe = `${context.title} ${context.finalUrl} ${context.bodyText}`.toLowerCase();
+    return [
+        "404",
+        "not found",
+        "page not found",
+        "file not found",
+        "resource not found",
+        "does not exist",
+        "cannot be found",
+        "找不到",
+        "不存在",
+        "页面丢失",
+    ].some(marker => probe.includes(marker));
+}
+
+function looksLikeSoft404(context: ResponseContext, baseline: TargetBaseline): boolean {
+    if (context.status !== 200) return false;
+    if (context.redirected) return true;
+
+    const baseline404 = baseline.soft404;
+    if (!baseline404) {
+        return hasSoft404Markers(context);
+    }
+
+    if (context.bodyText.length > 0 && context.bodyText === baseline404.bodyText) {
+        return true;
+    }
+
+    const sameTitle = normalizeComparableText(context.title, 200) === normalizeComparableText(baseline404.title, 200);
+    const sameContentType = context.contentType.split(";")[0] === baseline404.contentType.split(";")[0];
+    const maxLength = Math.max(context.contentLength, baseline404.contentLength);
+    const lengthRatio = maxLength === 0 ? 1 : 1 - (Math.abs(context.contentLength - baseline404.contentLength) / maxLength);
+    const tokenSimilarity = jaccardSimilarity(
+        tokenizeComparableText(context.bodyText),
+        tokenizeComparableText(baseline404.bodyText),
+    );
+
+    if (sameTitle && sameContentType && lengthRatio >= 0.92 && tokenSimilarity >= 0.88) {
+        return true;
+    }
+
+    return hasSoft404Markers(context) && sameTitle && tokenSimilarity >= 0.75;
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
@@ -530,12 +658,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             skippedTargets: 0,
             skippedDeadTargetProbes: 0,
             heuristicFiltered: 0,
+            soft404Filtered: 0,
             statusBuckets: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, other: 0 },
         };
         let completedTargets = 0;
         await runWithConcurrency(
             targets.map((target) => async () => {
                 try {
+                    const baseline = await buildTargetBaseline(target, timeout, userAgent);
                     for (const preparedRule of preparedRules) {
                         const { rule, metadata, path, matchers, negativeMatchers } = preparedRule;
                         const url = joinUrl(target, path);
@@ -574,6 +704,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                                 }
                             } else {
                                 stats.heuristicFiltered += 1;
+                                await discardResponse(response);
+                                continue;
+                            }
+                            if (looksLikeSoft404(context, baseline)) {
+                                stats.soft404Filtered += 1;
                                 await discardResponse(response);
                                 continue;
                             }
@@ -647,6 +782,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     skippedTargets: stats.skippedTargets,
                     skippedDeadTargetProbes: stats.skippedDeadTargetProbes,
                     heuristicFiltered: stats.heuristicFiltered,
+                    soft404Filtered: stats.soft404Filtered,
                     statusBuckets: stats.statusBuckets,
                 },
                 surface_artifacts: {

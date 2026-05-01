@@ -5,6 +5,7 @@
  * @name DNS Resolver
  * @version 1.0.1
  * @author Sentinel Team
+ * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags dns, resolver, mapping, domain, asm

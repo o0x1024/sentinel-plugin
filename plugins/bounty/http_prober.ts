@@ -5,6 +5,7 @@
  * @name HTTP Prober
  * @version 1.4.2
  * @author Sentinel Team
+ * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags http, probe, alive, discovery, web

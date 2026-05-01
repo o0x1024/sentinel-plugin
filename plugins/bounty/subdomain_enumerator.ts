@@ -5,6 +5,7 @@
  * @name Subdomain Enumerator
  * @version 2.2.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags subdomain, reconnaissance, domain, enumeration, dns

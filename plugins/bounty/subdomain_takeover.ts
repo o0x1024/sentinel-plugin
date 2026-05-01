@@ -5,6 +5,7 @@
  * @name Subdomain Takeover Detector
  * @version 1.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category vuln
  * @default_severity high
  * @tags subdomain, takeover, dns, vulnerability, security

@@ -5,6 +5,7 @@
  * @name CORS Misconfiguration Detector
  * @version 1.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category vuln
  * @default_severity medium
  * @tags cors, vulnerability, security, web, headers

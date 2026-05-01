@@ -9,6 +9,7 @@ Official plugin repository for [Sentinel AI](https://github.com/o0x1024/sentinel
 This repository contains community-contributed and official plugins for Sentinel AI, including:
 - **Passive Scan Plugins** - Analyze HTTP traffic and actively verify vulnerabilities
 - **Agent Tool Plugins** - Provide tools for AI agents to perform security tasks
+- **Bug Bounty Plugins** - Execution plugins for bug bounty asset discovery, verification, and monitoring
 
 ## Directory Structure
 
@@ -22,9 +23,10 @@ sentinel-plugin/
     │   ├── sql_injection_detector.ts
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
-    └── agent/             # Agent tool plugins
-        ├── url_encoder.ts
-        └── hash_calculator.ts
+    ├── agent/             # General agent tool plugins
+    └── bounty/            # Bug bounty plugins
+        ├── subdomain_enumerator.ts
+        └── api_monitor.ts
 ```
 
 ## Plugin Runtime Environment
@@ -433,7 +435,7 @@ globalThis.analyze = analyze;
       "name": "Plugin Display Name",
       "version": "1.0.0",
       "author": "Author Name",
-      "main_category": "passive|agent",
+      "main_category": "traffic|agent|bounty|intruder",
       "category": "sqli|xss|utility|...",
       "description": "Plugin description",
       "default_severity": "critical|high|medium|low|info",
@@ -479,18 +481,22 @@ Sentinel.emitFinding({
 - `auth_bypass` - Authentication Bypass
 - `custom` - Custom
 
-### Agent Tool Categories
+### Agent / Bug Bounty Tool Categories
 - `scanner` - Scanning Tools
 - `analyzer` - Analysis Tools
 - `recon` - Reconnaissance
+- `discovery` - Discovery
+- `risk` - Risk Scanning
+- `vuln` - Vulnerability Verification
 - `exploit` - Exploitation
+- `monitor` - Change Monitoring
 - `utility` - Utility Tools
 - `custom` - Custom
 
 ## Contributing
 
 1. Fork this repository
-2. Create your plugin in `plugins/traffic/` or `plugins/agent/`
+2. Create your plugin in `plugins/traffic/`, `plugins/agent/`, or `plugins/bounty/`
 3. Add your plugin entry to `plugins.json`
 4. Submit a Pull Request
 

@@ -5,6 +5,7 @@
  * @name Certificate Monitor
  * @version 1.2.1
  * @author Sentinel Team
+ * @main_category bounty
  * @category monitor
  * @default_severity medium
  * @tags certificate, ssl, tls, monitor, change-detection, expiry

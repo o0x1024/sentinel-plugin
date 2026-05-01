@@ -5,6 +5,7 @@
  * @name CIDR Mapper
  * @version 1.0.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags cidr, ip, network, asm, surface

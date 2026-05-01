@@ -5,6 +5,7 @@
  * @name JavaScript Analyzer
  * @version 3.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category discovery
  * @default_severity info
  * @tags javascript, endpoint, api, discovery, secrets, ast

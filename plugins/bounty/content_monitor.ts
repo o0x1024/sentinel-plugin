@@ -5,6 +5,7 @@
  * @name Content Monitor
  * @version 1.1.1
  * @author Sentinel Team
+ * @main_category bounty
  * @category monitor
  * @default_severity low
  * @tags content, monitor, change-detection, fingerprint, hash

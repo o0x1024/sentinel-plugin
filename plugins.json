@@ -1,13 +1,13 @@
 {
-  "version": "2.3.15",
-  "updated_at": "2026-04-21",
+  "version": "2.3.18",
+  "updated_at": "2026-05-01",
   "plugins": [
     {
       "id": "sql_injection_detector",
       "name": "SQL Injection Detector",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "author": "Sentinel Team",
-      "main_category": "passive",
+      "main_category": "traffic",
       "category": "sqli",
       "description": "Replays every safe parameter with a simple single-quote probe under bounded active verification controls",
       "default_severity": "high",
@@ -19,7 +19,7 @@
       "name": "XSS Vulnerability Detector",
       "version": "2.0.0",
       "author": "Sentinel Team",
-      "main_category": "passive",
+      "main_category": "traffic",
       "category": "xss",
       "description": "Detects Cross-Site Scripting vulnerabilities through passive analysis and active payload verification",
       "default_severity": "high",
@@ -31,7 +31,7 @@
       "name": "Sensitive Information Detector",
       "version": "2.0.0",
       "author": "Sentinel Team",
-      "main_category": "passive",
+      "main_category": "traffic",
       "category": "info_leak",
       "description": "Detects sensitive information disclosure in HTTP responses including API keys, credentials, PII, and debug information",
       "default_severity": "medium",
@@ -43,276 +43,276 @@
       "name": "Next.js RCE Scanner",
       "version": "1.0.2",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "exploit",
       "description": "Detect and exploit Next.js prototype pollution RCE vulnerability",
       "default_severity": "critical",
       "tags": ["nextjs", "rce", "prototype-pollution", "cve", "exploit"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/nextjs_rce_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/nextjs_rce_scanner.ts"
     },
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
       "version": "2.2.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Comprehensive subdomain enumeration using 50 data sources with effective request timeouts, lightweight retry handling for transient failures, worker-pool concurrency, and automatic skipping of unconfigured premium sources in default mode.",
       "default_severity": "info",
       "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint", "certificate-transparency", "threat-intelligence", "passive-dns", "api"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_enumerator.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_enumerator.ts"
     },
     {
       "id": "dns_resolver",
       "name": "DNS Resolver",
       "version": "1.0.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Resolve DNS records for domains and URLs, producing typed surface graph artifacts including domains, IPs, DNS relations, and DNS evidence for ASM workflows.",
       "default_severity": "info",
       "tags": ["dns", "resolver", "mapping", "domain", "asm", "surface"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/dns_resolver.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/dns_resolver.ts"
     },
     {
       "id": "cidr_mapper",
       "name": "CIDR Mapper",
       "version": "1.0.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Expand IPv4 CIDR ranges and IP targets into typed IP assets with CIDR mapping evidence for ASM and network surface mapping workflows.",
       "default_severity": "info",
       "tags": ["cidr", "ip", "network", "asm", "surface"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cidr_mapper.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/cidr_mapper.ts"
     },
     {
       "id": "http_prober",
       "name": "HTTP Prober",
       "version": "1.4.2",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Probe HTTP/HTTPS targets from URLs and service endpoints, confirm live websites, and emit structured web artifacts with headers, titles, technologies, and body summaries.",
       "default_severity": "info",
       "tags": ["http", "probe", "alive", "discovery", "web", "service", "headers", "evidence"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/http_prober.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/http_prober.ts"
     },
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
       "version": "2.2.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Identify web technologies using explicit dictionary-driven fingerprint rules with structured matchers, normalized fingerprint artifacts, rule metadata, and version extraction.",
       "default_severity": "info",
       "tags": ["fingerprint", "technology", "dictionary", "web", "normalized", "surface"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/tech_fingerprinter.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/tech_fingerprinter.ts"
     },
     {
       "id": "sensitive_file_scanner",
       "name": "Sensitive File Scanner",
       "version": "1.3.2",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "risk",
       "description": "Scan web targets for exposed sensitive files using explicit dictionary matchers and negative matchers with concurrent target-rule scanning.",
       "default_severity": "medium",
       "tags": ["risk", "exposure", "file", "dictionary", "web"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sensitive_file_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/sensitive_file_scanner.ts"
     },
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
       "version": "2.2.1",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "risk",
       "description": "Execute safe dictionary-driven verification rules loaded from workflow input or poc dictionaries, with fingerprint scoping, chained requests, and structured evidence.",
       "default_severity": "medium",
       "tags": ["risk", "poc", "verification", "dictionary", "web"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/risk_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/risk_scanner.ts"
     },
     {
       "id": "favicon_fingerprinter",
       "name": "Favicon Fingerprinter",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Fetch favicons from web targets, apply dictionary-driven rule matching, and emit normalized favicon fingerprint and evidence artifacts for ASM workflows.",
       "default_severity": "info",
       "tags": ["favicon", "fingerprint", "web", "asm", "surface", "dictionary", "normalized"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/favicon_fingerprinter.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/favicon_fingerprinter.ts"
     },
     {
       "id": "service_monitor",
       "name": "Service Monitor",
       "version": "1.0.1",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "monitor",
       "description": "Monitor exposed services for availability, banner, product, and version changes with structured snapshots, service artifacts, and change events.",
       "default_severity": "medium",
       "tags": ["service", "monitor", "change-detection", "banner", "version", "asm", "network"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_monitor.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/service_monitor.ts"
     },
     {
       "id": "service_probe",
       "name": "Service Probe",
       "version": "1.2.2",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "recon",
       "description": "Identify exposed services from host/port targets with pluggable probe engines, normalized fingerprint artifacts, and structured service evidence for ASM workflows.",
       "default_severity": "info",
       "tags": ["service", "probe", "fingerprint", "banner", "asm", "network", "dictionary", "normalized", "native"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/service_probe.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/service_probe.ts"
     },
     {
       "id": "directory_bruteforcer",
       "name": "Directory Bruteforcer",
       "version": "1.2.1",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "discovery",
       "description": "Discover hidden directories, files, and endpoints on web servers with deduplicated word/path queues, normalized extension handling, and bounded request concurrency",
       "default_severity": "info",
       "tags": ["directory", "bruteforce", "discovery", "fuzzing", "web"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/directory_bruteforcer.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/directory_bruteforcer.ts"
     },
     {
       "id": "js_analyzer",
       "name": "JavaScript Analyzer",
       "version": "3.1.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "discovery",
       "description": "Analyze JavaScript files using AST parsing to extract literals, API endpoints, secrets, and domains with lower default concurrency, deduplicated target queues, and bounded nested file-analysis concurrency",
       "default_severity": "info",
       "tags": ["javascript", "endpoint", "api", "discovery", "secrets", "ast"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/js_analyzer.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/js_analyzer.ts"
     },
     {
       "id": "ssrf_detector",
       "name": "SSRF Detector",
       "version": "1.2.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "vuln",
       "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, real abortable request timeouts, and strong-signal parameter early stop under bounded concurrency",
       "default_severity": "high",
       "tags": ["ssrf", "vulnerability", "security", "web"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/ssrf_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/ssrf_detector.ts"
     },
     {
       "id": "subdomain_takeover",
       "name": "Subdomain Takeover Detector",
       "version": "1.1.1",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "vuln",
       "description": "Detect potential subdomain takeover vulnerabilities with deduplicated targets, bounded concurrency, and single-fetch HTTP fingerprint evaluation instead of repeated per-service probing",
       "default_severity": "high",
       "tags": ["subdomain", "takeover", "dns", "vulnerability", "security"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/subdomain_takeover.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_takeover.ts"
     },
     {
       "id": "cors_misconfiguration",
       "name": "CORS Misconfiguration Detector",
       "version": "1.1.1",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "vuln",
       "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with configurable concurrent origin testing",
       "default_severity": "medium",
       "tags": ["cors", "vulnerability", "security", "web", "headers"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cors_misconfiguration.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/cors_misconfiguration.ts"
     },
     {
       "id": "open_redirect_detector",
       "name": "Open Redirect Detector",
       "version": "1.2.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "vuln",
       "description": "Detect open redirects with deduplicated payloads, abortable request timeouts, bounded concurrency, and parameter-level early stop after confirmed redirect findings",
       "default_severity": "medium",
       "tags": ["redirect", "vulnerability", "security", "web", "phishing"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/open_redirect_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/open_redirect_detector.ts"
     },
     {
       "id": "xss_scanner",
       "name": "XSS Scanner",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "vuln",
       "description": "Active XSS vulnerability scanner with deduplicated payload sets, bounded concurrency, and parameter-level early stop after a reflected hit to cut redundant requests",
       "default_severity": "high",
       "tags": ["xss", "cross-site-scripting", "vulnerability", "security", "web", "owasp"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/xss_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/xss_scanner.ts"
     },
     {
       "id": "sql_injection_scanner",
       "name": "SQL Injection Scanner",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "vuln",
       "description": "Active SQL injection scanner with concurrent baseline collection, deduplicated payload sets, bounded concurrency, and parameter-level early stop after a confirmed signal",
       "default_severity": "critical",
       "tags": ["sqli", "sql-injection", "vulnerability", "security", "web", "owasp", "database"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sql_injection_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/sql_injection_scanner.ts"
     },
     {
       "id": "cert_monitor",
       "name": "Certificate Monitor",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "monitor",
       "description": "Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation",
       "default_severity": "medium",
       "tags": ["certificate", "ssl", "tls", "monitor", "change-detection", "expiry"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cert_monitor.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/cert_monitor.ts"
     },
     {
       "id": "content_monitor",
       "name": "Content Monitor",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "monitor",
       "description": "Monitor web pages for content changes using hash fingerprinting, generating ChangeEvents for workflow automation with configurable concurrent target scanning",
       "default_severity": "low",
       "tags": ["content", "monitor", "change-detection", "fingerprint", "hash"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/content_monitor.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/content_monitor.ts"
     },
     {
       "id": "api_monitor",
       "name": "API Monitor",
       "version": "1.2.0",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "monitor",
       "description": "Monitor API endpoints by discovering JavaScript assets from pages and bundles, extracting API paths from JS, and comparing endpoint changes with optional GraphQL/OpenAPI discovery.",
       "default_severity": "high",
       "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "graphql", "javascript", "spa"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/api_monitor.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/api_monitor.ts"
     },
     {
       "id": "port_monitor",
       "name": "Port Monitor",
       "version": "1.3.3",
       "author": "Sentinel Team",
-      "main_category": "agent",
+      "main_category": "bounty",
       "category": "monitor",
       "description": "Monitor typed host and IP targets for port exposure changes using native Rust-backed port discovery, prioritizing structured monitor targets and preserving strict IP-only execution semantics for ASM workflows.",
       "default_severity": "medium",
       "tags": ["port", "monitor", "network", "asm", "surface", "ip", "host", "change-detection", "native"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/port_monitor.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/port_monitor.ts"
     }
   ]
 }

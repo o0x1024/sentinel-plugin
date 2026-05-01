@@ -5,6 +5,7 @@
  * @name Favicon Fingerprinter
  * @version 1.0.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags favicon, fingerprint, web, asm, surface

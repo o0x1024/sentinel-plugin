@@ -5,6 +5,7 @@
  * @name Port Monitor
  * @version 1.3.3
  * @author Sentinel Team
+ * @main_category bounty
  * @category monitor
  * @default_severity medium
  * @tags port, service, monitor, change-detection, scan

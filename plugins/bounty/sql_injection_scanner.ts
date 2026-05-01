@@ -5,6 +5,7 @@
  * @name SQL Injection Scanner
  * @version 1.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category vuln
  * @default_severity critical
  * @tags sqli, sql-injection, vulnerability, security, web, owasp, database

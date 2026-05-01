@@ -5,6 +5,7 @@
  * @name Risk Scanner
  * @version 2.2.1
  * @author Sentinel Team
+ * @main_category bounty
  * @category risk
  * @default_severity medium
  * @tags risk, poc, verification, dictionary, workflow

@@ -1,14 +1,15 @@
 /**
- * Service Probe Tool
+ * Service Monitor Tool
  *
- * @plugin service_probe
- * @name Service Probe
- * @version 1.2.2
+ * @plugin service_monitor
+ * @name Service Monitor
+ * @version 1.0.2
  * @author Sentinel Team
- * @category recon
- * @default_severity info
- * @tags service, probe, fingerprint, banner, asm
- * @description Identify exposed services from host/port targets with the native Rust service identification engine, normalized fingerprint artifacts, and structured service evidence
+ * @main_category bounty
+ * @category monitor
+ * @default_severity medium
+ * @tags service, monitor, change-detection, banner, version, asm
+ * @description Monitor exposed services for availability, banner, product, and version changes with structured snapshots and change events
  */
 
 declare const Sentinel: {
@@ -29,7 +30,7 @@ declare const Sentinel: {
             monitorProgress?: MonitorExecutionContext;
         }): Promise<{
             success: boolean;
-            results: Array<ProbeResult>;
+            results: Array<MonitorResult>;
             ruleCount?: number;
             engineRequested: string;
             engineUsed: string;
@@ -73,17 +74,11 @@ interface ToolInput {
     followHttpRedirects?: boolean;
     readBanner?: boolean;
     serviceProbeEngine?: string;
+    previousSnapshots?: Record<string, ServiceSnapshot>;
     __monitorExecution?: MonitorExecutionContext;
 }
 
-interface RuleEntry {
-    id?: string;
-    word: string;
-    category?: string | null;
-    metadata?: any;
-}
-
-interface ProbeResult {
+interface MonitorResult {
     target: string;
     success: boolean;
     available: boolean;
@@ -98,13 +93,57 @@ interface ProbeResult {
     serverHeader?: string;
     title?: string;
     statusCode?: number;
+    confidence?: number;
+    matchedRuleId?: string;
     error?: string;
+}
+
+interface RuleEntry {
+    id?: string;
+    word: string;
+    category?: string | null;
+    metadata?: any;
+}
+
+interface ServiceSnapshot {
+    target: string;
+    host: string;
+    port: number;
+    protocol: string;
+    available: boolean;
+    serviceName?: string;
+    productName?: string;
+    vendor?: string;
+    version?: string;
+    banner?: string;
+    serverHeader?: string;
+    title?: string;
+    statusCode?: number;
+    error?: string;
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
 }
 
 interface ToolOutput {
     success: boolean;
     data?: {
-        results: ProbeResult[];
+        results: MonitorResult[];
+        changeEvents: ChangeEvent[];
         snapshots: Record<string, ServiceSnapshot>;
         summary: {
             totalTargets: number;
@@ -112,9 +151,8 @@ interface ToolOutput {
             failedChecks: number;
             reachableServices: number;
             unreachableServices: number;
-            identifiedProducts: number;
-            matchedFingerprints: number;
-            scannedRules: number;
+            serviceChanges: number;
+            availabilityChanges: number;
             probeEngineRequested: string;
             probeEngineUsed: string;
             probeEngineExperimental: boolean;
@@ -146,7 +184,7 @@ interface ResolvedServiceProbeEngine {
 
 interface NativeServiceProbeResponse {
     success: boolean;
-    results: ProbeResult[];
+    results: MonitorResult[];
     ruleCount?: number;
     engineRequested: string;
     engineUsed: string;
@@ -194,6 +232,14 @@ async function reportMonitorProgress(
     }
 }
 
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
 const HTTP_PORTS = new Set([80, 81, 443, 8000, 8080, 8081, 8443, 8888, 9000]);
 const TLS_PORTS = new Set([443, 8443, 9443]);
 
@@ -221,12 +267,6 @@ const DEFAULT_SERVICE_NAMES: Record<number, string> = {
     8443: "https",
     9200: "elasticsearch",
     27017: "mongodb",
-};
-
-const pluginGlobals = globalThis as typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
 };
 
 function parseMetadata(value: any): Record<string, any> {
@@ -299,7 +339,7 @@ async function resolveRuleDictionaryId(input: ToolInput): Promise<string | null>
             return defaultId.trim();
         }
     } catch {
-        // ignore and keep fallback chain below
+        // ignore and continue with builtin fallback
     }
 
     try {
@@ -308,7 +348,7 @@ async function resolveRuleDictionaryId(input: ToolInput): Promise<string | null>
             return fallbackId.trim();
         }
     } catch {
-        // ignore and keep fallback chain below
+        // ignore and continue with builtin fallback
     }
 
     return "builtin_service_fingerprint_rules";
@@ -367,6 +407,10 @@ function serviceKey(host: string, port: number): string {
     return `${host}:${port}`;
 }
 
+function legacyServiceKey(host: string, port: number, protocol: string): string {
+    return `${host}:${port}/${protocol}`;
+}
+
 function dedupeTargets(targets: Array<{ host: string; port: number; protocol: string }>): Array<{ host: string; port: number; protocol: string }> {
     const deduped = new Map<string, { host: string; port: number; protocol: string }>();
     for (const target of targets) {
@@ -385,6 +429,17 @@ function dedupeTargets(targets: Array<{ host: string; port: number; protocol: st
     }
 
     return Array.from(deduped.values());
+}
+
+function findPreviousSnapshot(
+    previousSnapshots: Record<string, ServiceSnapshot>,
+    current: { target: string; host: string; port: number; protocol: string },
+): ServiceSnapshot | undefined {
+    return previousSnapshots[current.target]
+        || previousSnapshots[legacyServiceKey(current.host, current.port, current.protocol)]
+        || previousSnapshots[legacyServiceKey(current.host, current.port, "tcp")]
+        || previousSnapshots[legacyServiceKey(current.host, current.port, "http")]
+        || previousSnapshots[legacyServiceKey(current.host, current.port, "https")];
 }
 
 function inferServiceName(port: number, protocol: string, banner?: string, serverHeader?: string): string {
@@ -463,22 +518,26 @@ async function fingerprintHttp(
     host: string,
     port: number,
     timeout: number,
-    followHttpRedirects: boolean,
-): Promise<Partial<ProbeResult>> {
+    followRedirects: boolean,
+): Promise<Partial<MonitorResult>> {
     const protocol = TLS_PORTS.has(port) ? "https" : "http";
     const url = `${protocol}://${host}:${port}/`;
     const response = await fetchWithTimeout(
         url,
         {
-            method: "HEAD",
-            redirect: followHttpRedirects ? "follow" : "manual",
+            method: "GET",
+            redirect: followRedirects ? "follow" : "manual",
         },
         timeout,
     );
 
+    const serverHeader = response.headers.get("server") || undefined;
+    const titleMatch = (await response.text()).match(/<title[^>]*>([^<]+)<\/title>/i);
     return {
         protocol,
+        serverHeader,
         statusCode: response.status,
+        title: titleMatch?.[1]?.trim(),
     };
 }
 
@@ -487,7 +546,7 @@ async function fingerprintTcp(
     port: number,
     timeout: number,
     readBanner: boolean,
-): Promise<Partial<ProbeResult>> {
+): Promise<Partial<MonitorResult>> {
     // @ts-ignore
     const conn = await Deno.connect({ hostname: host, port, transport: "tcp" });
     try {
@@ -528,17 +587,18 @@ async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency
     return results;
 }
 
-function isIpLiteral(value: string): boolean {
-    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
+function buildEventId(target: string, timestamp: string, suffix: string): string {
+    return `service-monitor-${suffix}-${target}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
 }
 
-function buildServiceSnapshot(result: ProbeResult, timestamp: string): ServiceSnapshot {
+function buildSnapshot(result: MonitorResult, timestamp: string): ServiceSnapshot {
     return {
         target: result.target,
         host: result.host,
         port: result.port,
         protocol: result.protocol,
-        serviceName: result.serviceName || "unknown",
+        available: result.available,
+        serviceName: result.serviceName,
         productName: result.productName,
         vendor: result.vendor,
         version: result.version,
@@ -546,56 +606,103 @@ function buildServiceSnapshot(result: ProbeResult, timestamp: string): ServiceSn
         serverHeader: result.serverHeader,
         title: result.title,
         statusCode: result.statusCode,
+        error: result.error,
         lastChecked: timestamp,
     };
 }
 
-function serviceMatcherHit(ctx: Record<string, any>, matcher: any): boolean {
-    const part = String(matcher?.part || "banner").toLowerCase();
-    const type = String(matcher?.type || "contains").toLowerCase();
-    const value = String(matcher?.value || "");
+function calculateDiffs(previous: ServiceSnapshot, current: ServiceSnapshot): string[] {
+    const diffs: string[] = [];
 
-    const source = part === "header"
-        ? String(ctx.serverHeader || "")
-        : part === "product"
-            ? String(ctx.productName || "")
-            : part === "service"
-                ? String(ctx.serviceName || "")
-                : String(ctx.banner || "");
-
-    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
-    if (type === "regex") {
-        try {
-            return new RegExp(value, "i").test(source);
-        } catch {
-            return false;
-        }
+    if ((previous.serviceName || "") !== (current.serviceName || "")) {
+        diffs.push(`service ${JSON.stringify(previous.serviceName || "")} -> ${JSON.stringify(current.serviceName || "")}`);
     }
-    return source.toLowerCase().includes(value.toLowerCase());
+    if ((previous.productName || "") !== (current.productName || "")) {
+        diffs.push(`product ${JSON.stringify(previous.productName || "")} -> ${JSON.stringify(current.productName || "")}`);
+    }
+    if ((previous.version || "") !== (current.version || "")) {
+        diffs.push(`version ${JSON.stringify(previous.version || "")} -> ${JSON.stringify(current.version || "")}`);
+    }
+    if ((previous.serverHeader || "") !== (current.serverHeader || "")) {
+        diffs.push(`server header ${JSON.stringify(previous.serverHeader || "")} -> ${JSON.stringify(current.serverHeader || "")}`);
+    }
+    if ((previous.banner || "") !== (current.banner || "")) {
+        diffs.push(`banner ${JSON.stringify(previous.banner || "")} -> ${JSON.stringify(current.banner || "")}`);
+    }
+    if ((previous.title || "") !== (current.title || "")) {
+        diffs.push(`title ${JSON.stringify(previous.title || "")} -> ${JSON.stringify(current.title || "")}`);
+    }
+    if ((previous.statusCode || 0) !== (current.statusCode || 0)) {
+        diffs.push(`status ${previous.statusCode || "unknown"} -> ${current.statusCode || "unknown"}`);
+    }
+
+    return diffs;
 }
 
-function matchServiceRule(result: ProbeResult, rules: RuleEntry[]): RuleEntry | undefined {
-    for (const rule of rules) {
-        const metadata = parseMetadata(rule.metadata);
-        const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
-        if (matchers.length > 0) {
-            const operator = String(metadata.operator || "or").toLowerCase();
-            const matched = operator === "and"
-                ? matchers.every((matcher: any) => serviceMatcherHit(result, matcher))
-                : matchers.some((matcher: any) => serviceMatcherHit(result, matcher));
-            if (matched) {
-                return rule;
-            }
-            continue;
-        }
+function createAvailabilityEvent(
+    target: string,
+    previous: ServiceSnapshot,
+    current: ServiceSnapshot,
+    timestamp: string,
+): ChangeEvent {
+    const becameUnavailable = previous.available && !current.available;
+    return {
+        id: buildEventId(target, timestamp, becameUnavailable ? "unreachable" : "recovered"),
+        assetId: target,
+        eventType: becameUnavailable ? "service_unreachable" : "service_recovered",
+        severity: becameUnavailable ? "high" : "medium",
+        title: becameUnavailable ? `Service became unreachable: ${target}` : `Service recovered: ${target}`,
+        description: becameUnavailable
+            ? `${target} is no longer reachable${current.error ? ` (${current.error})` : ""}`
+            : `${target} is reachable again`,
+        oldValue: JSON.stringify(previous),
+        newValue: JSON.stringify(current),
+        detectionMethod: "service_monitor",
+        tags: ["service", "availability", becameUnavailable ? "down" : "up", "change"],
+        autoTriggerEnabled: true,
+        riskScore: becameUnavailable ? 75 : 48,
+        metadata: {
+            target,
+            previous,
+            current,
+        },
+    };
+}
 
-        const probe = `${result.productName || ""} ${result.serviceName || ""} ${result.serverHeader || ""} ${result.banner || ""}`.toLowerCase();
-        if (probe.includes(rule.word.toLowerCase())) {
-            return rule;
-        }
-    }
+function createServiceChangeEvent(
+    target: string,
+    diffs: string[],
+    previous: ServiceSnapshot,
+    current: ServiceSnapshot,
+    timestamp: string,
+): ChangeEvent {
+    const impactful = previous.serviceName !== current.serviceName
+        || previous.productName !== current.productName
+        || previous.version !== current.version;
+    return {
+        id: buildEventId(target, timestamp, "change"),
+        assetId: target,
+        eventType: "service_change",
+        severity: impactful ? "high" : "medium",
+        title: `Service changed: ${target}`,
+        description: diffs.join("; "),
+        oldValue: JSON.stringify(previous),
+        newValue: JSON.stringify(current),
+        detectionMethod: "service_monitor",
+        tags: ["service", "fingerprint", "change"],
+        autoTriggerEnabled: true,
+        riskScore: impactful ? 70 : 54,
+        metadata: {
+            target,
+            previous,
+            current,
+            fields: diffs,
+        },
+    };
+}
 
-    return undefined;
+function isIpLiteral(value: string): boolean {
+    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
 async function resolveServiceProbeEngine(requestedEngine?: string): Promise<ResolvedServiceProbeEngine> {
@@ -694,7 +801,7 @@ export function get_input_schema() {
             },
             timeout: {
                 type: "integer",
-                default: 3000,
+                default: 5000,
                 minimum: 1000,
                 maximum: 30000,
             },
@@ -710,13 +817,17 @@ export function get_input_schema() {
             },
             readBanner: {
                 type: "boolean",
-                default: false,
+                default: true,
             },
             serviceProbeEngine: {
                 type: "string",
                 enum: ["native"],
                 default: "native",
                 description: "Service probe engine. Native is the built-in Rust service identification engine.",
+            },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous service snapshots keyed by service target for change detection",
             },
         },
     };
@@ -733,17 +844,12 @@ export function get_output_schema() {
                 type: "object",
                 properties: {
                     results: { type: "array" },
+                    changeEvents: { type: "array" },
                     snapshots: { type: "object" },
                     summary: { type: "object" },
                     surface_artifacts: {
                         type: "object",
-                        description: "Structured service probe and fingerprint artifacts",
-                        properties: {
-                            services: { type: "array" },
-                            fingerprints: { type: "array" },
-                            evidences: { type: "array" },
-                            relations: { type: "array" },
-                        },
+                        description: "Structured service monitoring artifacts",
                     },
                 },
             },
@@ -775,17 +881,18 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const timeout = Math.max(1000, Math.min(input.timeout || 3000, 10000));
-        const concurrency = Math.max(1, Math.min(input.concurrency || 200, 500));
+        const timeout = Math.max(1000, Math.min(input.timeout || 5000, 30000));
+        const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
         const followHttpRedirects = input.followHttpRedirects !== false;
-        const readBanner = input.readBanner === true;
+        const readBanner = input.readBanner !== false;
         const monitorExecution = input.__monitorExecution;
         const dictionaryId = await resolveRuleDictionaryId(input);
         const explicitRules = Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0
             ? await loadRules(input)
             : [];
-        const timestamp = new Date().toISOString();
         const requestedProbeEngine = await resolveServiceProbeEngine(input.serviceProbeEngine);
+        const previousSnapshots = input.previousSnapshots || {};
+        const timestamp = new Date().toISOString();
         const nativeProbe = await probeServicesWithNativeEngine(
             normalizedTargets,
             dictionaryId,
@@ -797,6 +904,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             requestedProbeEngine.used,
             monitorExecution,
         ).catch(() => null);
+        const rules = nativeProbe?.results?.length
+            ? explicitRules
+            : await loadRules({
+                ...input,
+                dictionaryId: dictionaryId || input.dictionaryId,
+            });
         const probeEngine = nativeProbe
             ? {
                 requested: nativeProbe.engineRequested || requestedProbeEngine.requested,
@@ -805,25 +918,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 fallbackReason: nativeProbe.fallbackReason || requestedProbeEngine.fallbackReason,
             }
             : requestedProbeEngine;
-        const sanitizedResults = (nativeProbe?.results?.length ? nativeProbe.results : []).map((result) => ({
-            ...result,
-            title: undefined,
-        }));
-        const rules = sanitizedResults.length > 0
-            ? explicitRules
-            : await loadRules({
-                ...input,
-                dictionaryId: dictionaryId || input.dictionaryId,
-            });
 
-        let results: ProbeResult[];
-        if (sanitizedResults.length > 0) {
-            results = sanitizedResults;
+        let results: MonitorResult[];
+        if (nativeProbe?.results?.length) {
+            results = nativeProbe.results;
         } else {
-            const tasks = normalizedTargets.map((target) => async (): Promise<ProbeResult> => {
+            const tasks = normalizedTargets.map((target) => async (): Promise<MonitorResult> => {
                 const key = serviceKey(target.host, target.port);
                 try {
-                    let details: Partial<ProbeResult>;
+                    let details: Partial<MonitorResult>;
                     if (HTTP_PORTS.has(target.port) || target.protocol === "http" || target.protocol === "https") {
                         details = await fingerprintHttp(target.host, target.port, timeout, followHttpRedirects);
                     } else {
@@ -849,6 +952,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         serviceName,
                         banner: details.banner,
                         serverHeader: details.serverHeader,
+                        title: details.title,
                         statusCode: details.statusCode,
                         productName: productInfo.productName,
                         vendor: productInfo.vendor,
@@ -875,14 +979,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             current: normalizedTargets.length + 1,
             total: normalizedTargets.length + 2,
             phase: "compare",
-            message: "Comparing probe results",
+            message: "Comparing service snapshots",
         });
+        const changeEvents: ChangeEvent[] = [];
+        const snapshots: Record<string, ServiceSnapshot> = {};
 
         let successfulChecks = 0;
         let failedChecks = 0;
         let reachableServices = 0;
         let unreachableServices = 0;
-        const snapshots: Record<string, ServiceSnapshot> = {};
+        let serviceChanges = 0;
+        let availabilityChanges = 0;
 
         for (const result of results) {
             if (result.available) {
@@ -892,7 +999,32 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 failedChecks += 1;
                 unreachableServices += 1;
             }
-            snapshots[result.target] = buildServiceSnapshot(result, timestamp);
+
+            const snapshot = buildSnapshot(result, timestamp);
+            snapshots[result.target] = snapshot;
+
+            const previous = findPreviousSnapshot(previousSnapshots, result);
+            if (!previous) {
+                continue;
+            }
+
+            if (previous.available !== snapshot.available) {
+                changeEvents.push(createAvailabilityEvent(result.target, previous, snapshot, timestamp));
+                availabilityChanges += 1;
+                if (!snapshot.available) {
+                    continue;
+                }
+            }
+
+            if (!previous.available || !snapshot.available) {
+                continue;
+            }
+
+            const diffs = calculateDiffs(previous, snapshot);
+            if (diffs.length > 0) {
+                changeEvents.push(createServiceChangeEvent(result.target, diffs, previous, snapshot, timestamp));
+                serviceChanges += 1;
+            }
         }
 
         const successfulResults = results.filter((result) => result.available);
@@ -907,117 +1039,20 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             vendor: result.vendor,
             version: result.version,
             banner: result.banner || result.serverHeader,
-            source: "service_probe",
-            confidence: 0.92,
-            experimental: probeEngine.experimental,
-            probe_engine: probeEngine.used,
+            source: "service_monitor",
+            confidence: 0.94,
         }));
-
-        const fingerprints = successfulResults.flatMap((result) => {
-            const key = serviceKey(result.host, result.port);
-            const matchedRule = matchServiceRule(result, rules);
-            if (!matchedRule) {
-                return [];
-            }
-
-            const ruleMetadata = parseMetadata(matchedRule.metadata);
-            const normalizedProduct = ruleMetadata.product || result.productName;
-            const normalizedCategory = ruleMetadata.asset_category;
-            if (!normalizedProduct || !normalizedCategory) {
-                return [];
-            }
-
-            const normalizedVendor = ruleMetadata.vendor || result.vendor;
-            const normalizedFamily = ruleMetadata.asset_family || undefined;
-            const ruleBase = (matchedRule.word || normalizedProduct)
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, "_")
-                .replace(/^_+|_+$/g, "") || "unknown";
-            const ruleId = ruleMetadata.rule_id || matchedRule.id || `service_rule:${ruleBase}`;
-            const ruleWord = matchedRule.word || ruleBase;
-            const ruleName = ruleMetadata.name || matchedRule.word || normalizedProduct;
-            const fingerprintItems: any[] = [];
-
-            if (result.banner) {
-                fingerprintItems.push({
-                    asset_type: "service",
-                    asset_key: key,
-                    fingerprint_type: "banner",
-                    fingerprint_key: "banner",
-                    fingerprint_value: result.banner,
-                    rule_id: ruleId,
-                    rule_word: ruleWord,
-                    rule_name: ruleName,
-                    normalized_product: normalizedProduct,
-                    normalized_vendor: normalizedVendor,
-                    normalized_category: normalizedCategory,
-                    normalized_family: normalizedFamily,
-                    version: result.version,
-                    confidence: 0.88,
-                    evidence: result.banner,
-                    source: "service_probe",
-                });
-            }
-
-            if (result.productName) {
-                fingerprintItems.push({
-                    asset_type: "service",
-                    asset_key: key,
-                    fingerprint_type: "product",
-                    fingerprint_key: "product_name",
-                    fingerprint_value: `${result.productName}${result.version ? ` ${result.version}` : ""}`,
-                    rule_id: ruleId,
-                    rule_word: ruleWord,
-                    rule_name: ruleName,
-                    normalized_product: normalizedProduct,
-                    normalized_vendor: normalizedVendor,
-                    normalized_category: normalizedCategory,
-                    normalized_family: normalizedFamily,
-                    version: result.version,
-                    confidence: 0.9,
-                    source: "service_probe",
-                });
-            }
-
-            if (fingerprintItems.length === 0) {
-                fingerprintItems.push({
-                    asset_type: "service",
-                    asset_key: key,
-                    fingerprint_type: "service",
-                    fingerprint_key: "service_name",
-                    fingerprint_value: result.serviceName || "unknown",
-                    rule_id: ruleId,
-                    rule_word: ruleWord,
-                    rule_name: ruleName,
-                    normalized_product: normalizedProduct,
-                    normalized_vendor: normalizedVendor,
-                    normalized_category: normalizedCategory,
-                    normalized_family: normalizedFamily,
-                    version: result.version,
-                    confidence: 0.86,
-                    source: "service_probe",
-                });
-            }
-
-            return fingerprintItems;
-        });
 
         const evidences = results.map((result) => ({
             asset_type: "service",
             asset_key: result.target,
-            evidence_type: "service_probe_snapshot",
-            title: `Service Probe Snapshot: ${result.target}`,
+            evidence_type: "service_monitor_snapshot",
+            title: `Service Monitor Snapshot: ${result.target}`,
             content_text: result.available
                 ? `${result.serviceName || "unknown"} ${result.productName || ""} ${result.version || ""}`.trim()
                 : (result.error || "Service unreachable"),
-            content_json: {
-                ...result,
-                probe_engine: probeEngine.used,
-                probe_engine_requested: probeEngine.requested,
-                probe_engine_experimental: probeEngine.experimental,
-                probe_engine_fallback_reason: probeEngine.fallbackReason,
-            },
-            source: "service_probe",
+            content_json: snapshots[result.target],
+            source: "service_monitor",
         }));
 
         const relations = successfulResults.map((result) => ({
@@ -1026,21 +1061,22 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             to_type: "service",
             to_key: result.target,
             relation_type: "exposes_service",
-            source: "service_probe",
-            confidence: 0.92,
+            source: "service_monitor",
+            confidence: 0.94,
         }));
 
         await reportMonitorProgress(monitorExecution, {
             current: normalizedTargets.length + 2,
             total: normalizedTargets.length + 2,
             phase: "build",
-            message: "Building service probe results",
+            message: "Building service monitoring results",
         });
 
         return {
             success: true,
             data: {
                 results,
+                changeEvents,
                 snapshots,
                 summary: {
                     totalTargets: normalizedTargets.length,
@@ -1048,9 +1084,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     failedChecks,
                     reachableServices,
                     unreachableServices,
-                    identifiedProducts: successfulResults.filter((result) => Boolean(result.productName)).length,
-                    matchedFingerprints: fingerprints.length,
-                    scannedRules: nativeProbe?.ruleCount ?? rules.length,
+                    serviceChanges,
+                    availabilityChanges,
                     probeEngineRequested: probeEngine.requested,
                     probeEngineUsed: probeEngine.used,
                     probeEngineExperimental: probeEngine.experimental,
@@ -1058,7 +1093,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 },
                 surface_artifacts: {
                     services,
-                    fingerprints,
+                    changes: changeEvents.map((event) => ({
+                        asset_key: event.assetId,
+                        asset_type: "service",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "service_monitor",
+                        metadata: event.metadata,
+                    })),
                     evidences,
                     relations,
                 },

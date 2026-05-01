@@ -5,6 +5,7 @@
  * @name API Monitor
  * @version 1.2.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category monitor
  * @default_severity high
  * @tags api, endpoint, monitor, change-detection, rest, graphql, javascript, spa

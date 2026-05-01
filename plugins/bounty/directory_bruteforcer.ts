@@ -5,6 +5,7 @@
  * @name Directory Bruteforcer
  * @version 1.1.0
  * @author Sentinel Team
+ * @main_category bounty
  * @category discovery
  * @default_severity info
  * @tags directory, bruteforce, discovery, fuzzing, web

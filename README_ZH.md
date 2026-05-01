@@ -9,6 +9,7 @@
 本仓库包含社区贡献和官方开发的 Sentinel AI 插件，包括：
 - **被动扫描插件** - 分析 HTTP 流量并主动验证漏洞
 - **Agent 工具插件** - 为 AI Agent 提供安全测试工具
+- **漏洞赏金插件** - 面向漏洞赏金资产发现、验证和持续监控的执行型插件
 
 ## 目录结构
 
@@ -22,9 +23,10 @@ sentinel-plugin/
     │   ├── sql_injection_detector.ts
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
-    └── agent/             # Agent 工具插件
-        ├── url_encoder.ts
-        └── hash_calculator.ts
+    ├── agent/             # 通用 Agent 工具插件
+    └── bounty/            # 漏洞赏金插件
+        ├── subdomain_enumerator.ts
+        └── api_monitor.ts
 ```
 
 ## 插件运行环境
@@ -433,7 +435,7 @@ globalThis.analyze = analyze;
       "name": "插件显示名称",
       "version": "1.0.0",
       "author": "作者名称",
-      "main_category": "passive|agent",
+      "main_category": "traffic|agent|bounty|intruder",
       "category": "sqli|xss|utility|...",
       "description": "插件功能描述",
       "default_severity": "critical|high|medium|low|info",
@@ -479,18 +481,22 @@ Sentinel.emitFinding({
 - `auth_bypass` - 认证绕过
 - `custom` - 自定义
 
-### Agent 工具分类
+### Agent / 漏洞赏金工具分类
 - `scanner` - 扫描工具
 - `analyzer` - 分析工具
 - `recon` - 信息收集
+- `discovery` - 目标发现
+- `risk` - 风险扫描
+- `vuln` - 漏洞验证
 - `exploit` - 漏洞利用
+- `monitor` - 变更监控
 - `utility` - 实用工具
 - `custom` - 自定义
 
 ## 贡献插件
 
 1. Fork 本仓库
-2. 在 `plugins/traffic/` 或 `plugins/agent/` 创建插件
+2. 在 `plugins/traffic/`、`plugins/agent/` 或 `plugins/bounty/` 创建插件
 3. 在 `plugins.json` 中添加插件信息
 4. 提交 Pull Request
 
