@@ -67,12 +67,12 @@
       "name": "Next.js RCE Scanner",
       "version": "1.0.2",
       "author": "Sentinel Team",
-      "main_category": "bounty",
+      "main_category": "agent",
       "category": "exploit",
       "description": "Detect and exploit Next.js prototype pollution RCE vulnerability",
       "default_severity": "critical",
       "tags": ["nextjs", "rce", "prototype-pollution", "cve", "exploit"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/nextjs_rce_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/nextjs_rce_scanner.ts"
     },
     {
       "id": "subdomain_enumerator",
@@ -223,12 +223,12 @@
       "name": "SSRF Detector",
       "version": "1.2.0",
       "author": "Sentinel Team",
-      "main_category": "bounty",
+      "main_category": "agent",
       "category": "vuln",
       "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, real abortable request timeouts, and strong-signal parameter early stop under bounded concurrency",
       "default_severity": "high",
       "tags": ["ssrf", "vulnerability", "security", "web"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/ssrf_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/ssrf_detector.ts"
     },
     {
       "id": "subdomain_takeover",
@@ -247,48 +247,48 @@
       "name": "CORS Misconfiguration Detector",
       "version": "1.1.1",
       "author": "Sentinel Team",
-      "main_category": "bounty",
+      "main_category": "agent",
       "category": "vuln",
       "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with configurable concurrent origin testing",
       "default_severity": "medium",
       "tags": ["cors", "vulnerability", "security", "web", "headers"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/cors_misconfiguration.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cors_misconfiguration.ts"
     },
     {
       "id": "open_redirect_detector",
       "name": "Open Redirect Detector",
       "version": "1.2.0",
       "author": "Sentinel Team",
-      "main_category": "bounty",
+      "main_category": "agent",
       "category": "vuln",
       "description": "Detect open redirects with deduplicated payloads, abortable request timeouts, bounded concurrency, and parameter-level early stop after confirmed redirect findings",
       "default_severity": "medium",
       "tags": ["redirect", "vulnerability", "security", "web", "phishing"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/open_redirect_detector.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/open_redirect_detector.ts"
     },
     {
       "id": "xss_scanner",
       "name": "XSS Scanner",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "bounty",
+      "main_category": "agent",
       "category": "vuln",
       "description": "Active XSS vulnerability scanner with deduplicated payload sets, bounded concurrency, and parameter-level early stop after a reflected hit to cut redundant requests",
       "default_severity": "high",
       "tags": ["xss", "cross-site-scripting", "vulnerability", "security", "web", "owasp"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/xss_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/xss_scanner.ts"
     },
     {
       "id": "sql_injection_scanner",
       "name": "SQL Injection Scanner",
       "version": "1.1.0",
       "author": "Sentinel Team",
-      "main_category": "bounty",
+      "main_category": "agent",
       "category": "vuln",
       "description": "Active SQL injection scanner with concurrent baseline collection, deduplicated payload sets, bounded concurrency, and parameter-level early stop after a confirmed signal",
       "default_severity": "critical",
       "tags": ["sqli", "sql-injection", "vulnerability", "security", "web", "owasp", "database"],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/sql_injection_scanner.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sql_injection_scanner.ts"
     },
     {
       "id": "cert_monitor",

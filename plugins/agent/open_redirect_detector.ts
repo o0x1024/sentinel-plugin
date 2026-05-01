@@ -5,7 +5,7 @@
  * @name Open Redirect Detector
  * @version 1.2.0
  * @author Sentinel Team
- * @main_category bounty
+ * @main_category agent
  * @category vuln
  * @default_severity medium
  * @tags redirect, vulnerability, security, web, phishing

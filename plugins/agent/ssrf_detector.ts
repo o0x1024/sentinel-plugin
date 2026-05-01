@@ -5,7 +5,7 @@
  * @name SSRF Detector
  * @version 1.2.0
  * @author Sentinel Team
- * @main_category bounty
+ * @main_category agent
  * @category vuln
  * @default_severity high
  * @tags ssrf, vulnerability, security, web

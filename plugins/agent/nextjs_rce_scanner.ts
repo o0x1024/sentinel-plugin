@@ -5,7 +5,7 @@
  * @name Next.js RCE Scanner
  * @version 1.0.0
  * @author Sentinel Team
- * @main_category bounty
+ * @main_category agent
  * @category exploit
  * @default_severity critical
  * @tags nextjs, rce, prototype-pollution, cve
