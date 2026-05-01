@@ -46,22 +46,18 @@ declare const SecurityUtils: {
   randomString: (length: number, charset?: string) => string;
 };
 
-declare function sleep(ms: number): Promise<void>;
-
-// 全局速率限制器（防止过于频繁的请求）
-const GLOBAL_RATE_LIMITER = {
-  lastRequestTime: 0,
-  minInterval: 200, // 最小间隔200ms
-  
-  async wait(): Promise<void> {
-    const now = Date.now();
-    const elapsed = now - this.lastRequestTime;
-    if (elapsed < this.minInterval) {
-      await sleep(this.minInterval - elapsed);
-    }
-    this.lastRequestTime = Date.now();
+declare global {
+  interface RequestInit {
+    activeProbe?: boolean | {
+      target_name?: string;
+      target_path?: string;
+      target_location?: string;
+      probe_value?: string;
+      technique?: string;
+      probeLabel?: string;
+    };
   }
-};
+}
 
 function bytesToString(bytes: number[]): string {
   try {
@@ -146,6 +142,17 @@ function generatePayloads(marker: string): Array<{ payload: string; type: string
       context: 'polyglot'
     },
   ];
+}
+
+function buildActiveProbeMetadata(paramName: string, payload: string, context: string) {
+  return {
+    target_name: paramName,
+    target_path: paramName,
+    target_location: 'query',
+    probe_value: payload,
+    technique: `xss-${context}`,
+    probeLabel: `xss_detector:${context}`,
+  };
 }
 
 // Dangerous patterns indicating reflection without proper encoding
@@ -299,14 +306,13 @@ async function verifyXss(
   
   for (const { payload, type, context } of payloads) {
     try {
-      await GLOBAL_RATE_LIMITER.wait(); // 速率限制
-      
       const testUrl = buildUrlWithPayload(baseUrl, paramName, payload);
       
       const response = await fetch(testUrl, {
         method: 'GET',
         headers: testHeaders,
         timeout: 10000,
+        activeProbe: buildActiveProbeMetadata(paramName, payload, context),
       });
       
       // Skip non-HTML responses
@@ -352,9 +358,6 @@ async function verifyXss(
     } catch (e) {
       Sentinel.log('debug', `XSS test failed for ${paramName}: ${e}`);
     }
-    
-    // Rate limiting
-    await sleep(50);
   }
   
   return {
@@ -509,9 +512,6 @@ export async function scan_transaction(transaction: HttpTransaction): Promise<an
         remediation: 'Implement proper output encoding based on the context (HTML, JavaScript, URL, CSS). Use Content-Security-Policy headers.',
       });
     }
-    
-    // Rate limiting
-    await sleep(100);
   }
   
   Sentinel.log('info', `XSS scan completed: ${request.url}`);
