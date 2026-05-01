@@ -313,15 +313,12 @@ async function fingerprintTarget(
 }
 
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    void concurrency;
+    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
-    const workers = Array.from({ length: Math.max(1, concurrency) }, async () => {
-        while (tasks.length > 0) {
-            const task = tasks.shift();
-            if (!task) break;
-            results.push(await task());
-        }
-    });
-    await Promise.all(workers);
+    for (const task of tasks) {
+        results.push(await task());
+    }
     return results;
 }
 

@@ -215,16 +215,12 @@ function generateId(): string {
 }
 
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    void concurrency;
+    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
-    let index = 0;
-    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
-    const workers = Array.from({ length: workerCount }, async () => {
-        while (index < tasks.length) {
-            const current = index++;
-            results[current] = await tasks[current]();
-        }
-    });
-    await Promise.all(workers);
+    for (const task of tasks) {
+        results.push(await task());
+    }
     return results;
 }
 

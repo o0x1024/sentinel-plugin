@@ -291,19 +291,12 @@ async function executeConcurrently<T, R>(
     concurrency: number,
     executor: (item: T) => Promise<R>
 ): Promise<R[]> {
+    void concurrency;
+    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
     const results: R[] = new Array(items.length);
-    const workerCount = Math.max(1, Math.min(concurrency, items.length || 1));
-    let index = 0;
-
-    const workers = Array.from({ length: workerCount }, async () => {
-        while (index < items.length) {
-            const currentIndex = index;
-            index++;
-            results[currentIndex] = await executor(items[currentIndex]);
-        }
-    });
-
-    await Promise.all(workers);
+    for (let index = 0; index < items.length; index++) {
+        results[index] = await executor(items[index]);
+    }
     return results;
 }
 

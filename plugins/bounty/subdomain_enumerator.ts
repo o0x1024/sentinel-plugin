@@ -2476,19 +2476,12 @@ async function runWithConcurrency<T>(
     tasks: (() => Promise<T>)[],
     concurrency: number
 ): Promise<T[]> {
-    const results: T[] = new Array(tasks.length);
-    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
-    let currentIndex = 0;
-
-    const workers = Array.from({ length: workerCount }, async () => {
-        while (currentIndex < tasks.length) {
-            const taskIndex = currentIndex;
-            currentIndex++;
-            results[taskIndex] = await tasks[taskIndex]();
-        }
-    });
-
-    await Promise.all(workers);
+    void concurrency;
+    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+    const results: T[] = [];
+    for (const task of tasks) {
+        results.push(await task());
+    }
     return results;
 }
 

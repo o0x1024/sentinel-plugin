@@ -321,9 +321,14 @@ async function runInBatches<T>(
     tasks: (() => Promise<T>)[],
     batchSize: number
 ): Promise<void> {
-    for (let i = 0; i < tasks.length; i += batchSize) {
-        const batch = tasks.slice(i, i + batchSize);
-        await Promise.all(batch.map(task => task().catch(() => {})));
+    void batchSize;
+    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+    for (const task of tasks) {
+        try {
+            await task();
+        } catch {
+            // Individual probes are best-effort; keep the existing batch behavior of swallowing failures.
+        }
     }
 }
 

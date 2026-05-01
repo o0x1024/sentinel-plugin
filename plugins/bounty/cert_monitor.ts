@@ -636,16 +636,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }, 1);
         }
 
-        let currentIndex = 0;
-        const workerCount = Math.min(concurrency, normalizedDomains.length);
-        const workers = Array.from({ length: workerCount }, async () => {
-            while (currentIndex < normalizedDomains.length) {
-                const targetIndex = currentIndex;
-                currentIndex++;
-                await processDomain(normalizedDomains[targetIndex], targetIndex);
-            }
-        });
-        await Promise.all(workers);
+        void concurrency;
+        // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+        for (let targetIndex = 0; targetIndex < normalizedDomains.length; targetIndex++) {
+            await processDomain(normalizedDomains[targetIndex], targetIndex);
+        }
 
         await advanceProgress({
             phase: "compare",
