@@ -31,7 +31,6 @@ interface ToolInput {
     body?: string;
     contentType?: string;
     timeout?: number;
-    concurrency?: number;
     userAgent?: string;
     testReflected?: boolean;
     testStored?: boolean;
@@ -202,13 +201,6 @@ export function get_input_schema() {
                 default: 10000,
                 minimum: 1000,
                 maximum: 30000
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent requests",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -490,14 +482,10 @@ function checkSecurityHeaders(headers: Record<string, string>): string[] {
 }
 
 /**
- * Run tasks with concurrency limit
+ * Run tasks sequentially through runtime scheduling
  */
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number
-): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -588,8 +576,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const method = (input.method || "GET").toUpperCase();
         const timeout = input.timeout || 10000;
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+                const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const contentType = input.contentType || "application/x-www-form-urlencoded";
         
         // Extract parameters
@@ -707,8 +694,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         }
         
-        // Execute tests with concurrency
-        const results = await runWithConcurrency(tasks, concurrency);
+        // Execute tests through runtime scheduling
+        const results = await runSequentially(tasks);
         
         // Collect results
         for (const result of results) {

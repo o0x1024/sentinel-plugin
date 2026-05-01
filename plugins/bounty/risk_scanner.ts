@@ -71,7 +71,6 @@ interface ToolInput {
     maxRules?: number;
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     stopOnFirstHit?: boolean;
     variables?: Record<string, any>;
     __monitorExecution?: MonitorExecutionContext;
@@ -224,13 +223,6 @@ export function get_input_schema() {
                 description: "User-Agent header used for outbound requests",
                 default: "Sentinel-Risk-Scanner/2.0"
             },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent rule executions",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 100,
-                maximum: MAX_CONCURRENCY
-            },
             stopOnFirstHit: {
                 type: "boolean",
                 description: "Stop executing more rules after the first positive finding",
@@ -307,9 +299,8 @@ export function get_output_schema() {
 pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -764,7 +755,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
         const timeout = getInputNumber(input, "timeout", "timeout_ms", 3000);
         const userAgent = getInputString(input, "userAgent", "user_agent", "Sentinel-Risk-Scanner/2.0");
-        const concurrency = Math.max(1, Math.min(getInputNumber(input, "concurrency", "concurrency", DEFAULT_CONCURRENCY), MAX_CONCURRENCY));
         const stopOnFirstHit = getInputBoolean(input, "stopOnFirstHit", "stop_on_first_hit", false);
         const normalizedInput: ToolInput = {
             ...input,
@@ -772,7 +762,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             maxRules,
             timeout,
             userAgent,
-            concurrency,
             stopOnFirstHit,
             dictionaryId: getInputString(input, "dictionaryId", "dictionary_id") || input.dictionaryId,
         };
@@ -825,8 +814,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         let stopRequested = false;
         let executedRuleCount = 0;
-        await runWithConcurrency(
-            scanTasks.map(({ target, rule }) => async () => {
+        await runSequentially(scanTasks.map(({ target, rule }) => async () => {
                 if (stopRequested) return;
                 executedRuleCount += 1;
 
@@ -855,9 +843,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 if (stopOnFirstHit) {
                     stopRequested = true;
                 }
-            }),
-            concurrency,
-        );
+            }));
 
         await reportMonitorProgress(monitorExecution, {
             current: totalProgressUnits - 1,

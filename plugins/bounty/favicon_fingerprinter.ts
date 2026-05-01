@@ -24,7 +24,6 @@ interface ToolInput {
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
-    concurrency?: number;
     followRedirects?: boolean;
 }
 
@@ -312,9 +311,8 @@ async function fingerprintTarget(
     }
 }
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -346,13 +344,6 @@ export function get_input_schema() {
                 default: 10000,
                 minimum: 1000,
                 maximum: 60000,
-            },
-            concurrency: {
-                type: "integer",
-                description: "Concurrent favicon fetches",
-                default: 10,
-                minimum: 1,
-                maximum: 50,
             },
             followRedirects: {
                 type: "boolean",
@@ -411,11 +402,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const timeout = Math.max(1000, Math.min(input.timeout || 10000, 60000));
-        const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
-        const rules = await loadRules(input);
+                const rules = await loadRules(input);
 
         const tasks = targets.map((target) => () => fingerprintTarget(target, timeout, input.followRedirects !== false, rules));
-        const fingerprints = await runWithConcurrency(tasks, concurrency);
+        const fingerprints = await runSequentially(tasks);
 
         return {
             success: true,

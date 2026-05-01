@@ -81,7 +81,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
-      "description": "Comprehensive subdomain enumeration using 50 data sources with effective request timeouts, lightweight retry handling for transient failures, worker-pool concurrency, and automatic skipping of unconfigured premium sources in default mode.",
+      "description": "Comprehensive subdomain enumeration using 50 data sources with effective request timeouts, lightweight retry handling for transient failures, runtime-scheduled request pacing, and automatic skipping of unconfigured premium sources in default mode.",
       "default_severity": "info",
       "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint", "certificate-transparency", "threat-intelligence", "passive-dns", "api"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_enumerator.ts"
@@ -141,7 +141,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
-      "description": "Scan web targets for exposed sensitive files using explicit dictionary matchers and negative matchers with concurrent target-rule scanning.",
+      "description": "Scan web targets for exposed sensitive files using explicit dictionary matchers, negative matchers, and runtime-scheduled request pacing.",
       "default_severity": "medium",
       "tags": ["risk", "exposure", "file", "dictionary", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/sensitive_file_scanner.ts"
@@ -201,7 +201,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",
-      "description": "Discover hidden directories, files, and endpoints on web servers with deduplicated word/path queues, normalized extension handling, and bounded request concurrency",
+      "description": "Discover hidden directories, files, and endpoints on web servers with deduplicated word/path queues, normalized extension handling, and runtime-scheduled request pacing",
       "default_severity": "info",
       "tags": ["directory", "bruteforce", "discovery", "fuzzing", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/directory_bruteforcer.ts"
@@ -213,7 +213,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",
-      "description": "Analyze JavaScript files using AST parsing to extract literals, API endpoints, secrets, and domains with lower default concurrency, deduplicated target queues, and bounded nested file-analysis concurrency",
+      "description": "Analyze JavaScript files using AST parsing to extract literals, API endpoints, secrets, and domains with deduplicated target queues and runtime-scheduled request pacing",
       "default_severity": "info",
       "tags": ["javascript", "endpoint", "api", "discovery", "secrets", "ast"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/js_analyzer.ts"
@@ -225,7 +225,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, real abortable request timeouts, and strong-signal parameter early stop under bounded concurrency",
+      "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, real abortable request timeouts, runtime-scheduled request pacing, and strong-signal parameter early stop",
       "default_severity": "high",
       "tags": ["ssrf", "vulnerability", "security", "web"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/ssrf_detector.ts"
@@ -237,7 +237,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "vuln",
-      "description": "Detect potential subdomain takeover vulnerabilities with deduplicated targets, bounded concurrency, and single-fetch HTTP fingerprint evaluation instead of repeated per-service probing",
+      "description": "Detect potential subdomain takeover vulnerabilities with deduplicated targets and single-fetch HTTP fingerprint evaluation instead of repeated per-service probing",
       "default_severity": "high",
       "tags": ["subdomain", "takeover", "dns", "vulnerability", "security"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_takeover.ts"
@@ -249,7 +249,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with configurable concurrent origin testing",
+      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with runtime-scheduled origin testing",
       "default_severity": "medium",
       "tags": ["cors", "vulnerability", "security", "web", "headers"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/cors_misconfiguration.ts"
@@ -261,7 +261,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Detect open redirects with deduplicated payloads, abortable request timeouts, bounded concurrency, and parameter-level early stop after confirmed redirect findings",
+      "description": "Detect open redirects with deduplicated payloads, abortable request timeouts, runtime-scheduled request pacing, and parameter-level early stop after confirmed redirect findings",
       "default_severity": "medium",
       "tags": ["redirect", "vulnerability", "security", "web", "phishing"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/open_redirect_detector.ts"
@@ -273,7 +273,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Active XSS vulnerability scanner with deduplicated payload sets, bounded concurrency, and parameter-level early stop after a reflected hit to cut redundant requests",
+      "description": "Active XSS vulnerability scanner with deduplicated payload sets, runtime-scheduled request pacing, and parameter-level early stop after a reflected hit to cut redundant requests",
       "default_severity": "high",
       "tags": ["xss", "cross-site-scripting", "vulnerability", "security", "web", "owasp"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/xss_scanner.ts"
@@ -285,7 +285,7 @@
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
-      "description": "Active SQL injection scanner with concurrent baseline collection, deduplicated payload sets, bounded concurrency, and parameter-level early stop after a confirmed signal",
+      "description": "Active SQL injection scanner with sequential baseline collection, deduplicated payload sets, runtime-scheduled request pacing, and parameter-level early stop after a confirmed signal",
       "default_severity": "critical",
       "tags": ["sqli", "sql-injection", "vulnerability", "security", "web", "owasp", "database"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/sql_injection_scanner.ts"
@@ -309,7 +309,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
-      "description": "Monitor web pages for content changes using hash fingerprinting, generating ChangeEvents for workflow automation with configurable concurrent target scanning",
+      "description": "Monitor web pages for content changes using hash fingerprinting and runtime-scheduled request pacing, generating ChangeEvents for workflow automation",
       "default_severity": "low",
       "tags": ["content", "monitor", "change-detection", "fingerprint", "hash"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/content_monitor.ts"

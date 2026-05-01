@@ -15,7 +15,6 @@
 interface ToolInput {
     domain: string;
     sources?: string[];
-    concurrency?: number;
     timeout?: number;
     removeDuplicates?: boolean;
     apiConfig?: ApiConfig;
@@ -266,13 +265,6 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: `Data sources to query. Available: ${AVAILABLE_SOURCES.join(", ")}. Default: all sources`,
                 default: [...AVAILABLE_SOURCES]
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent requests",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
             },
             timeout: {
                 type: "integer",
@@ -2470,14 +2462,10 @@ async function querySource(
 }
 
 /**
- * Run tasks with concurrency limit
+ * Run tasks sequentially through runtime scheduling
  */
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number
-): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -2507,8 +2495,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const timeout = Math.max(5000, Math.min(input.timeout || DEFAULT_TIMEOUT, 120000));
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const removeDuplicates = input.removeDuplicates !== false;
+                const removeDuplicates = input.removeDuplicates !== false;
         const requestedSourceList = Array.isArray(input.sources) ? input.sources : [];
         const requestedSources = requestedSourceList.length > 0;
         const skippedSources: DataSource[] = [];
@@ -2541,7 +2528,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         sources = prioritizeSources(sources);
         const tasks = sources.map(source => () => querySource(source, domain, timeout, input.apiConfig));
-        const sourceResults = await runWithConcurrency(tasks, concurrency);
+        const sourceResults = await runSequentially(tasks);
         
         const allSubdomains: string[] = [];
         let sourcesSucceeded = 0;

@@ -70,7 +70,6 @@ interface ToolInput {
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     maxTargets?: number;
     __monitorExecution?: MonitorExecutionContext;
 }
@@ -213,13 +212,6 @@ export function get_input_schema() {
                 description: "User-Agent header used when requesting candidate files",
                 default: "Sentinel-Sensitive-File-Scanner/1.0"
             },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent file probes",
-                default: 100,
-                minimum: 100,
-                maximum: 500
-            },
             maxTargets: {
                 type: "integer",
                 description: "Optional maximum number of normalized targets to scan",
@@ -303,9 +295,8 @@ export function get_output_schema() {
 pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -601,8 +592,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const timeout = Number(input.timeout || 3000);
         const userAgent = input.userAgent || "Sentinel-Sensitive-File-Scanner/1.0";
-        const concurrency = Math.max(1, Math.min(Number(input.concurrency || 50), 50));
-        const normalizedTargets = Array.from(new Set([
+                const normalizedTargets = Array.from(new Set([
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
             ...(Array.isArray(input.targets) ? input.targets.map(normalizeTarget) : []),
@@ -658,8 +648,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             statusBuckets: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, other: 0 },
         };
         let completedTargets = 0;
-        await runWithConcurrency(
-            targets.map((target) => async () => {
+        await runSequentially(targets.map((target) => async () => {
                 try {
                     const baseline = await buildTargetBaseline(target, timeout, userAgent);
                     for (const preparedRule of preparedRules) {
@@ -752,9 +741,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         message: `Scanning sensitive files on ${target}`,
                     });
                 }
-            }),
-            concurrency,
-        );
+            }));
 
         await reportMonitorProgress(monitorExecution, {
             current: targets.length + 1,

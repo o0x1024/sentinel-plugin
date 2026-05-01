@@ -23,7 +23,6 @@ declare const Sentinel: {
             rules?: Array<{ id?: string; word: string; category?: string | null; metadata?: any }>;
             dictionaryId?: string;
             timeoutMs?: number;
-            concurrency?: number;
             followHttpRedirects?: boolean;
             readBanner?: boolean;
             engine?: string;
@@ -70,7 +69,6 @@ interface ToolInput {
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
-    concurrency?: number;
     followHttpRedirects?: boolean;
     readBanner?: boolean;
     serviceProbeEngine?: string;
@@ -516,9 +514,8 @@ async function fingerprintTcp(
     }
 }
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -628,7 +625,6 @@ async function probeServicesWithNativeEngine(
     dictionaryId: string | null,
     rules: RuleEntry[],
     timeout: number,
-    concurrency: number,
     followHttpRedirects: boolean,
     readBanner: boolean,
     engine: string,
@@ -647,7 +643,6 @@ async function probeServicesWithNativeEngine(
         rules,
         dictionaryId: dictionaryId || undefined,
         timeoutMs: timeout,
-        concurrency,
         followHttpRedirects,
         readBanner,
         engine,
@@ -695,12 +690,6 @@ export function get_input_schema() {
                 default: 3000,
                 minimum: 1000,
                 maximum: 30000,
-            },
-            concurrency: {
-                type: "integer",
-                default: 10,
-                minimum: 1,
-                maximum: 50,
             },
             followHttpRedirects: {
                 type: "boolean",
@@ -774,7 +763,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const timeout = Math.max(1000, Math.min(input.timeout || 3000, 10000));
-        const concurrency = Math.max(1, Math.min(input.concurrency || 200, 500));
         const followHttpRedirects = input.followHttpRedirects !== false;
         const readBanner = input.readBanner === true;
         const monitorExecution = input.__monitorExecution;
@@ -789,7 +777,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             dictionaryId,
             explicitRules,
             timeout,
-            concurrency,
             followHttpRedirects,
             readBanner,
             requestedProbeEngine.used,
@@ -866,7 +853,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 }
             });
 
-            results = await runWithConcurrency(tasks, concurrency);
+            results = await runSequentially(tasks);
         }
 
         await reportMonitorProgress(monitorExecution, {

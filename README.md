@@ -79,7 +79,6 @@ Sentinel plugins run in a Deno-based JavaScript/TypeScript runtime with full Web
 | `timeout(promise, ms)` | Promise timeout wrapper |
 | `retry(fn, options)` | Retry with exponential backoff |
 | `chunk(array, size)` | Split array into chunks |
-| `parallelLimit(tasks, limit)` | Parallel execution with concurrency limit |
 
 #### Security Testing Utilities (`SecurityUtils`)
 
@@ -398,20 +397,12 @@ globalThis.analyze = analyze;
       "items": { "type": "string" },
       "description": "List of URLs or hosts to scan"
     },
-    "concurrency": {
-      "type": "integer",
-      "default": 10,
-      "minimum": 1,
-      "maximum": 100,
-      "description": "Number of concurrent requests"
-    }
   }
 }
 */
 
 interface ToolInput {
   targets: string[];
-  concurrency?: number;
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {

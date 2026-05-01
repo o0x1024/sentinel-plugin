@@ -15,7 +15,6 @@
 interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
     timeout?: number;
-    concurrency?: number;
     checkExpiry?: boolean;
     expiryWarningDays?: number;  // Warn if expiring within N days
     previousSnapshots?: Record<string, CertSnapshot>;  // Previous state for comparison
@@ -205,13 +204,6 @@ export function get_input_schema() {
                 default: 10000,
                 minimum: 5000,
                 maximum: 60000
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent certificate checks",
-                default: 20,
-                minimum: 1,
-                maximum: 100
             },
             checkExpiry: {
                 type: "boolean",
@@ -410,7 +402,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const timeout = input.timeout || 10000;
-        const concurrency = Math.max(1, Math.min(input.concurrency || 20, 100));
         const checkExpiry = input.checkExpiry !== false;
         const expiryWarningDays = input.expiryWarningDays || 30;
         const previousSnapshots = input.previousSnapshots || {};
@@ -636,8 +627,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }, 1);
         }
 
-        void concurrency;
-        // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+        // Rust controls request pacing; plugins only submit work to the runtime queue.
         for (let targetIndex = 0; targetIndex < normalizedDomains.length; targetIndex++) {
             await processDomain(normalizedDomains[targetIndex], targetIndex);
         }

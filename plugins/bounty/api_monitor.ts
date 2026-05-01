@@ -69,7 +69,6 @@ interface ToolInput {
     targets: string[];  // Base URLs or JS files to analyze
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     crawlDepth?: number;
     maxJsFiles?: number;
     includeSameOriginOnly?: boolean;
@@ -214,9 +213,8 @@ function generateId(): string {
     });
 }
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -1211,7 +1209,6 @@ async function discoverJavascriptAssets(
     includeSameOriginOnly: boolean,
     followSourceMaps: boolean,
     probeSpaManifests: boolean,
-    concurrency: number,
 ): Promise<JsDiscoveryResult> {
     const jsLinks: JsLink[] = [];
     const scriptContents: ScriptContentSource[] = [];
@@ -1266,13 +1263,10 @@ async function discoverJavascriptAssets(
     }
 
     if (probeSpaManifests && jsLinks.length < maxJsFiles) {
-        const manifestResults = await runWithConcurrency(
-            getManifestUrls(baseUrl).map(manifestUrl => async () => ({
+        const manifestResults = await runSequentially(getManifestUrls(baseUrl).map(manifestUrl => async () => ({
                 manifestUrl,
                 result: await fetchWithTimeout(manifestUrl, timeout, userAgent, "application/json,*/*"),
-            })),
-            Math.min(3, concurrency),
-        );
+            })));
 
         for (const { manifestUrl, result } of manifestResults) {
             if (!result || !result.ok || !result.contentType.includes("json")) {
@@ -1291,9 +1285,8 @@ async function discoverJavascriptAssets(
         const visitedScriptUrls = new Set<string>();
 
         while (jsFetchQueue.length > 0 && scriptContents.length < maxJsFiles * 2) {
-            const batch = jsFetchQueue.splice(0, concurrency);
-            const batchResults = await runWithConcurrency(
-                batch.map(link => async () => ({
+            const batch = jsFetchQueue.splice(0, 1);
+            const batchResults = await runSequentially(batch.map(link => async () => ({
                     link,
                     result: await fetchWithTimeout(
                         link.url,
@@ -1303,9 +1296,7 @@ async function discoverJavascriptAssets(
                             ? "application/json,text/plain,*/*"
                             : "application/javascript,text/javascript,text/plain,*/*",
                     ),
-                })),
-                Math.min(concurrency, batch.length || 1),
-            );
+                })));
 
             for (const { link, result } of batchResults) {
                 if (visitedScriptUrls.has(link.url)) {
@@ -1406,13 +1397,6 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of targets to scan concurrently",
-                default: 200,
-                minimum: 200,
-                maximum: 500
             },
             crawlDepth: {
                 type: "integer",
@@ -1559,7 +1543,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const timeout = Math.max(3000, Math.min(input.timeout || 3000, 5000));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || 200, 500));
         const crawlDepth = input.crawlDepth ?? 1;
         const maxJsFiles = Math.max(10, Math.min(input.maxJsFiles || DEFAULT_MAX_JS_FILES, 300));
         const includeSameOriginOnly = input.includeSameOriginOnly === true;
@@ -1626,7 +1609,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
                 const pageContent = canAnalyzePageResponse(pageResult) ? pageResult.text : "";
                 const directJsTarget = Boolean(pageContent) && (looksLikeJs(baseUrl) || pageResult.contentType.includes("javascript"));
-                const scriptSources = !pageContent ? [] : directJsTarget ? [{ source: baseUrl, content: pageContent }] : (await discoverJavascriptAssets(baseUrl, pageContent, timeout, userAgent, crawlDepth, maxJsFiles, includeSameOriginOnly, followSourceMaps, probeSpaManifests, concurrency)).scriptContents;
+                const scriptSources = !pageContent ? [] : directJsTarget ? [{ source: baseUrl, content: pageContent }] : (await discoverJavascriptAssets(baseUrl, pageContent, timeout, userAgent, crawlDepth, maxJsFiles, includeSameOriginOnly, followSourceMaps, probeSpaManifests)).scriptContents;
 
                 jsFilesAnalyzed = directJsTarget
                     ? 1
@@ -1646,8 +1629,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 const urlObj = new URL(baseUrl);
                 // Check GraphQL
                 if (includeGraphQL) {
-                    const graphqlMatches = await runWithConcurrency(
-                        ["/graphql", "/gql", "/api/graphql"].map((gqlPath) => async () => {
+                    const graphqlMatches = await runSequentially(["/graphql", "/gql", "/api/graphql"].map((gqlPath) => async () => {
                             try {
                                 const gqlUrl = `${urlObj.origin}${gqlPath}`;
                                 const gqlResponse = await fetchHttpProbe(
@@ -1676,9 +1658,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                                 // GraphQL not available
                             }
                             return null;
-                        }),
-                        concurrency,
-                    );
+                        }));
 
                     const discoveredGraphql = graphqlMatches.find((value): value is {
                         path: string;
@@ -1717,12 +1697,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     }
                 }
                 
-                const enrichedEndpoints = await runWithConcurrency(
-                    uniqueEndpoints.map((endpoint) => async () =>
+                const enrichedEndpoints = await runSequentially(uniqueEndpoints.map((endpoint) => async () =>
                         captureEndpointResponse(endpoint, baseUrl, timeout, userAgent)
-                    ),
-                    Math.max(1, Math.min(concurrency, 25)),
-                );
+                    ));
 
                 totalEndpoints += enrichedEndpoints.length;
                 
@@ -1892,7 +1869,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             });
         });
 
-        await runWithConcurrency(targetTasks, concurrency);
+        await runSequentially(targetTasks);
 
         await reportMonitorProgress(monitorExecution, {
             current: validTargets.length + 1,

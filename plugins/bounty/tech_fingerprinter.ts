@@ -28,7 +28,6 @@ interface ToolInput {
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     maxTargets?: number;
     previousSnapshots?: Record<string, TechnologySnapshot>;
 }
@@ -116,7 +115,6 @@ export function get_input_schema() {
             dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
             timeout: { type: "integer", default: 10000, minimum: 1000, maximum: 60000 },
             userAgent: { type: "string", default: "Sentinel-Tech-Fingerprinter/2.0" },
-            concurrency: { type: "integer", default: 5, minimum: 1, maximum: 20 },
             maxTargets: { type: "integer", default: 20, minimum: 1, maximum: 200 },
             previousSnapshots: { type: "object", description: "Previous technology snapshots keyed by target URL" },
         },
@@ -159,9 +157,8 @@ export function get_output_schema() {
 pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -385,8 +382,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         const timeout = Number(input.timeout || 10000);
         const userAgent = input.userAgent || "Sentinel-Tech-Fingerprinter/2.0";
-        const concurrency = Math.max(1, Math.min(Number(input.concurrency || 5), 20));
-        const targets = Array.from(new Set([
+                const targets = Array.from(new Set([
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
             ...(Array.isArray(input.targets) ? input.targets.map(normalizeTarget) : []),
@@ -410,8 +406,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const snapshots: Record<string, TechnologySnapshot> = {};
         const timestamp = new Date().toISOString();
 
-        await runWithConcurrency(
-            targets.map((target) => async () => {
+        await runSequentially(targets.map((target) => async () => {
                 try {
                     const response = await fetchWithTimeout(target, timeout, userAgent);
                     const body = await response.text();
@@ -518,9 +513,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     };
                     results.push({ url: target, technologies: [] });
                 }
-            }),
-            concurrency,
-        );
+            }));
 
         const uniqueTechnologies = Array.from(
             new Map(

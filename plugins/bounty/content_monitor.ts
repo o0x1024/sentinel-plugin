@@ -16,7 +16,6 @@ interface ToolInput {
     targets: string[];  // List of URLs to monitor
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     includeHeaders?: boolean;
     excludePatterns?: string[];  // Patterns to exclude from hash (e.g., timestamps)
     previousSnapshots?: Record<string, ContentSnapshot>;
@@ -132,9 +131,8 @@ function generateId(): string {
     });
 }
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -245,13 +243,6 @@ export function get_input_schema() {
                 type: "string",
                 description: "Custom User-Agent header"
             },
-            concurrency: {
-                type: "integer",
-                description: "Number of targets to monitor concurrently",
-                default: 5,
-                minimum: 1,
-                maximum: 20
-            },
             includeHeaders: {
                 type: "boolean",
                 description: "Include response headers in snapshot",
@@ -340,8 +331,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || 5, 20));
-        const includeHeaders = input.includeHeaders || false;
+                const includeHeaders = input.includeHeaders || false;
         const excludePatterns = input.excludePatterns || [];
         const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
@@ -559,7 +549,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             });
         });
 
-        await runWithConcurrency(targetTasks, concurrency);
+        await runSequentially(targetTasks);
 
         await reportMonitorProgress(monitorExecution, {
             current: validTargets.length + 1,

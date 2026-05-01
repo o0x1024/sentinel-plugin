@@ -18,7 +18,6 @@ interface ToolInput {
     headers?: Record<string, string>;
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     testOrigins?: string[];
     checkCredentials?: boolean;
     checkWildcard?: boolean;
@@ -79,9 +78,8 @@ const TEST_TYPES = {
     credentials_with_reflected: "Credentials allowed with reflected origin",
 };
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -122,13 +120,6 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent CORS test cases",
-                default: 8,
-                minimum: 1,
-                maximum: 30
             },
             testOrigins: {
                 type: "array",
@@ -531,8 +522,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || 8, 30));
-        const checkCredentials = input.checkCredentials !== false;
+                const checkCredentials = input.checkCredentials !== false;
         const checkWildcard = input.checkWildcard !== false;
         const checkNullOrigin = input.checkNullOrigin !== false;
         const checkSubdomains = input.checkSubdomains !== false;
@@ -596,16 +586,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Test each origin
-        tests.push(...await runWithConcurrency(
-            testOrigins.map(({ origin, testType }) => async () => {
+        tests.push(...await runSequentially(testOrigins.map(({ origin, testType }) => async () => {
                 return await testCors(url, origin, testType, {
                     method,
                     headers,
                     timeout,
                 });
-            }),
-            concurrency,
-        ));
+            })));
         
         // Test preflight
         const preflightResult = await testPreflight(url, "https://evil.com", {

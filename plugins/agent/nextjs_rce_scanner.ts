@@ -1,6 +1,6 @@
 /**
  * Next.js Prototype Pollution RCE Scanner
- * 
+ *
  * @plugin nextjs_rce_scanner
  * @name Next.js RCE Scanner
  * @version 1.0.0
@@ -19,7 +19,6 @@ interface ToolInput {
     targets: string[];
     command?: string;
     detectOnly?: boolean;
-    concurrency?: number;
     timeout?: number;
 }
 
@@ -37,7 +36,6 @@ interface ToolOutput {
             total: number;
             vulnerable: number;
             scanned: number;
-            concurrency: number;
         };
     };
     error?: string;
@@ -53,7 +51,7 @@ const pluginGlobals = globalThis as PluginGlobals;
 
 /**
  * 【方案2】导出参数 Schema 函数
- * 
+ *
  * 插件自己定义需要的参数，引擎加载后调用此函数获取。
  */
 export function get_input_schema() {
@@ -75,13 +73,6 @@ export function get_input_schema() {
                 type: "boolean",
                 description: "是否只检测不执行命令（true=仅检测，false=执行命令）",
                 default: false
-            },
-            concurrency: {
-                type: "integer",
-                description: "并发请求数",
-                default: 5,
-                minimum: 1,
-                maximum: 50
             },
             timeout: {
                 type: "integer",
@@ -315,19 +306,15 @@ function normalizeTargetUrls(target: string): string[] {
 }
 
 /**
- * Simple batch executor with concurrency control
+ * Simple sequential runtime-scheduled executor
  */
-async function runInBatches<T>(
-    tasks: (() => Promise<T>)[],
-    batchSize: number
-): Promise<void> {
-    void batchSize;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: (() => Promise<T>)[]): Promise<void> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     for (const task of tasks) {
         try {
             await task();
         } catch {
-            // Individual probes are best-effort; keep the existing batch behavior of swallowing failures.
+            // Individual probes are best-effort; keep the existing behavior of swallowing failures.
         }
     }
 }
@@ -344,7 +331,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 error: "Invalid input: targets parameter is required and must be an array"
             };
         }
-        
+
         // Filter out empty strings
         const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
         if (validTargets.length === 0) {
@@ -358,7 +345,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const command = input.command || 'id';
         const timeout = input.timeout || 5000;
         const detectOnly = input.detectOnly || false;
-        const concurrency = input.concurrency || 5;
 
         const results: Array<{
             url: string;
@@ -427,14 +413,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const tasks = targets.map(target => () => scanTarget(target));
 
         // Execute in batches
-        await runInBatches(tasks, concurrency);
+        await runSequentially(tasks);
 
         // Generate summary
         const summary = {
             total: targets.length,
             vulnerable: results.length,
             scanned: scannedCount,
-            concurrency: concurrency
         };
 
         return {

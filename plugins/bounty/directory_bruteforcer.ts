@@ -28,7 +28,6 @@ interface ToolInput {
     dictionaryId?: string;  // Use dictionary from DB by ID or name
     extensions?: string[];
     timeout?: number;
-    concurrency?: number;
     userAgent?: string;
     followRedirects?: boolean;
     statusCodes?: number[];
@@ -176,13 +175,6 @@ export function get_input_schema() {
                 default: 10000,
                 minimum: 1000,
                 maximum: 30000
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent requests",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -340,15 +332,10 @@ async function probePath(
 }
 
 /**
- * Run tasks with concurrency limit
+ * Run tasks sequentially through runtime scheduling
  */
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number,
-    onProgress?: (completed: number, total: number) => void
-): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -377,8 +364,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const timeout = input.timeout || 10000;
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+                const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const followRedirects = input.followRedirects === true;
         const statusCodes = input.statusCodes || [200, 201, 204, 301, 302, 307, 308, 401, 403];
         const excludeStatusCodes = input.excludeStatusCodes || [];
@@ -436,8 +422,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             followRedirects,
         }));
         
-        // Execute with concurrency
-        const results = await runWithConcurrency(tasks, concurrency);
+        // Execute through runtime scheduling
+        const results = await runSequentially(tasks);
         
         // Filter results
         const discovered: DiscoveredPath[] = [];

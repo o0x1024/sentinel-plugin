@@ -19,7 +19,6 @@ interface ToolInput {
     headers?: Record<string, string>;
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     followRedirects?: boolean;
     targetDomain?: string;
     testAllParams?: boolean;
@@ -175,9 +174,8 @@ const REDIRECT_PARAM_NAMES = [
 const DEFAULT_CONCURRENCY = 6;
 const MAX_CONCURRENCY = 20;
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -223,13 +221,6 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent redirect test cases",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
             },
             followRedirects: {
                 type: "boolean",
@@ -577,8 +568,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const followRedirects = input.followRedirects === true;
+                const followRedirects = input.followRedirects === true;
         const testAllParams = input.testAllParams === true;
         const originalDomain = extractDomain(input.url);
         const targetDomain = input.targetDomain || originalDomain;
@@ -638,7 +628,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 });
             }
         }
-        const tests = (await runWithConcurrency(payloadTasks, concurrency))
+        const tests = (await runSequentially(payloadTasks))
             .filter((test): test is RedirectTest => Boolean(test));
         
         // Build summary

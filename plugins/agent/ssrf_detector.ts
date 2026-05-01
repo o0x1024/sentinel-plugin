@@ -20,7 +20,6 @@ interface ToolInput {
     body?: string;
     timeout?: number;
     userAgent?: string;
-    concurrency?: number;
     callbackUrl?: string;
     testInternal?: boolean;
     testCloud?: boolean;
@@ -197,9 +196,8 @@ const SSRF_INDICATORS = [
 const DEFAULT_CONCURRENCY = 6;
 const MAX_CONCURRENCY = 16;
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -249,13 +247,6 @@ export function get_input_schema() {
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent SSRF test cases",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
             },
             callbackUrl: {
                 type: "string",
@@ -518,8 +509,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const method = input.method || "GET";
         const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const testInternal = input.testInternal !== false;
+                const testInternal = input.testInternal !== false;
         const testCloud = input.testCloud !== false;
         const testProtocols = input.testProtocols !== false;
         
@@ -616,7 +606,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 });
             }
         }
-        const tests = (await runWithConcurrency(payloadTasks, concurrency))
+        const tests = (await runSequentially(payloadTasks))
             .filter((test): test is SsrfTest => Boolean(test));
         
         // Build summary

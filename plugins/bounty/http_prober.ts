@@ -18,7 +18,6 @@ interface ToolInput {
     service_targets?: Array<string | ServiceLikeTarget>;
     ports?: number[];
     timeout?: number;
-    concurrency?: number;
     followRedirects?: boolean;
     maxRedirects?: number;
     userAgent?: string;
@@ -242,13 +241,6 @@ export function get_input_schema() {
                 default: DEFAULT_TIMEOUT,
                 minimum: 1000,
                 maximum: 60000
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent requests",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
             },
             followRedirects: {
                 type: "boolean",
@@ -832,14 +824,10 @@ async function probeUrl(
 }
 
 /**
- * Run tasks with concurrency limit
+ * Run tasks sequentially through runtime scheduling
  */
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number
-): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -994,9 +982,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const timeout = input.timeout || DEFAULT_TIMEOUT;
-        const rawConcurrency = typeof input.concurrency === "number" ? Math.trunc(input.concurrency) : DEFAULT_CONCURRENCY;
-        const concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, rawConcurrency));
-        const followRedirects = input.followRedirects !== false;
+                const followRedirects = input.followRedirects !== false;
         const maxRedirects = input.maxRedirects || DEFAULT_MAX_REDIRECTS;
         const userAgent = input.userAgent || DEFAULT_USER_AGENT;
         const extractTitle = input.extractTitle !== false;
@@ -1055,7 +1041,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         });
         
-        const results = await runWithConcurrency(tasks, concurrency);
+        const results = await runSequentially(tasks);
         await reportMonitorProgress(monitorExecution, {
             current: uniqueUrls.length + 1,
             total: totalProgressUnits,

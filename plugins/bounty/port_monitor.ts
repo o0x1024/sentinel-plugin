@@ -18,7 +18,6 @@ interface ToolInput {
     service_targets?: Array<string | ServiceTarget>;
     ports?: number[];   // Specific ports to scan (default: common ports)
     timeout?: number;
-    concurrency?: number;
     detectService?: boolean;
     previousSnapshots?: Record<string, PortSnapshot>;
     __monitorExecution?: MonitorExecutionContext;
@@ -341,13 +340,6 @@ export function get_input_schema() {
                 minimum: 1000,
                 maximum: 30000
             },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent target scans",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
-            },
             detectService: {
                 type: "boolean",
                 description: "Reserved for compatibility; service fingerprinting is handled by dedicated service plugins",
@@ -427,7 +419,6 @@ async function scanPortsWithNativeEngine(
     targets: NativePortScanTarget[],
     defaultPorts: number[],
     timeout: number,
-    concurrency: number,
     monitorExecution?: MonitorExecutionContext
 ): Promise<NativePortScanResponse> {
     if (typeof Sentinel === "undefined" || !Sentinel.Network || typeof Sentinel.Network.scanPorts !== "function") {
@@ -438,7 +429,6 @@ async function scanPortsWithNativeEngine(
         targets,
         ports: defaultPorts,
         timeout_ms: timeout,
-        concurrency,
         tries: 1,
         monitor_progress: monitorExecution ? {
             taskId: monitorExecution.task_id,
@@ -493,8 +483,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const validTargets = [...targetPortMap.keys()];
         const defaultPorts = [...new Set(input.ports || COMMON_PORTS)].sort((left, right) => left - right);
         const timeout = input.timeout || 1500;
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
-        const previousSnapshots = input.previousSnapshots || {};
+                const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
         
         const results: PortResult[] = [];
@@ -514,7 +503,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             nativeTargets,
             defaultPorts,
             timeout,
-            concurrency,
             monitorExecution,
         );
         if (!nativeScan.success && (!nativeScan.results || nativeScan.results.length === 0)) {

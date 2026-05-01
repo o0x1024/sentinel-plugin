@@ -57,7 +57,6 @@ interface ToolInput {
     targets: string[];
     recordTypes?: RecordType[];
     timeout?: number;
-    concurrency?: number;
     previousSnapshots?: Record<string, DnsSnapshot>;
     __monitorExecution?: MonitorExecutionContext;
 }
@@ -213,9 +212,8 @@ async function queryDoh(name: string, recordType: RecordType, timeout: number): 
     return [];
 }
 
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -324,13 +322,6 @@ export function get_input_schema() {
                 minimum: 1000,
                 maximum: 60000,
             },
-            concurrency: {
-                type: "integer",
-                description: "Concurrent DNS queries",
-                default: 10,
-                minimum: 1,
-                maximum: 50,
-            },
             previousSnapshots: {
                 type: "object",
                 description: "Previous DNS snapshots keyed by target for change detection",
@@ -392,8 +383,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const timeout = Math.max(1000, Math.min(input.timeout || 10000, 60000));
-        const concurrency = Math.max(1, Math.min(input.concurrency || 10, 50));
-        const recordTypes = (input.recordTypes?.length ? input.recordTypes : DEFAULT_RECORD_TYPES)
+                const recordTypes = (input.recordTypes?.length ? input.recordTypes : DEFAULT_RECORD_TYPES)
             .filter((type): type is RecordType => type in DNS_TYPE_CODES);
         const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
@@ -447,7 +437,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         });
 
-        const results = await runWithConcurrency(tasks, concurrency);
+        const results = await runSequentially(tasks);
         await reportMonitorProgress(monitorExecution, {
             current: targets.length + 1,
             total: totalProgressUnits,

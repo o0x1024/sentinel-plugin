@@ -31,7 +31,6 @@ interface ToolInput {
     body?: string;
     contentType?: string;
     timeout?: number;
-    concurrency?: number;
     userAgent?: string;
     testErrorBased?: boolean;
     testBlind?: boolean;
@@ -323,13 +322,6 @@ export function get_input_schema() {
                 minimum: 5000,
                 maximum: 60000
             },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent requests",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
-            },
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
@@ -582,14 +574,10 @@ function compareResponses(baseline: string, test: string): number {
 }
 
 /**
- * Run tasks with concurrency limit
+ * Run tasks sequentially through runtime scheduling
  */
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number
-): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: T[] = [];
     for (const task of tasks) {
         results.push(await task());
@@ -691,7 +679,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         const method = (input.method || "GET").toUpperCase();
         const timeout = input.timeout || 15000;
-        const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const contentType = input.contentType || "application/x-www-form-urlencoded";
         const timeThreshold = input.timeThreshold || 5000;
@@ -725,8 +712,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         // Get baseline response for each parameter
         const baselines = new Map<string, { body: string; time: number }>();
 
-        await runWithConcurrency(
-            Array.from(params.entries()).map(([paramName, { value, location }]) => async () => {
+        await runSequentially(Array.from(params.entries()).map(([paramName, { value, location }]) => async () => {
                 try {
                     let testUrl = baseUrl;
                     let testBody = input.body;
@@ -761,9 +747,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     // Ignore baseline errors
                 }
                 return null;
-            }),
-            Math.min(concurrency, MAX_BASELINE_CONCURRENCY),
-        );
+            }));
         
         // Create test tasks
         const tasks: (() => Promise<SqliTest | null>)[] = [];
@@ -892,8 +876,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         }
         
-        // Execute tests with concurrency
-        const results = await runWithConcurrency(tasks, concurrency);
+        // Execute tests through runtime scheduling
+        const results = await runSequentially(tasks);
         
         // Collect results
         for (const result of results) {

@@ -398,20 +398,12 @@ globalThis.analyze = analyze;
       "items": { "type": "string" },
       "description": "要扫描的 URL 或主机列表"
     },
-    "concurrency": {
-      "type": "integer",
-      "default": 10,
-      "minimum": 1,
-      "maximum": 100,
-      "description": "并发请求数"
-    }
   }
 }
 */
 
 interface ToolInput {
   targets: string[];
-  concurrency?: number;
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
