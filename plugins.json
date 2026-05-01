@@ -39,6 +39,30 @@
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/traffic/sensitive_info_detector.ts"
     },
     {
+      "id": "intruder_dictionary_payload_generator",
+      "name": "Intruder Dictionary Payload Generator",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "intruder",
+      "category": "payload_generator",
+      "description": "Generate deduplicated Intruder payloads from built-in presets, custom values, and lightweight local mutations.",
+      "default_severity": "info",
+      "tags": ["intruder", "payload", "generator", "dictionary"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/intruder/intruder_dictionary_payload_generator.ts"
+    },
+    {
+      "id": "intruder_hmac_request_signer",
+      "name": "Intruder HMAC Request Signer",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "intruder",
+      "category": "request_processor",
+      "description": "Sign Intruder requests locally with an HMAC header after payload substitution and before dispatch.",
+      "default_severity": "info",
+      "tags": ["intruder", "request-processor", "hmac", "signing"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/intruder/intruder_hmac_request_signer.ts"
+    },
+    {
       "id": "nextjs_rce_scanner",
       "name": "Next.js RCE Scanner",
       "version": "1.0.2",

@@ -24,7 +24,8 @@ sentinel-plugin/
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
     ├── agent/             # 通用 Agent 工具插件
-    └── bounty/            # 漏洞赏金插件
+    ├── bounty/            # 漏洞赏金插件
+    └── intruder/          # Intruder payload 和请求处理插件
         ├── subdomain_enumerator.ts
         └── api_monitor.ts
 ```
@@ -496,7 +497,7 @@ Sentinel.emitFinding({
 ## 贡献插件
 
 1. Fork 本仓库
-2. 在 `plugins/traffic/`、`plugins/agent/` 或 `plugins/bounty/` 创建插件
+2. 在 `plugins/traffic/`、`plugins/agent/`、`plugins/bounty/` 或 `plugins/intruder/` 创建插件
 3. 在 `plugins.json` 中添加插件信息
 4. 提交 Pull Request
 

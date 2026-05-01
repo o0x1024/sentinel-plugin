@@ -24,7 +24,8 @@ sentinel-plugin/
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
     ├── agent/             # General agent tool plugins
-    └── bounty/            # Bug bounty plugins
+    ├── bounty/            # Bug bounty plugins
+    └── intruder/          # Intruder payload and request processor plugins
         ├── subdomain_enumerator.ts
         └── api_monitor.ts
 ```
@@ -496,7 +497,7 @@ Sentinel.emitFinding({
 ## Contributing
 
 1. Fork this repository
-2. Create your plugin in `plugins/traffic/`, `plugins/agent/`, or `plugins/bounty/`
+2. Create your plugin in `plugins/traffic/`, `plugins/agent/`, `plugins/bounty/`, or `plugins/intruder/`
 3. Add your plugin entry to `plugins.json`
 4. Submit a Pull Request
 
