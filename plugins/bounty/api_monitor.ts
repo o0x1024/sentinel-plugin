@@ -8,8 +8,8 @@
  * @main_category bounty
  * @category monitor
  * @default_severity high
- * @tags api, endpoint, monitor, change-detection, rest, graphql, javascript, spa
- * @description Monitor API endpoints for changes by discovering JavaScript assets and extracting API paths directly from JS bundles and pages
+ * @tags api, endpoint, monitor, change-detection, rest, javascript, spa
+ * @description Monitor API endpoints for changes by discovering JavaScript assets and extracting API-like path literals from JS bundles and pages
  */
 
 // Declare Sentinel API for JS analysis
@@ -70,12 +70,11 @@ interface ToolInput {
     timeout?: number;
     userAgent?: string;
     crawlDepth?: number;
+    maxPages?: number;
     maxJsFiles?: number;
     includeSameOriginOnly?: boolean;
     followSourceMaps?: boolean;
     probeSpaManifests?: boolean;
-    includeGraphQL?: boolean;
-    includeOpenAPI?: boolean;
     previousSnapshots?: Record<string, ApiSnapshot>;
     __monitorExecution?: MonitorExecutionContext;
 }
@@ -112,16 +111,6 @@ interface FetchResult {
     error?: string;
 }
 
-interface HttpProbeResult {
-    ok: boolean;
-    status: number;
-    text: string;
-    size: number;
-    contentType: string;
-    finalUrl: string;
-    fetchedAt: string;
-}
-
 interface JsDiscoveryResult {
     jsLinks: JsLink[];
     scriptContents: ScriptContentSource[];
@@ -130,24 +119,12 @@ interface JsDiscoveryResult {
 
 interface ApiEndpoint {
     path: string;
-    method?: string;
     source: string;
-    parameters?: string[];
-    requestUrl?: string;
-    requestMethod?: string;
-    responseStatus?: number;
-    responseContentType?: string;
-    responsePreview?: string;
-    responseFetchedAt?: string;
-    responseError?: string;
-    responseSize?: number;
 }
 
 interface ApiSnapshot {
     baseUrl: string;
     endpoints: ApiEndpoint[];
-    graphqlEndpoint?: string;
-    openApiSpec?: string;
     lastChecked: string;
 }
 
@@ -222,187 +199,84 @@ async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> 
     return results;
 }
 
-// API endpoint patterns
-const API_PATTERNS = [
-    /^\/api\/[a-zA-Z0-9\/_-]+$/,
-    /^\/v[0-9]+\/[a-zA-Z0-9\/_-]+$/,
-    /^\/rest\/[a-zA-Z0-9\/_-]+$/,
-    /^\/graphql\/?$/,
-    /^\/gql\/?$/,
-    /^\/(?:users?|auth|login|logout|register|signup|profile|account|settings|config|admin|dashboard|data|search|upload|download|export|import|webhook|token|oauth|callback|notify|events?|messages?|posts?|comments?|items?|products?|orders?|payments?|subscriptions?|notifications?)(?:\/[a-zA-Z0-9_-]*)*$/,
-];
-
-
 const DEFAULT_MAX_JS_FILES = 100;
 const DEFAULT_PAGE_CRAWL_LIMIT = 20;
-const MAX_RESPONSE_PREVIEW_CHARS = 4000;
-const MAX_CONSTANT_RESOLUTION_SOURCE_LENGTH = 1_000_000;
+const DEFAULT_MAX_PAGES = 20;
 const MAX_LITERAL_SCAN_MATCHES = 5000;
-const LARGE_BUNDLE_SOURCE_LENGTH = 600_000;
-const BUNDLE_SCAN_CHUNK_SIZE = 120_000;
-const BUNDLE_SCAN_CHUNK_OVERLAP = 2_048;
-const MAX_RESOLVABLE_EXPRESSION_LENGTH = 2_048;
-const MAX_RESOLVABLE_CONCAT_PARTS = 64;
-const MAX_RESOLVABLE_TEMPLATE_REFERENCES = 32;
-const MAX_RESOLVE_DEPTH = 8;
-const MAX_CONSTANT_ASSIGNMENTS = 5_000;
-const SAFE_RESPONSE_PROBE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const MAX_PATH_CANDIDATE_LENGTH = 2048;
+const EXCLUDED_STATIC_PREFIXES = [
+    "/_next/",
+    "/_nuxt/",
+    "/assets/",
+    "/static/",
+    "/images/",
+    "/image/",
+    "/img/",
+    "/fonts/",
+    "/css/",
+    "/js/",
+    "/dist/",
+    "/build/",
+    "/chunks/",
+    "/webpack/",
+    "/runtime/",
+];
+const EXCLUDED_EXACT_PATHS = new Set([
+    "/",
+    "/favicon.ico",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/manifest.json",
+    "/asset-manifest.json",
+    "/browserconfig.xml",
+]);
+const EXCLUDED_STATIC_EXTENSIONS = new Set([
+    "js",
+    "mjs",
+    "cjs",
+    "jsx",
+    "ts",
+    "tsx",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "map",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "svg",
+    "webp",
+    "avif",
+    "ico",
+    "bmp",
+    "tif",
+    "tiff",
+    "mp4",
+    "webm",
+    "mp3",
+    "wav",
+    "ogg",
+    "pdf",
+    "zip",
+    "gz",
+    "tar",
+    "woff",
+    "woff2",
+    "ttf",
+    "eot",
+]);
 
-function stripQuotes(value: string): string {
-    if (value.length >= 2) {
-        const first = value[0];
-        const last = value[value.length - 1];
-        if ((first === "'" && last === "'") || (first === "\"" && last === "\"") || (first === "`" && last === "`")) {
-            return value.slice(1, -1);
-        }
-    }
-    return value;
-}
-
-function splitConcatenatedExpression(expr: string): string[] {
-    const parts: string[] = [];
-    let current = "";
-    let quote: string | null = null;
-    let braceDepth = 0;
-
-    for (let index = 0; index < expr.length; index += 1) {
-        const char = expr[index];
-        const previous = index > 0 ? expr[index - 1] : "";
-
-        if (quote) {
-            current += char;
-            if (char === quote && previous !== "\\") {
-                quote = null;
-            }
-            continue;
-        }
-
-        if (char === "'" || char === "\"" || char === "`") {
-            quote = char;
-            current += char;
-            continue;
-        }
-
-        if (char === "(" || char === "[" || char === "{") {
-            braceDepth += 1;
-            current += char;
-            continue;
-        }
-
-        if (char === ")" || char === "]" || char === "}") {
-            braceDepth = Math.max(0, braceDepth - 1);
-            current += char;
-            continue;
-        }
-
-        if (char === "+" && braceDepth === 0) {
-            const trimmed = current.trim();
-            if (trimmed) parts.push(trimmed);
-            current = "";
-            continue;
-        }
-
-        current += char;
-    }
-
-    const tail = current.trim();
-    if (tail) parts.push(tail);
-    return parts;
-}
-
-function resolveStringExpression(
-    expr: string,
-    constants: Map<string, string>,
-    depth = 0,
-): string | null {
-    const normalizedExpr = expr.trim();
-    if (!normalizedExpr) return null;
-    if (depth > MAX_RESOLVE_DEPTH) return null;
-    if (normalizedExpr.length > MAX_RESOLVABLE_EXPRESSION_LENGTH) return null;
-
-    if ((normalizedExpr.startsWith("'") && normalizedExpr.endsWith("'"))
-        || (normalizedExpr.startsWith("\"") && normalizedExpr.endsWith("\""))) {
-        return stripQuotes(normalizedExpr);
-    }
-
-    if (normalizedExpr.startsWith("`") && normalizedExpr.endsWith("`")) {
-        const templateBody = stripQuotes(normalizedExpr);
-        let interpolationCount = 0;
-        return templateBody.replace(/\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g, (_match, name: string) => {
-            interpolationCount += 1;
-            if (interpolationCount > MAX_RESOLVABLE_TEMPLATE_REFERENCES) {
-                return "";
-            }
-            return constants.get(name) ?? "";
-        });
-    }
-
-    if (/^[A-Za-z_$][\w$]*$/.test(normalizedExpr)) {
-        return constants.get(normalizedExpr) ?? null;
-    }
-
-    if (normalizedExpr.includes("+")) {
-        const parts = splitConcatenatedExpression(normalizedExpr);
-        if (parts.length === 0) return null;
-        if (parts.length > MAX_RESOLVABLE_CONCAT_PARTS) return null;
-        let resolved = "";
-        for (const part of parts) {
-            const value = resolveStringExpression(part, constants, depth + 1);
-            if (value === null) return null;
-            if ((resolved.length + value.length) > MAX_RESOLVABLE_EXPRESSION_LENGTH) {
-                return null;
-            }
-            resolved += value;
-        }
-        return resolved;
-    }
-
-    return null;
-}
-
-function collectResolvableConstants(content: string): Map<string, string> {
-    if (content.length > MAX_CONSTANT_RESOLUTION_SOURCE_LENGTH) {
-        return new Map<string, string>();
-    }
-
-    const rawAssignments = new Map<string, string>();
-    const resolved = new Map<string, string>();
-    const assignmentRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+);?/g;
-    let match;
-
-    while ((match = assignmentRegex.exec(content)) !== null && rawAssignments.size < MAX_CONSTANT_ASSIGNMENTS) {
-        rawAssignments.set(match[1], match[2].trim());
-    }
-
-    for (let iteration = 0; iteration < 5; iteration += 1) {
-        let changed = false;
-        for (const [name, expression] of rawAssignments.entries()) {
-            if (resolved.has(name)) continue;
-            const value = safeResolveStringExpression(expression, resolved);
-            if (typeof value === "string" && value.length > 0) {
-                resolved.set(name, value);
-                changed = true;
-            }
-        }
-        if (!changed) break;
-    }
-
-    return resolved;
-}
-
-function safeResolveStringExpression(expr: string, constants: Map<string, string>): string | null {
-    try {
-        return resolveStringExpression(expr, constants);
-    } catch {
-        return null;
-    }
-}
-
-function normalizeEndpointPath(value: string): string | null {
+function extractPathCandidate(value: string): string | null {
     const normalizedValue = String(value || "").trim();
     if (!normalizedValue) return null;
 
-    if (/^https?:\/\/[^\/]+\/(?:api|v[0-9]+|rest|graphql)/i.test(normalizedValue)) {
+    if (normalizedValue.startsWith("/")) {
+        return normalizedValue;
+    }
+
+    if (/^https?:\/\//i.test(normalizedValue)) {
         try {
             return new URL(normalizedValue).pathname;
         } catch {
@@ -410,13 +284,44 @@ function normalizeEndpointPath(value: string): string | null {
         }
     }
 
-    for (const pattern of API_PATTERNS) {
-        if (pattern.test(normalizedValue)) {
-            return normalizedValue;
-        }
+    return null;
+}
+
+function isStaticAssetPath(path: string): boolean {
+    const lastSegment = path.split("/").pop() || "";
+    const extensionMatch = lastSegment.match(/\.([a-z0-9]+)$/i);
+    if (!extensionMatch) {
+        return false;
     }
 
-    return null;
+    return EXCLUDED_STATIC_EXTENSIONS.has(extensionMatch[1].toLowerCase());
+}
+
+function normalizeEndpointPath(value: string): string | null {
+    const pathCandidate = extractPathCandidate(value);
+    if (!pathCandidate) return null;
+
+    const normalizedPath = pathCandidate.split("#")[0].split("?")[0].trim();
+    if (!normalizedPath || !normalizedPath.startsWith("/") || normalizedPath.startsWith("//")) {
+        return null;
+    }
+    if (normalizedPath.length > MAX_PATH_CANDIDATE_LENGTH) {
+        return null;
+    }
+    if (/[\s\\]/.test(normalizedPath)) {
+        return null;
+    }
+    if (EXCLUDED_EXACT_PATHS.has(normalizedPath)) {
+        return null;
+    }
+    if (EXCLUDED_STATIC_PREFIXES.some(prefix => normalizedPath.startsWith(prefix))) {
+        return null;
+    }
+    if (isStaticAssetPath(normalizedPath)) {
+        return null;
+    }
+
+    return normalizedPath;
 }
 
 function pushApiEndpoint(
@@ -424,216 +329,28 @@ function pushApiEndpoint(
     seen: Set<string>,
     pathCandidate: string,
     source: string,
-    method?: string,
 ) {
     const normalizedPath = normalizeEndpointPath(pathCandidate);
     if (!normalizedPath) return;
 
-    const normalizedMethod = method ? method.toUpperCase() : undefined;
-    const key = `${normalizedMethod || ""}:${normalizedPath}`;
-    if (seen.has(key)) return;
-
-    seen.add(key);
+    if (seen.has(normalizedPath)) return;
+    seen.add(normalizedPath);
     endpoints.push({
         path: normalizedPath,
-        method: normalizedMethod,
         source,
     });
-}
-
-function collectLiteralCandidates(
-    content: string,
-    limit: number,
-): Array<{ value: string; line: number }> {
-    const literals: Array<{ value: string; line: number }> = [];
-    const stringPattern = /(['"`])([^'"`\n]{3,200})\1/g;
-    let match;
-
-    while ((match = stringPattern.exec(content)) !== null && literals.length < limit) {
-        literals.push({ value: match[2], line: 0 });
-    }
-
-    return literals;
-}
-
-function scanDirectApiCallsFromChunk(
-    content: string,
-    source: string,
-    endpoints: ApiEndpoint[],
-    seen: Set<string>,
-) {
-    const emptyConstants = new Map<string, string>();
-    const axiosInstances = new Map<string, string>();
-    const axiosCreateRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*\{[\s\S]{0,300}?baseURL\s*:\s*([^,}\n]+)[\s\S]{0,300}?\}\s*\)/g;
-    let axiosCreateMatch;
-    while ((axiosCreateMatch = axiosCreateRegex.exec(content)) !== null) {
-        const baseUrl = safeResolveStringExpression(axiosCreateMatch[2], emptyConstants);
-        if (baseUrl) {
-            axiosInstances.set(axiosCreateMatch[1], baseUrl);
-        }
-    }
-
-    const methodCallRegex = /([A-Za-z_$][\w$]*|axios|fetch)\s*(?:\.\s*(get|post|put|delete|patch))?\s*\(\s*([^,\n)]+)(?:,\s*(\{[\s\S]{0,250}?\}))?/g;
-    let methodCallMatch;
-    while ((methodCallMatch = methodCallRegex.exec(content)) !== null) {
-        const clientName = methodCallMatch[1];
-        const explicitMethod = methodCallMatch[2];
-        const targetExpression = methodCallMatch[3];
-        const configExpression = methodCallMatch[4] || "";
-
-        const methodMatch = configExpression.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
-        const method = explicitMethod || methodMatch?.[1] || (clientName === "fetch" ? "GET" : undefined);
-        const resolvedTarget = safeResolveStringExpression(targetExpression, emptyConstants);
-        if (!resolvedTarget) continue;
-
-        const axiosBase = axiosInstances.get(clientName);
-        const combinedTarget = axiosBase && resolvedTarget.startsWith("/")
-            ? `${axiosBase.replace(/\/$/, "")}${resolvedTarget}`
-            : resolvedTarget;
-        pushApiEndpoint(endpoints, seen, combinedTarget, source, method);
-    }
-
-    const requestObjectRegex = /([A-Za-z_$][\w$]*(?:\.\s*request)?|axios)\s*\(\s*\{([\s\S]{0,300}?)\}\s*\)/g;
-    let requestObjectMatch;
-    while ((requestObjectMatch = requestObjectRegex.exec(content)) !== null) {
-        const callee = requestObjectMatch[1].replace(/\s+/g, "");
-        const objectBody = requestObjectMatch[2];
-        const urlMatch = objectBody.match(/\burl\s*:\s*([^,}\n]+)/);
-        if (!urlMatch) continue;
-
-        const methodMatch = objectBody.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
-        const resolvedUrl = safeResolveStringExpression(urlMatch[1], emptyConstants);
-        if (!resolvedUrl) continue;
-
-        const instanceName = callee.replace(/\.request$/, "");
-        const axiosBase = axiosInstances.get(instanceName);
-        const combinedTarget = axiosBase && resolvedUrl.startsWith("/")
-            ? `${axiosBase.replace(/\/$/, "")}${resolvedUrl}`
-            : resolvedUrl;
-        pushApiEndpoint(endpoints, seen, combinedTarget, source, methodMatch?.[1]);
-    }
-}
-
-function extractApisFromJsChunked(content: string, source: string): ApiEndpoint[] {
-    const endpoints: ApiEndpoint[] = [];
-    const seen = new Set<string>();
-    const chunkStep = Math.max(1, BUNDLE_SCAN_CHUNK_SIZE - BUNDLE_SCAN_CHUNK_OVERLAP);
-    let collectedLiteralCount = 0;
-
-    for (let start = 0; start < content.length; start += chunkStep) {
-        const chunk = content.slice(start, start + BUNDLE_SCAN_CHUNK_SIZE);
-        if (!chunk) continue;
-
-        if (collectedLiteralCount < MAX_LITERAL_SCAN_MATCHES) {
-            const remaining = MAX_LITERAL_SCAN_MATCHES - collectedLiteralCount;
-            const literals = collectLiteralCandidates(chunk, remaining);
-            for (const literal of literals) {
-                const value = literal.value.trim();
-                pushApiEndpoint(endpoints, seen, value, source);
-            }
-            collectedLiteralCount += literals.length;
-        }
-
-        scanDirectApiCallsFromChunk(chunk, source, endpoints, seen);
-    }
-
-    return endpoints;
 }
 
 // Extract API endpoints from JavaScript content
 function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
     const endpoints: ApiEndpoint[] = [];
     const seen = new Set<string>();
-    const constants = collectResolvableConstants(content);
-    
-    // Try to use Sentinel AST API if available
-    let literals: Array<{ value: string; line: number }> = [];
-    
-    try {
-        if (typeof Sentinel !== "undefined" && Sentinel.AST) {
-            const result = Sentinel.AST.parse(content, source);
-            literals = result.literals;
-        }
-    } catch {
-        // Fall back to regex
-    }
-    
-    if (literals.length === 0) {
-        literals = collectLiteralCandidates(content, MAX_LITERAL_SCAN_MATCHES);
-    }
-    
-    for (const literal of literals) {
-        const value = literal.value.trim();
-        pushApiEndpoint(endpoints, seen, value, source);
-    }
-
-    for (const value of constants.values()) {
-        pushApiEndpoint(endpoints, seen, value, source);
-    }
-    
-    const axiosInstances = new Map<string, string>();
-    const axiosCreateRegex = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*axios\s*\.\s*create\s*\(\s*\{[\s\S]{0,300}?baseURL\s*:\s*([^,}\n]+)[\s\S]{0,300}?\}\s*\)/g;
-    let axiosCreateMatch;
-    while ((axiosCreateMatch = axiosCreateRegex.exec(content)) !== null) {
-        const baseUrl = safeResolveStringExpression(axiosCreateMatch[2], constants);
-        if (baseUrl) {
-            axiosInstances.set(axiosCreateMatch[1], baseUrl);
-        }
-    }
-
-    const methodCallRegex = /([A-Za-z_$][\w$]*|axios|fetch)\s*(?:\.\s*(get|post|put|delete|patch))?\s*\(\s*([^,\n)]+)(?:,\s*(\{[\s\S]{0,250}?\}))?/g;
-    let methodCallMatch;
-    while ((methodCallMatch = methodCallRegex.exec(content)) !== null) {
-        const clientName = methodCallMatch[1];
-        const explicitMethod = methodCallMatch[2];
-        const targetExpression = methodCallMatch[3];
-        const configExpression = methodCallMatch[4] || "";
-
-        const methodMatch = configExpression.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
-        const method = explicitMethod || methodMatch?.[1] || (clientName === "fetch" ? "GET" : undefined);
-        const resolvedTarget = safeResolveStringExpression(targetExpression, constants);
-        if (!resolvedTarget) continue;
-
-        const axiosBase = axiosInstances.get(clientName);
-        const combinedTarget = axiosBase && resolvedTarget.startsWith("/")
-            ? `${axiosBase.replace(/\/$/, "")}${resolvedTarget}`
-            : resolvedTarget;
-        pushApiEndpoint(endpoints, seen, combinedTarget, source, method);
-    }
-
-    const requestObjectRegex = /([A-Za-z_$][\w$]*(?:\.\s*request)?|axios)\s*\(\s*\{([\s\S]{0,300}?)\}\s*\)/g;
-    let requestObjectMatch;
-    while ((requestObjectMatch = requestObjectRegex.exec(content)) !== null) {
-        const callee = requestObjectMatch[1].replace(/\s+/g, "");
-        const objectBody = requestObjectMatch[2];
-        const urlMatch = objectBody.match(/\burl\s*:\s*([^,}\n]+)/);
-        if (!urlMatch) continue;
-
-        const methodMatch = objectBody.match(/\bmethod\s*:\s*['"`]?([A-Za-z]+)['"`]?/i);
-        const resolvedUrl = safeResolveStringExpression(urlMatch[1], constants);
-        if (!resolvedUrl) continue;
-
-        const instanceName = callee.replace(/\.request$/, "");
-        const axiosBase = axiosInstances.get(instanceName);
-        const combinedTarget = axiosBase && resolvedUrl.startsWith("/")
-            ? `${axiosBase.replace(/\/$/, "")}${resolvedUrl}`
-            : resolvedUrl;
-        pushApiEndpoint(endpoints, seen, combinedTarget, source, methodMatch?.[1]);
+    const result = Sentinel.AST.parse(content, source);
+    for (const literal of result.literals.slice(0, MAX_LITERAL_SCAN_MATCHES)) {
+        pushApiEndpoint(endpoints, seen, literal.value.trim(), source);
     }
     
     return endpoints;
-}
-
-function safeExtractApisFromJs(content: string, source: string): ApiEndpoint[] {
-    if (content.length > LARGE_BUNDLE_SOURCE_LENGTH) {
-        return extractApisFromJsChunked(content, source);
-    }
-
-    try {
-        return extractApisFromJs(content, source);
-    } catch {
-        return extractApisFromJsChunked(content, source);
-    }
 }
 
 function simpleHash(str: string): string {
@@ -721,150 +438,6 @@ function describeTargetFetchFailure(result: FetchResult | null): string {
     if (result.error) return `Failed to fetch target page: ${result.error}`;
     if (typeof result.status === "number") return `Target page returned HTTP ${result.status}`;
     return "Failed to fetch target page";
-}
-function looksLikeHtmlDocument(contentType: string, text: string): boolean {
-    const normalized = String(contentType || "").toLowerCase();
-    const preview = String(text || "").trim().slice(0, 256).toLowerCase();
-    return normalized.includes("text/html") || normalized.includes("application/xhtml+xml")
-        || preview.startsWith("<!doctype html") || preview.startsWith("<html")
-        || preview.includes("<head") || preview.includes("<body");
-}
-function isLikelyApiProbeResponse(requestUrl: string, path: string, response: HttpProbeResult): boolean {
-    const content = String(response.text || "").trim();
-    const contentType = String(response.contentType || "").toLowerCase();
-    if (!content || looksLikeHtmlDocument(contentType, content)) return false;
-    try {
-        const requestedPath = new URL(requestUrl).pathname;
-        const finalPath = new URL(response.finalUrl || requestUrl).pathname;
-        if (requestedPath !== finalPath && (finalPath === "/" || finalPath === "/index.html")) return false;
-    } catch {}
-    if (path.includes("swagger") || path.includes("openapi") || path.includes("api-docs")) {
-        const lowered = content.toLowerCase();
-        return lowered.includes("\"openapi\"") || lowered.includes("\"swagger\"") || lowered.includes("openapi:") || lowered.includes("swagger:");
-    }
-    return contentType.includes("json") || contentType.includes("xml") || contentType.includes("graphql") || content.startsWith("{") || content.startsWith("[") || content.startsWith("<?xml") || ((response.status === 401 || response.status === 403 || response.status === 405) && !content.includes("<"));
-}
-function isPreviewableContentType(contentType: string): boolean {
-    const normalized = String(contentType || "").toLowerCase();
-    if (!normalized) return true;
-    return normalized.includes("json") || normalized.includes("text/") || normalized.includes("javascript") || normalized.includes("xml") || normalized.includes("html") || normalized.includes("graphql") || normalized.includes("x-www-form-urlencoded");
-}
-function normalizeResponsePreview(text: string): string {
-    const normalized = String(text || "").replace(/\0/g, "").trim();
-    if (normalized.length <= MAX_RESPONSE_PREVIEW_CHARS) return normalized;
-    return `${normalized.slice(0, MAX_RESPONSE_PREVIEW_CHARS)}\n...[truncated]`;
-}
-async function fetchHttpProbe(
-    url: string,
-    timeout: number,
-    userAgent: string,
-    method = "GET",
-    accept = "application/json,text/plain,*/*",
-    body?: string,
-): Promise<HttpProbeResult | null> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-    try {
-        const response = await fetch(url, {
-            method,
-            headers: {
-                "User-Agent": userAgent,
-                "Accept": accept,
-                "Accept-Language": "en-US,en;q=0.5",
-                ...(body ? { "Content-Type": "application/json" } : {}),
-            },
-            ...(body ? { body } : {}),
-            signal: controller.signal,
-            redirect: "follow",
-        });
-
-        clearTimeout(timeoutId);
-
-        const contentType = response.headers.get("content-type") || "";
-        const previewable = isPreviewableContentType(contentType);
-        const text = previewable
-            ? await response.text()
-            : `[non-text content omitted: ${contentType || "unknown"}]`;
-
-        return {
-            ok: response.ok,
-            status: response.status,
-            text,
-            size: Number(response.headers.get("content-length")) || text.length,
-            contentType,
-            finalUrl: response.url || url,
-            fetchedAt: new Date().toISOString(),
-        };
-    } catch {
-        clearTimeout(timeoutId);
-        return null;
-    }
-}
-
-function resolveEndpointRequestUrl(baseUrl: string, path: string): string {
-    return resolveUrl(baseUrl, path) || path;
-}
-
-function isDynamicEndpointPath(path: string): boolean {
-    return /(^|\/)(:\w+|\{\w+\}|\*)/.test(String(path || ""));
-}
-
-async function captureEndpointResponse(
-    endpoint: ApiEndpoint,
-    baseUrl: string,
-    timeout: number,
-    userAgent: string,
-): Promise<ApiEndpoint> {
-    const enriched: ApiEndpoint = { ...endpoint };
-    const requestUrl = resolveEndpointRequestUrl(baseUrl, endpoint.path);
-    const requestMethod = String(endpoint.method || "GET").trim().toUpperCase() || "GET";
-
-    enriched.requestUrl = requestUrl;
-    enriched.requestMethod = requestMethod;
-
-    if (
-        enriched.responseFetchedAt
-        || enriched.responseError
-        || typeof enriched.responseStatus === "number"
-    ) {
-        return enriched;
-    }
-
-    if (!SAFE_RESPONSE_PROBE_METHODS.has(requestMethod)) {
-        enriched.responseError = `Skipped unsafe method probing for ${requestMethod}`;
-        return enriched;
-    }
-
-    if (isDynamicEndpointPath(endpoint.path)) {
-        enriched.responseError = "Skipped probing dynamic endpoint template";
-        return enriched;
-    }
-
-    const response = await fetchHttpProbe(
-        requestUrl,
-        timeout,
-        userAgent,
-        requestMethod,
-        "application/json,text/plain,text/html,application/xml,*/*",
-    );
-
-    if (!response) {
-        enriched.responseError = "Failed to fetch endpoint response";
-        return enriched;
-    }
-
-    enriched.responseStatus = response.status;
-    enriched.responseContentType = response.contentType;
-    enriched.responseSize = response.size;
-    enriched.responseFetchedAt = response.fetchedAt;
-    enriched.requestUrl = response.finalUrl || requestUrl;
-    enriched.responsePreview = normalizeResponsePreview(response.text);
-    if (!response.ok) {
-        enriched.responseError = `Received HTTP ${response.status}`;
-    }
-
-    return enriched;
 }
 
 function extractScriptTags(html: string, baseUrl: string): JsLink[] {
@@ -1205,6 +778,7 @@ async function discoverJavascriptAssets(
     timeout: number,
     userAgent: string,
     crawlDepth: number,
+    maxPages: number,
     maxJsFiles: number,
     includeSameOriginOnly: boolean,
     followSourceMaps: boolean,
@@ -1218,8 +792,9 @@ async function discoverJavascriptAssets(
         { url: baseUrl, depth: 0, html: initialHtml },
     ];
     const visitedPages = new Set<string>();
+    const queuedPages = new Set<string>([baseUrl]);
 
-    while (pagesToCrawl.length > 0 && jsLinks.length < maxJsFiles) {
+    while (pagesToCrawl.length > 0 && jsLinks.length < maxJsFiles && visitedPages.size < maxPages) {
         const current = pagesToCrawl.shift();
         if (!current || visitedPages.has(current.url)) {
             continue;
@@ -1255,7 +830,11 @@ async function discoverJavascriptAssets(
 
         if (crawlDepth > 1 && current.depth < crawlDepth - 1) {
             for (const pageUrl of getSameOriginLinks(html, current.url).slice(0, DEFAULT_PAGE_CRAWL_LIMIT)) {
-                if (!visitedPages.has(pageUrl)) {
+                if (visitedPages.size + pagesToCrawl.length >= maxPages) {
+                    break;
+                }
+                if (!visitedPages.has(pageUrl) && !queuedPages.has(pageUrl)) {
+                    queuedPages.add(pageUrl);
                     pagesToCrawl.push({ url: pageUrl, depth: current.depth + 1 });
                 }
             }
@@ -1364,8 +943,6 @@ function calculateRiskScore(severity: string, eventType: string, count: number):
         case "api_endpoints_added": score += 20; break;
         case "api_endpoints_removed": score += 15; break;
         case "api_change": score += 15; break;
-        case "graphql_discovered": score += 20; break;
-        case "openapi_discovered": score += 15; break;
     }
     
     // Bonus for multiple changes
@@ -1405,6 +982,13 @@ export function get_input_schema() {
                 minimum: 0,
                 maximum: 3
             },
+            maxPages: {
+                type: "integer",
+                description: "Maximum same-origin pages to crawl per target when crawlDepth is greater than 1",
+                default: 20,
+                minimum: 1,
+                maximum: 50
+            },
             maxJsFiles: {
                 type: "integer",
                 description: "Maximum JavaScript files to analyze per target",
@@ -1426,16 +1010,6 @@ export function get_input_schema() {
                 type: "boolean",
                 description: "Probe common SPA manifest endpoints to discover bundled JS",
                 default: true
-            },
-            includeGraphQL: {
-                type: "boolean",
-                description: "Check for GraphQL endpoints",
-                default: false
-            },
-            includeOpenAPI: {
-                type: "boolean",
-                description: "Check for OpenAPI/Swagger specs",
-                default: false
             },
             previousSnapshots: {
                 type: "object",
@@ -1469,8 +1043,6 @@ export function get_output_schema() {
                                     type: "object",
                                     properties: {
                                         baseUrl: { type: "string" },
-                                        graphqlEndpoint: { type: "string" },
-                                        openApiSpec: { type: "string" },
                                         lastChecked: { type: "string" },
                                         endpoints: {
                                             type: "array",
@@ -1478,16 +1050,7 @@ export function get_output_schema() {
                                                 type: "object",
                                                 properties: {
                                                     path: { type: "string" },
-                                                    method: { type: "string" },
                                                     source: { type: "string" },
-                                                    requestUrl: { type: "string" },
-                                                    requestMethod: { type: "string" },
-                                                    responseStatus: { type: "integer" },
-                                                    responseContentType: { type: "string" },
-                                                    responsePreview: { type: "string" },
-                                                    responseFetchedAt: { type: "string" },
-                                                    responseError: { type: "string" },
-                                                    responseSize: { type: "integer" },
                                                 }
                                             }
                                         }
@@ -1544,12 +1107,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const timeout = Math.max(3000, Math.min(input.timeout || 3000, 5000));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const crawlDepth = input.crawlDepth ?? 1;
+        const maxPages = Math.max(1, Math.min(input.maxPages || DEFAULT_MAX_PAGES, 50));
         const maxJsFiles = Math.max(10, Math.min(input.maxJsFiles || DEFAULT_MAX_JS_FILES, 300));
         const includeSameOriginOnly = input.includeSameOriginOnly === true;
         const followSourceMaps = input.followSourceMaps === true;
         const probeSpaManifests = input.probeSpaManifests !== false;
-        const includeGraphQL = input.includeGraphQL !== false;
-        const includeOpenAPI = input.includeOpenAPI !== false;
         const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
         const totalProgressUnits = validTargets.length + 2;
@@ -1587,8 +1149,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             
             try {
                 const allEndpoints: ApiEndpoint[] = [];
-                let graphqlEndpoint: string | undefined;
-                let openApiSpec: string | undefined;
                 let jsFilesAnalyzed = 0;
                 
                 const pageResult = await fetchWithTimeout(
@@ -1598,7 +1158,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     "text/html,application/xhtml+xml,*/*",
                 );
 
-                if (pageResult.status === null) {
+                if (!pageResult || pageResult.status === null) {
                     result.error = describeTargetFetchFailure(pageResult);
                     failedChecks++;
                     results.push(result);
@@ -1609,7 +1169,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
                 const pageContent = canAnalyzePageResponse(pageResult) ? pageResult.text : "";
                 const directJsTarget = Boolean(pageContent) && (looksLikeJs(baseUrl) || pageResult.contentType.includes("javascript"));
-                const scriptSources = !pageContent ? [] : directJsTarget ? [{ source: baseUrl, content: pageContent }] : (await discoverJavascriptAssets(baseUrl, pageContent, timeout, userAgent, crawlDepth, maxJsFiles, includeSameOriginOnly, followSourceMaps, probeSpaManifests)).scriptContents;
+                const scriptSources = !pageContent ? [] : directJsTarget ? [{ source: baseUrl, content: pageContent }] : (await discoverJavascriptAssets(baseUrl, pageContent, timeout, userAgent, crawlDepth, maxPages, maxJsFiles, includeSameOriginOnly, followSourceMaps, probeSpaManifests)).scriptContents;
 
                 jsFilesAnalyzed = directJsTarget
                     ? 1
@@ -1618,97 +1178,26 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
                 for (const source of scriptSources) {
                     try {
-                        const endpoints = safeExtractApisFromJs(source.content, source.source);
+                        const endpoints = extractApisFromJs(source.content, source.source);
                         allEndpoints.push(...endpoints);
                     } catch {
                         continue;
                     }
                 }
                 
-                // Check common API paths
-                const urlObj = new URL(baseUrl);
-                // Check GraphQL
-                if (includeGraphQL) {
-                    const graphqlMatches = await runSequentially(["/graphql", "/gql", "/api/graphql"].map((gqlPath) => async () => {
-                            try {
-                                const gqlUrl = `${urlObj.origin}${gqlPath}`;
-                                const gqlResponse = await fetchHttpProbe(
-                                    gqlUrl,
-                                    3000,
-                                    userAgent,
-                                    "POST",
-                                    "application/json,*/*",
-                                    JSON.stringify({ query: "{ __typename }" }),
-                                );
-
-                                if (!gqlResponse?.ok) return null;
-                                const gqlResult = gqlResponse.text;
-                                if (gqlResult.includes("__typename") || gqlResult.includes("data")) {
-                                    return {
-                                        path: gqlPath,
-                                        requestUrl: gqlResponse.finalUrl || gqlUrl,
-                                        responseStatus: gqlResponse.status,
-                                        responseContentType: gqlResponse.contentType,
-                                        responsePreview: normalizeResponsePreview(gqlResult),
-                                        responseFetchedAt: gqlResponse.fetchedAt,
-                                        responseSize: gqlResponse.size,
-                                    };
-                                }
-                            } catch {
-                                // GraphQL not available
-                            }
-                            return null;
-                        }));
-
-                    const discoveredGraphql = graphqlMatches.find((value): value is {
-                        path: string;
-                        requestUrl: string;
-                        responseStatus: number;
-                        responseContentType: string;
-                        responsePreview: string;
-                        responseFetchedAt: string;
-                        responseSize: number;
-                    } => Boolean(value));
-                    if (discoveredGraphql) {
-                        graphqlEndpoint = discoveredGraphql.requestUrl || discoveredGraphql.path;
-                        allEndpoints.push({
-                            path: discoveredGraphql.path,
-                            method: "POST",
-                            source: "graphql-probe",
-                            requestUrl: discoveredGraphql.requestUrl,
-                            requestMethod: "POST",
-                            responseStatus: discoveredGraphql.responseStatus,
-                            responseContentType: discoveredGraphql.responseContentType,
-                            responsePreview: discoveredGraphql.responsePreview,
-                            responseFetchedAt: discoveredGraphql.responseFetchedAt,
-                            responseSize: discoveredGraphql.responseSize,
-                        });
-                    }
-                }
-                
-                // Deduplicate endpoints
                 const uniqueEndpoints: ApiEndpoint[] = [];
                 const seen = new Set<string>();
                 for (const ep of allEndpoints) {
-                    const key = `${ep.method || ""}:${ep.path}`;
-                    if (!seen.has(key)) {
-                        seen.add(key);
+                    if (!seen.has(ep.path)) {
+                        seen.add(ep.path);
                         uniqueEndpoints.push(ep);
                     }
                 }
+                totalEndpoints += uniqueEndpoints.length;
                 
-                const enrichedEndpoints = await runSequentially(uniqueEndpoints.map((endpoint) => async () =>
-                        captureEndpointResponse(endpoint, baseUrl, timeout, userAgent)
-                    ));
-
-                totalEndpoints += enrichedEndpoints.length;
-                
-                // Create snapshot
                 const snapshot: ApiSnapshot = {
                     baseUrl,
-                    endpoints: enrichedEndpoints,
-                    graphqlEndpoint,
-                    openApiSpec,
+                    endpoints: uniqueEndpoints,
                     lastChecked: new Date().toISOString(),
                 };
                 
@@ -1721,23 +1210,19 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     total: totalProgressUnits,
                     phase: "scan",
                     currentTarget: baseUrl,
-                    message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${enrichedEndpoints.length} API endpoints`,
+                    message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${uniqueEndpoints.length} API endpoints`,
                 });
                 
-                // Compare with previous snapshot
                 const prevSnapshot = previousSnapshots[baseUrl];
                 if (prevSnapshot) {
-                    const prevPaths = new Set(prevSnapshot.endpoints.map(e => `${e.method || ""}:${e.path}`));
-                    const newPaths = new Set(enrichedEndpoints.map(e => `${e.method || ""}:${e.path}`));
-                    
-                    // Find added endpoints
-                    const addedEndpoints = enrichedEndpoints.filter(e => !prevPaths.has(`${e.method || ""}:${e.path}`));
-                    const removedEndpoints = prevSnapshot.endpoints.filter(e => !newPaths.has(`${e.method || ""}:${e.path}`));
+                    const prevPaths = new Set(prevSnapshot.endpoints.map(e => e.path));
+                    const newPaths = new Set(uniqueEndpoints.map(e => e.path));
+                    const addedEndpoints = uniqueEndpoints.filter(e => !prevPaths.has(e.path));
+                    const removedEndpoints = prevSnapshot.endpoints.filter(e => !newPaths.has(e.path));
                     
                     result.addedEndpoints = addedEndpoints;
                     result.removedEndpoints = removedEndpoints;
                     
-                    // Generate change events
                     if (addedEndpoints.length > 0) {
                         apiChanges++;
                         addedEndpointsCount += addedEndpoints.length;
@@ -1747,7 +1232,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             assetId: baseUrl,
                             eventType: "api_endpoints_added",
                             severity: "high",
-                            title: `New API Endpoints Discovered: ${urlObj.hostname}`,
+                            title: `New API Endpoints Discovered: ${new URL(baseUrl).hostname}`,
                             description: `${addedEndpoints.length} new API endpoint(s) discovered: ${addedEndpoints.map(e => e.path).join(", ")}`,
                             newValue: JSON.stringify(addedEndpoints.map(e => e.path)),
                             detectionMethod: "api_monitor",
@@ -1772,7 +1257,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             assetId: baseUrl,
                             eventType: "api_endpoints_removed",
                             severity: "low",
-                            title: `API Endpoints Removed: ${urlObj.hostname}`,
+                            title: `API Endpoints Removed: ${new URL(baseUrl).hostname}`,
                             description: `${removedEndpoints.length} API endpoint(s) removed: ${removedEndpoints.map(e => e.path).join(", ")}`,
                             oldValue: JSON.stringify(removedEndpoints.map(e => e.path)),
                             detectionMethod: "api_monitor",
@@ -1787,68 +1272,25 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, removedEndpoints.length);
                         changeEvents.push(event);
                     }
-                    
-                    // GraphQL discovered
-                    if (graphqlEndpoint && !prevSnapshot.graphqlEndpoint) {
-                        const event: ChangeEvent = {
-                            id: generateId(),
-                            assetId: baseUrl,
-                            eventType: "graphql_discovered",
-                            severity: "high",
-                            title: `GraphQL Endpoint Discovered: ${urlObj.hostname}`,
-                            description: `A GraphQL endpoint was discovered at ${graphqlEndpoint}. This is a high-value target for testing.`,
-                            newValue: graphqlEndpoint,
-                            detectionMethod: "api_monitor",
-                            tags: ["api", "graphql", "discovery"],
-                            autoTriggerEnabled: true,
-                            riskScore: 0,
-                            metadata: { graphqlEndpoint },
-                        };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, 1);
-                        changeEvents.push(event);
-                    }
-                    
-                    // OpenAPI spec discovered
-                    if (openApiSpec && !prevSnapshot.openApiSpec) {
-                        const event: ChangeEvent = {
-                            id: generateId(),
-                            assetId: baseUrl,
-                            eventType: "openapi_discovered",
-                            severity: "medium",
-                            title: `OpenAPI Spec Discovered: ${urlObj.hostname}`,
-                            description: `An OpenAPI/Swagger specification was discovered at ${openApiSpec}.`,
-                            newValue: openApiSpec,
-                            detectionMethod: "api_monitor",
-                            tags: ["api", "openapi", "swagger", "discovery"],
-                            autoTriggerEnabled: true,
-                            riskScore: 0,
-                            metadata: { openApiSpec },
-                        };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, 1);
-                        changeEvents.push(event);
-                    }
                 } else {
-                    // First scan - report all as discovered
-                    if (enrichedEndpoints.length > 0) {
+                    if (uniqueEndpoints.length > 0) {
                         const event: ChangeEvent = {
                             id: generateId(),
                             assetId: baseUrl,
                             eventType: "api_endpoints_discovered",
                             severity: "medium",
-                            title: `API Endpoints Discovered: ${urlObj.hostname}`,
-                            description: `Initial scan discovered ${enrichedEndpoints.length} API endpoint(s).`,
-                            newValue: JSON.stringify(enrichedEndpoints.map(e => e.path)),
+                            title: `API Endpoints Discovered: ${new URL(baseUrl).hostname}`,
+                            description: `Initial scan discovered ${uniqueEndpoints.length} API endpoint(s).`,
+                            newValue: JSON.stringify(uniqueEndpoints.map(e => e.path)),
                             detectionMethod: "api_monitor",
                             tags: ["api", "endpoint", "initial-scan"],
                             autoTriggerEnabled: false,
                             riskScore: 0,
                             metadata: {
-                                endpoints: enrichedEndpoints,
-                                graphqlEndpoint,
-                                openApiSpec,
+                                endpoints: uniqueEndpoints,
                             },
                         };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, enrichedEndpoints.length);
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueEndpoints.length);
                         changeEvents.push(event);
                     }
                 }

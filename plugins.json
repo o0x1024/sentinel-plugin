@@ -321,9 +321,9 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
-      "description": "Monitor API endpoints by discovering JavaScript assets from pages and bundles, extracting API paths from JS, and comparing endpoint changes with optional GraphQL/OpenAPI discovery.",
+      "description": "Monitor API endpoints by discovering JavaScript assets from pages and bundles, extracting API-like path literals from JS, and comparing endpoint changes over time.",
       "default_severity": "high",
-      "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "graphql", "javascript", "spa"],
+      "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "javascript", "spa"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/api_monitor.ts"
     },
     {
