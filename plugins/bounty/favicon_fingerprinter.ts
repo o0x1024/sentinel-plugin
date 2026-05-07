@@ -3,13 +3,13 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.1.0
+ * @version 1.1.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags favicon, fingerprint, web, asm, surface
- * @description Fetch favicons from web targets and emit favicon fingerprint and evidence artifacts for ASM and network asset mapping workflows
+ * @description Fetch favicons from existing web targets and emit fingerprint/evidence enrichment artifacts without creating new web assets
  */
 
 declare const Sentinel: {
@@ -443,7 +443,7 @@ export function get_output_schema() {
                     summary: { type: "object" },
                     surface_artifacts: {
                         type: "object",
-                        description: "Favicon fingerprint and evidence artifacts for surface graph ingestion",
+                        description: "Favicon fingerprint and evidence artifacts that enrich matching existing web assets without creating web assets",
                         properties: {
                             fingerprints: {
                                 type: "array",

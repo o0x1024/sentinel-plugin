@@ -1,5 +1,5 @@
 {
-  "version": "2.3.19",
+  "version": "2.3.20",
   "updated_at": "2026-05-07",
   "plugins": [
     {
@@ -161,11 +161,11 @@
     {
       "id": "favicon_fingerprinter",
       "name": "Favicon Fingerprinter",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
-      "description": "Fetch favicons from web targets, apply dictionary-driven rule matching, and emit normalized favicon fingerprint and evidence artifacts for ASM workflows.",
+      "description": "Fetch favicons from existing web targets, apply dictionary-driven rule matching, and emit normalized favicon fingerprint/evidence enrichment artifacts without creating web assets.",
       "default_severity": "info",
       "tags": ["favicon", "fingerprint", "web", "asm", "surface", "dictionary", "normalized"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/favicon_fingerprinter.ts"
