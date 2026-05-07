@@ -1,6 +1,6 @@
 {
-  "version": "2.3.18",
-  "updated_at": "2026-05-01",
+  "version": "2.3.19",
+  "updated_at": "2026-05-07",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -125,7 +125,7 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "2.2.0",
+      "version": "2.2.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -197,7 +197,7 @@
     {
       "id": "directory_bruteforcer",
       "name": "Directory Bruteforcer",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",
@@ -209,7 +209,7 @@
     {
       "id": "js_analyzer",
       "name": "JavaScript Analyzer",
-      "version": "3.1.0",
+      "version": "3.1.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",

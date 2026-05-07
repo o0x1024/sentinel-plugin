@@ -3,7 +3,7 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -17,6 +17,9 @@ declare const Sentinel: {
         getEntries?(idOrName: string, limit?: number): Promise<any[]>;
         getDefaultId?(dictType: string): Promise<string | null>;
     };
+    Monitor?: {
+        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
+    };
 };
 
 interface ToolInput {
@@ -24,7 +27,22 @@ interface ToolInput {
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
+    concurrency?: number;
     followRedirects?: boolean;
+    __monitorExecution?: MonitorExecutionContext;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
 }
 
 interface RuleEntry {
@@ -66,6 +84,44 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
+const DEFAULT_TIMEOUT_MS = 5000;
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 30000;
+const DEFAULT_CONCURRENCY = 32;
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 64;
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(Math.floor(parsed), max));
+}
 
 function parseMetadata(value: any): Record<string, any> {
     if (!value) return {};
@@ -311,12 +367,23 @@ async function fingerprintTarget(
     }
 }
 
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+async function runConcurrently<T>(
+    tasks: Array<() => Promise<T>>,
+    concurrency: number,
+): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(concurrency, tasks.length);
+
+    async function worker() {
+        while (nextIndex < tasks.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            results[index] = await tasks[index]();
+        }
     }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return results;
 }
 
@@ -341,9 +408,16 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Network timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 60000,
+                default: DEFAULT_TIMEOUT_MS,
+                minimum: MIN_TIMEOUT_MS,
+                maximum: MAX_TIMEOUT_MS,
+            },
+            concurrency: {
+                type: "integer",
+                description: "Maximum concurrent favicon fetches",
+                default: DEFAULT_CONCURRENCY,
+                minimum: MIN_CONCURRENCY,
+                maximum: MAX_CONCURRENCY,
             },
             followRedirects: {
                 type: "boolean",
@@ -401,11 +475,39 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return { success: false, error: "No valid web targets provided" };
         }
 
-        const timeout = Math.max(1000, Math.min(input.timeout || 10000, 60000));
-                const rules = await loadRules(input);
+        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        const concurrency = clampInteger(
+            input.concurrency,
+            DEFAULT_CONCURRENCY,
+            MIN_CONCURRENCY,
+            MAX_CONCURRENCY,
+        );
+        const rules = await loadRules(input);
+        const monitorExecution = input.__monitorExecution;
 
-        const tasks = targets.map((target) => () => fingerprintTarget(target, timeout, input.followRedirects !== false, rules));
-        const fingerprints = await runSequentially(tasks);
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: targets.length,
+            phase: "prepare",
+            message: `Preparing favicon fingerprints (${targets.length} targets, concurrency ${concurrency})`,
+        });
+
+        let completedTargets = 0;
+        const tasks = targets.map((target) => async () => {
+            try {
+                return await fingerprintTarget(target, timeout, input.followRedirects !== false, rules);
+            } finally {
+                completedTargets += 1;
+                await reportMonitorProgress(monitorExecution, {
+                    current: completedTargets,
+                    total: targets.length,
+                    currentTarget: target,
+                    phase: "fingerprint",
+                    message: `Fetched favicon fingerprint for ${target}`,
+                });
+            }
+        });
+        const fingerprints = await runConcurrently(tasks, concurrency);
 
         return {
             success: true,

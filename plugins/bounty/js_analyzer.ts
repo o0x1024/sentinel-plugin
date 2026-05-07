@@ -3,7 +3,7 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.0
+ * @version 3.1.1
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -26,12 +26,16 @@ declare const Sentinel: {
     Dictionary: {
         getWords: (idOrName: string, limit?: number) => Promise<string[]>;
     };
+    Monitor?: {
+        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
+    };
 };
 
 interface ToolInput {
     url?: string;
     urls?: string[];
     timeout?: number;
+    concurrency?: number;
     userAgent?: string;
     maxFileSize?: number;
     extractEndpoints?: boolean;
@@ -39,6 +43,20 @@ interface ToolInput {
     extractDomains?: boolean;
     followImports?: boolean;
     maxFiles?: number;
+    __monitorExecution?: MonitorExecutionContext;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
 }
 
 interface StringLiteral {
@@ -107,6 +125,42 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
+const DEFAULT_TIMEOUT_MS = 10000;
+const MIN_TIMEOUT_MS = 3000;
+const MAX_TIMEOUT_MS = 30000;
+const MIN_CONCURRENCY = 1;
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(Math.floor(parsed), max));
+}
 
 // Secret patterns with severity
 const SECRET_PATTERNS: { name: string; pattern: RegExp; severity: "critical" | "high" | "medium" | "low" }[] = [
@@ -227,9 +281,16 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Request timeout in milliseconds",
-                default: 15000,
-                minimum: 5000,
-                maximum: 60000
+                default: DEFAULT_TIMEOUT_MS,
+                minimum: MIN_TIMEOUT_MS,
+                maximum: MAX_TIMEOUT_MS
+            },
+            concurrency: {
+                type: "integer",
+                description: "Maximum concurrent base URL analyses",
+                default: DEFAULT_CONCURRENCY,
+                minimum: MIN_CONCURRENCY,
+                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -275,18 +336,24 @@ export function get_input_schema() {
 
 pluginGlobals.get_input_schema = get_input_schema;
 
-/**
- * Execute tasks sequentially through runtime scheduling
- */
-async function executeSequentially<T, R>(
+async function executeConcurrently<T, R>(
     items: T[],
-    executor: (item: T) => Promise<R>
+    executor: (item: T) => Promise<R>,
+    concurrency: number,
 ): Promise<R[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
     const results: R[] = new Array(items.length);
-    for (let index = 0; index < items.length; index++) {
-        results[index] = await executor(items[index]);
+    let nextIndex = 0;
+    const workerCount = Math.min(concurrency, items.length);
+
+    async function worker() {
+        while (nextIndex < items.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            results[index] = await executor(items[index]);
+        }
     }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return results;
 }
 
@@ -747,7 +814,7 @@ async function processSingleUrl(
     const urlsToAnalyze = [...new Set(jsUrls)].slice(0, options.maxFiles - files.length);
 
     // Analyze JS files through runtime scheduling
-    const jsFileResults = await executeSequentially(urlsToAnalyze, async (url) => {
+    const jsFileResults = await executeConcurrently(urlsToAnalyze, async (url) => {
             return await analyzeJsFile(url, {
                 timeout: options.timeout,
                 userAgent: options.userAgent,
@@ -756,7 +823,7 @@ async function processSingleUrl(
                 extractSecrets: options.extractSecrets,
                 extractDomains: options.extractDomains,
             });
-        });
+        }, Math.min(MAX_FILE_ANALYSIS_CONCURRENCY, options.maxFiles));
 
     files.push(...jsFileResults);
 
@@ -794,7 +861,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return url;
         }))];
 
-        const timeout = input.timeout || 15000;
+        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        const concurrency = clampInteger(
+            input.concurrency,
+            DEFAULT_CONCURRENCY,
+            MIN_CONCURRENCY,
+            MAX_CONCURRENCY,
+        );
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const maxFileSize = input.maxFileSize || 5242880;
         const extractEndpointsFlag = input.extractEndpoints !== false;
@@ -803,19 +876,38 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const followImports = input.followImports !== false;
         const maxFiles = input.maxFiles || 20;
 
-        // Process each URL through runtime scheduling
-        const allFilesArrays = await executeSequentially(baseUrls, async (baseUrl) => {
-                return await processSingleUrl(baseUrl, {
-                    timeout,
-                    userAgent,
-                    maxFileSize,
-                    extractEndpoints: extractEndpointsFlag,
-                    extractSecrets: extractSecretsFlag,
-                    extractDomains: extractDomainsFlag,
-                    followImports,
-                    maxFiles,
-                });
-            });
+        const monitorExecution = input.__monitorExecution;
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: baseUrls.length,
+            phase: "prepare",
+            message: `Preparing JavaScript analysis (${baseUrls.length} base URLs, concurrency ${concurrency})`,
+        });
+
+        let completedBaseUrls = 0;
+        const allFilesArrays = await executeConcurrently(baseUrls, async (baseUrl) => {
+                try {
+                    return await processSingleUrl(baseUrl, {
+                        timeout,
+                        userAgent,
+                        maxFileSize,
+                        extractEndpoints: extractEndpointsFlag,
+                        extractSecrets: extractSecretsFlag,
+                        extractDomains: extractDomainsFlag,
+                        followImports,
+                        maxFiles,
+                    });
+                } finally {
+                    completedBaseUrls += 1;
+                    await reportMonitorProgress(monitorExecution, {
+                        current: completedBaseUrls,
+                        total: baseUrls.length,
+                        currentTarget: baseUrl,
+                        phase: "analyze",
+                        message: `Analyzed JavaScript sources for ${baseUrl}`,
+                    });
+                }
+            }, concurrency);
 
         // Flatten results
         const allFiles: JsFile[] = allFilesArrays.flat();

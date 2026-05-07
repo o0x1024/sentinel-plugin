@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.1.0
+ * @version 2.2.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -18,6 +18,9 @@ declare const Sentinel: {
         getDefaultId?(dictType: string): Promise<string | null>;
         getEntries?(idOrName: string, limit?: number): Promise<any[]>;
     };
+    Monitor?: {
+        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
+    };
 };
 
 interface ToolInput {
@@ -27,9 +30,24 @@ interface ToolInput {
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
     timeout?: number;
+    concurrency?: number;
     userAgent?: string;
     maxTargets?: number;
     previousSnapshots?: Record<string, TechnologySnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
 }
 
 interface RuleEntry {
@@ -103,6 +121,44 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
+const DEFAULT_TIMEOUT_MS = 5000;
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 30000;
+const DEFAULT_CONCURRENCY = 16;
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 64;
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(Math.floor(parsed), max));
+}
 
 export function get_input_schema() {
     return {
@@ -114,6 +170,12 @@ export function get_input_schema() {
             dictionaryId: { type: "string", description: "Structured fingerprint dictionary ID or name" },
             dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
             timeout: { type: "integer", default: 10000, minimum: 1000, maximum: 60000 },
+            concurrency: {
+                type: "integer",
+                default: DEFAULT_CONCURRENCY,
+                minimum: MIN_CONCURRENCY,
+                maximum: MAX_CONCURRENCY,
+            },
             userAgent: { type: "string", default: "Sentinel-Tech-Fingerprinter/2.0" },
             maxTargets: { type: "integer", default: 20, minimum: 1, maximum: 200 },
             previousSnapshots: { type: "object", description: "Previous technology snapshots keyed by target URL" },
@@ -157,12 +219,23 @@ export function get_output_schema() {
 pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
 
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+async function runConcurrently<T>(
+    tasks: Array<() => Promise<T>>,
+    concurrency: number,
+): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(concurrency, tasks.length);
+
+    async function worker() {
+        while (nextIndex < tasks.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            results[index] = await tasks[index]();
+        }
     }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return results;
 }
 
@@ -380,9 +453,15 @@ function normalizeConfidence(value: unknown): number {
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        const timeout = Number(input.timeout || 10000);
+        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        const concurrency = clampInteger(
+            input.concurrency,
+            DEFAULT_CONCURRENCY,
+            MIN_CONCURRENCY,
+            MAX_CONCURRENCY,
+        );
         const userAgent = input.userAgent || "Sentinel-Tech-Fingerprinter/2.0";
-                const targets = Array.from(new Set([
+        const targets = Array.from(new Set([
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
             ...(Array.isArray(input.targets) ? input.targets.map(normalizeTarget) : []),
@@ -405,8 +484,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const changeEvents: ChangeEvent[] = [];
         const snapshots: Record<string, TechnologySnapshot> = {};
         const timestamp = new Date().toISOString();
+        const monitorExecution = input.__monitorExecution;
 
-        await runSequentially(targets.map((target) => async () => {
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: targets.length,
+            phase: "prepare",
+            message: `Preparing technology fingerprints (${targets.length} targets, concurrency ${concurrency})`,
+        });
+
+        let completedTargets = 0;
+        await runConcurrently(targets.map((target) => async () => {
                 try {
                     const response = await fetchWithTimeout(target, timeout, userAgent);
                     const body = await response.text();
@@ -512,8 +600,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         lastChecked: timestamp,
                     };
                     results.push({ url: target, technologies: [] });
+                } finally {
+                    completedTargets += 1;
+                    await reportMonitorProgress(monitorExecution, {
+                        current: completedTargets,
+                        total: targets.length,
+                        currentTarget: target,
+                        phase: "fingerprint",
+                        message: `Checked technology fingerprint for ${target}`,
+                    });
                 }
-            }));
+            }), concurrency);
 
         const uniqueTechnologies = Array.from(
             new Map(

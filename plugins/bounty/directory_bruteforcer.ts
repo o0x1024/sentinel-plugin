@@ -3,7 +3,7 @@
  * 
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.1.0
+ * @version 1.2.2
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -20,6 +20,9 @@ declare const Sentinel: {
         list(filter?: { dictType?: string; category?: string }): Promise<any[]>;
         getMergedWords(idsOrNames: string[], deduplicate?: boolean): Promise<string[]>;
     };
+    Monitor?: {
+        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
+    };
 };
 
 interface ToolInput {
@@ -28,6 +31,7 @@ interface ToolInput {
     dictionaryId?: string;  // Use dictionary from DB by ID or name
     extensions?: string[];
     timeout?: number;
+    concurrency?: number;
     userAgent?: string;
     followRedirects?: boolean;
     statusCodes?: number[];
@@ -36,6 +40,20 @@ interface ToolInput {
     recursive?: boolean;
     maxDepth?: number;
     customWordlist?: string[];
+    __monitorExecution?: MonitorExecutionContext;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
 }
 
 interface DiscoveredPath {
@@ -72,7 +90,43 @@ type PluginGlobals = typeof globalThis & {
 const pluginGlobals = globalThis as PluginGlobals;
 
 const DEFAULT_CONCURRENCY = 12;
+const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 40;
+const DEFAULT_TIMEOUT_MS = 5000;
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 30000;
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(Math.floor(parsed), max));
+}
 
 // Fallback wordlists (used when dictionary is not available)
 const FALLBACK_WORDLISTS: Record<string, string[]> = {
@@ -172,9 +226,16 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "Request timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 30000
+                default: DEFAULT_TIMEOUT_MS,
+                minimum: MIN_TIMEOUT_MS,
+                maximum: MAX_TIMEOUT_MS
+            },
+            concurrency: {
+                type: "integer",
+                description: "Maximum concurrent path probes",
+                default: DEFAULT_CONCURRENCY,
+                minimum: MIN_CONCURRENCY,
+                maximum: MAX_CONCURRENCY
             },
             userAgent: {
                 type: "string",
@@ -331,15 +392,23 @@ async function probePath(
     }
 }
 
-/**
- * Run tasks sequentially through runtime scheduling
- */
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+async function runConcurrently<T>(
+    tasks: Array<() => Promise<T>>,
+    concurrency: number,
+): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(concurrency, tasks.length);
+
+    async function worker() {
+        while (nextIndex < tasks.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            results[index] = await tasks[index]();
+        }
     }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return results;
 }
 
@@ -363,8 +432,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             baseUrl = `https://${baseUrl}`;
         }
         
-        const timeout = input.timeout || 10000;
-                const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
+        const concurrency = clampInteger(
+            input.concurrency,
+            DEFAULT_CONCURRENCY,
+            MIN_CONCURRENCY,
+            MAX_CONCURRENCY,
+        );
+        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const followRedirects = input.followRedirects === true;
         const statusCodes = input.statusCodes || [200, 201, 204, 301, 302, 307, 308, 401, 403];
         const excludeStatusCodes = input.excludeStatusCodes || [];
@@ -416,14 +491,35 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const uniquePaths = [...new Set(paths)].sort((left, right) => left.length - right.length || left.localeCompare(right));
         
         // Create probe tasks
-        const tasks = uniquePaths.map(path => () => probePath(baseUrl, path, {
-            timeout,
-            userAgent,
-            followRedirects,
-        }));
+        const monitorExecution = input.__monitorExecution;
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: uniquePaths.length,
+            phase: "prepare",
+            message: `Preparing directory brute force (${uniquePaths.length} paths, concurrency ${concurrency})`,
+        });
+
+        let completedPaths = 0;
+        const tasks = uniquePaths.map(path => async () => {
+            try {
+                return await probePath(baseUrl, path, {
+                    timeout,
+                    userAgent,
+                    followRedirects,
+                });
+            } finally {
+                completedPaths += 1;
+                await reportMonitorProgress(monitorExecution, {
+                    current: completedPaths,
+                    total: uniquePaths.length,
+                    currentTarget: buildUrl(baseUrl, path),
+                    phase: "probe",
+                    message: `Probed ${path}`,
+                });
+            }
+        });
         
-        // Execute through runtime scheduling
-        const results = await runSequentially(tasks);
+        const results = await runConcurrently(tasks, concurrency);
         
         // Filter results
         const discovered: DiscoveredPath[] = [];
