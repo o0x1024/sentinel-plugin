@@ -3,7 +3,7 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.0.1
+ * @version 1.1.0
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -57,15 +57,9 @@ interface ToolInput {
     targets: string[];
     recordTypes?: RecordType[];
     timeout?: number;
+    concurrency?: number;
     previousSnapshots?: Record<string, DnsSnapshot>;
     __monitorExecution?: MonitorExecutionContext;
-}
-
-interface DnsAnswer {
-    name: string;
-    type: number;
-    TTL?: number;
-    data: string;
 }
 
 interface DnsQueryResult {
@@ -129,18 +123,22 @@ type PluginGlobals = typeof globalThis & {
 const pluginGlobals = globalThis as PluginGlobals;
 
 const DEFAULT_RECORD_TYPES: RecordType[] = ["A", "AAAA", "CNAME", "MX", "NS", "TXT"];
-const DOH_ENDPOINTS = [
-    "https://cloudflare-dns.com/dns-query",
-    "https://dns.google/resolve",
-];
+const SUPPORTED_RECORD_TYPES = new Set<RecordType>(DEFAULT_RECORD_TYPES);
+const DEFAULT_TIMEOUT_MS = 5000;
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 30000;
+const DEFAULT_CONCURRENCY = 64;
+const MIN_CONCURRENCY = 1;
+const MAX_CONCURRENCY = 128;
 
-const DNS_TYPE_CODES: Record<RecordType, number> = {
-    A: 1,
-    NS: 2,
-    CNAME: 5,
-    MX: 15,
-    TXT: 16,
-    AAAA: 28,
+type DenoDnsApi = {
+    resolveDns?: (name: string, recordType: string) => Promise<unknown[]>;
+};
+
+declare const Sentinel: {
+    Monitor?: {
+        reportProgress?: (request: Record<string, unknown>) => Promise<boolean> | boolean;
+    };
 };
 
 function normalizeTarget(value: string): string {
@@ -169,55 +167,124 @@ function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+function getNativeDnsApi(): DenoDnsApi {
+    const deno = (globalThis as typeof globalThis & { Deno?: DenoDnsApi }).Deno;
+    if (typeof deno?.resolveDns !== "function") {
+        throw new Error("Deno.resolveDns is required for dns_resolver");
+    }
+    return deno;
+}
+
+function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(Math.floor(parsed), max));
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
     try {
-        return await fetch(url, {
-            ...init,
-            signal: controller.signal,
-        });
+        return await Promise.race([promise, timeoutPromise]);
     } finally {
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
     }
 }
 
-async function queryDoh(name: string, recordType: RecordType, timeout: number): Promise<DnsAnswer[]> {
-    for (const endpoint of DOH_ENDPOINTS) {
-        const url = `${endpoint}?name=${encodeURIComponent(name)}&type=${recordType}`;
-        try {
-            const response = await fetchWithTimeout(
-                url,
-                {
-                    method: "GET",
-                    headers: {
-                        "accept": "application/dns-json",
-                    },
-                },
-                timeout,
-            );
-            if (!response.ok) {
-                continue;
-            }
+function createLimiter(limit: number): <T>(task: () => Promise<T>) => Promise<T> {
+    let active = 0;
+    const queue: Array<() => void> = [];
 
-            const data = await response.json();
-            if (!Array.isArray(data?.Answer)) {
-                return [];
-            }
-            return data.Answer as DnsAnswer[];
-        } catch {
-            continue;
+    async function acquire(): Promise<void> {
+        if (active < limit) {
+            active += 1;
+            return;
+        }
+        await new Promise<void>((resolve) => queue.push(resolve));
+        active += 1;
+    }
+
+    function release() {
+        active = Math.max(0, active - 1);
+        const next = queue.shift();
+        if (next) next();
+    }
+
+    return async function runLimited<T>(task: () => Promise<T>): Promise<T> {
+        await acquire();
+        try {
+            return await task();
+        } finally {
+            release();
+        }
+    };
+}
+
+function formatNativeDnsValue(recordType: RecordType, value: unknown): string {
+    if (typeof value === "string") return value.trim();
+    if (Array.isArray(value)) {
+        return value
+            .map((part) => Array.isArray(part) ? part.join("") : String(part || ""))
+            .join("")
+            .trim();
+    }
+    if (value && typeof value === "object") {
+        const objectValue = value as Record<string, unknown>;
+        if (recordType === "MX") {
+            const preference = objectValue.preference ?? objectValue.priority;
+            const exchange = objectValue.exchange ?? objectValue.host;
+            return [preference, exchange]
+                .filter((part) => part !== undefined && part !== null && String(part).trim())
+                .join(" ")
+                .trim();
+        }
+        return Object.values(objectValue)
+            .filter((part) => part !== undefined && part !== null && String(part).trim())
+            .join(" ")
+            .trim();
+    }
+    return String(value || "").trim();
+}
+
+async function queryNativeDns(name: string, recordType: RecordType, timeout: number): Promise<DnsQueryResult["records"]> {
+    const deno = getNativeDnsApi();
+    try {
+        const values = await withTimeout(
+            deno.resolveDns!(name, recordType),
+            timeout,
+            `${recordType} lookup for ${name}`,
+        );
+        if (!Array.isArray(values)) return [];
+        return values
+            .map((value) => ({
+                recordType,
+                value: formatNativeDnsValue(recordType, value),
+            }))
+            .filter((record) => record.value.length > 0);
+    } catch {
+        return [];
+    }
+}
+
+async function runConcurrently<T>(
+    tasks: Array<() => Promise<T>>,
+    concurrency: number,
+): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workerCount = Math.min(concurrency, tasks.length);
+
+    async function worker() {
+        while (nextIndex < tasks.length) {
+            const index = nextIndex;
+            nextIndex += 1;
+            results[index] = await tasks[index]();
         }
     }
-    return [];
-}
 
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
-    }
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
     return results;
 }
 
@@ -318,9 +385,16 @@ export function get_input_schema() {
             timeout: {
                 type: "integer",
                 description: "DNS query timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 60000,
+                default: DEFAULT_TIMEOUT_MS,
+                minimum: MIN_TIMEOUT_MS,
+                maximum: MAX_TIMEOUT_MS,
+            },
+            concurrency: {
+                type: "integer",
+                description: "Maximum concurrent DNS queries",
+                default: DEFAULT_CONCURRENCY,
+                minimum: MIN_CONCURRENCY,
+                maximum: MAX_CONCURRENCY,
             },
             previousSnapshots: {
                 type: "object",
@@ -382,36 +456,51 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const timeout = Math.max(1000, Math.min(input.timeout || 10000, 60000));
-                const recordTypes = (input.recordTypes?.length ? input.recordTypes : DEFAULT_RECORD_TYPES)
-            .filter((type): type is RecordType => type in DNS_TYPE_CODES);
+        getNativeDnsApi();
+
+        const timeout = clampInteger(
+            input.timeout,
+            DEFAULT_TIMEOUT_MS,
+            MIN_TIMEOUT_MS,
+            MAX_TIMEOUT_MS,
+        );
+        const concurrency = clampInteger(
+            input.concurrency,
+            DEFAULT_CONCURRENCY,
+            MIN_CONCURRENCY,
+            MAX_CONCURRENCY,
+        );
+        const recordTypes = (input.recordTypes?.length ? input.recordTypes : DEFAULT_RECORD_TYPES)
+            .filter((type): type is RecordType => SUPPORTED_RECORD_TYPES.has(type as RecordType));
+        if (recordTypes.length === 0) {
+            return {
+                success: false,
+                error: "No supported DNS record types to resolve",
+            };
+        }
         const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
         const totalProgressUnits = targets.length + 2;
         const timestamp = new Date().toISOString();
+        const runDnsQuery = createLimiter(concurrency);
 
         await reportMonitorProgress(monitorExecution, {
             current: 0,
             total: totalProgressUnits,
             phase: "prepare",
-            message: "Preparing DNS resolution",
+            message: `Preparing DNS resolution (${targets.length} targets, ${recordTypes.length} record types, concurrency ${concurrency})`,
         });
 
         let completedTargets = 0;
 
         const tasks = targets.map((target) => async (): Promise<DnsQueryResult> => {
             try {
-                const records: DnsQueryResult["records"] = [];
-                for (const recordType of recordTypes) {
-                    const answers = await queryDoh(target, recordType, timeout);
-                    for (const answer of answers) {
-                        records.push({
-                            recordType,
-                            value: String(answer.data || "").trim(),
-                            ttl: answer.TTL,
-                        });
-                    }
-                }
+                const recordGroups = await Promise.all(
+                    recordTypes.map((recordType) =>
+                        runDnsQuery(() => queryNativeDns(target, recordType, timeout)),
+                    ),
+                );
+                const records = recordGroups.flat();
 
                 return {
                     target,
@@ -437,7 +526,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         });
 
-        const results = await runSequentially(tasks);
+        const results = await runConcurrently(tasks, concurrency);
         await reportMonitorProgress(monitorExecution, {
             current: targets.length + 1,
             total: totalProgressUnits,
