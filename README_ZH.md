@@ -7,7 +7,7 @@
 ## 简介
 
 本仓库包含社区贡献和官方开发的 Sentinel AI 插件，包括：
-- **被动扫描插件** - 分析 HTTP 流量并主动验证漏洞
+- **流量扫描插件** - 分析 HTTP 流量并主动验证漏洞
 - **Agent 工具插件** - 为 AI Agent 提供安全测试工具
 - **漏洞赏金插件** - 面向漏洞赏金资产发现、验证和持续监控的执行型插件
 
@@ -19,7 +19,7 @@ sentinel-plugin/
 ├── README_ZH.md           # 中文文档
 ├── plugins.json           # 插件清单（必需）
 └── plugins/
-    ├── traffic/           # 流量/被动扫描插件
+    ├── traffic/           # 流量扫描插件
     │   ├── sql_injection_detector.ts
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
@@ -123,9 +123,9 @@ import axios from "https://unpkg.com/axios/dist/axios.min.js";
 
 ## 插件开发
 
-### 被动扫描插件
+### 流量扫描插件
 
-被动插件从代理拦截 HTTP 事务。与简单的模式匹配不同，**有效的被动插件应该主动发送 payload 来验证漏洞**。
+流量插件从代理拦截 HTTP 事务。与简单的模式匹配不同，**有效的流量插件应该主动发送 payload 来验证漏洞**。
 
 #### 插件模式
 
@@ -461,7 +461,7 @@ Sentinel.emitFinding({
 
 ## 插件分类
 
-### 被动扫描分类
+### 流量扫描分类
 - `sqli` - SQL 注入
 - `xss` - 跨站脚本
 - `command_injection` - 命令注入

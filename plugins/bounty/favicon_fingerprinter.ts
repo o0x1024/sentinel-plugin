@@ -173,14 +173,25 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
     return [];
 }
 
-function normalizeTarget(value: string): string {
+function normalizeWebAssetKey(value: string): string {
     const trimmed = String(value || "").trim();
     if (!trimmed) return "";
     try {
-        return new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`).toString();
+        const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+        if (url.pathname === "/") {
+            url.pathname = "";
+        }
+        if (!url.search && !url.hash) {
+            return url.toString().replace(/\/$/, "");
+        }
+        return url.toString();
     } catch {
         return "";
     }
+}
+
+function normalizeTarget(value: string): string {
+    return normalizeWebAssetKey(value);
 }
 
 function toWrappedBase64(buffer: ArrayBuffer): string {
@@ -335,6 +346,7 @@ async function fingerprintTarget(
     rules: RuleEntry[],
 ): Promise<FingerprintResult & { fingerprint?: any; evidence?: any }> {
     const canonicalUrl = new URL(target);
+    const assetKey = normalizeWebAssetKey(canonicalUrl.toString());
     try {
         const pageResponse = await fetchWithTimeout(
             canonicalUrl.toString(),
@@ -365,7 +377,7 @@ async function fingerprintTarget(
                 const matchedRule = matchFaviconRule(faviconHash, iconUrl, rules);
                 const metadata = parseMetadata(matchedRule?.metadata);
                 return {
-                    target: canonicalUrl.toString(),
+                    target: assetKey,
                     success: true,
                     iconUrl,
                     faviconHash,
@@ -374,7 +386,7 @@ async function fingerprintTarget(
                     fingerprint: matchedRule && metadata.product && metadata.asset_category
                         ? {
                             asset_type: "web",
-                            asset_key: canonicalUrl.toString(),
+                            asset_key: assetKey,
                             fingerprint_type: "favicon",
                             fingerprint_key: iconUrl,
                             fingerprint_value: faviconHash,
@@ -391,7 +403,7 @@ async function fingerprintTarget(
                         : undefined,
                     evidence: {
                         asset_type: "web",
-                        asset_key: canonicalUrl.toString(),
+                        asset_key: assetKey,
                         evidence_type: "favicon_metadata",
                         title: `Favicon fingerprint for ${canonicalUrl.hostname}`,
                         content_json: {
@@ -408,13 +420,13 @@ async function fingerprintTarget(
         }
 
         return {
-            target: canonicalUrl.toString(),
+            target: assetKey,
             success: false,
             error: "No favicon could be fetched",
         };
     } catch (error) {
         return {
-            target: canonicalUrl.toString(),
+            target: assetKey,
             success: false,
             error: error instanceof Error ? error.message : String(error),
         };
@@ -458,6 +470,16 @@ export function get_input_schema() {
             dictionaryEntries: {
                 type: "array",
                 description: "Structured rule entries injected by workflow",
+                items: {
+                    type: "object",
+                    properties: {
+                        id: { type: "string" },
+                        word: { type: "string" },
+                        category: { type: "string" },
+                        metadata: { type: "object" },
+                    },
+                    required: ["word"],
+                },
             },
             timeout: {
                 type: "integer",
@@ -493,8 +515,31 @@ export function get_output_schema() {
                 type: "object",
                 properties: {
                     targets: { type: "array", items: { type: "string" } },
-                    results: { type: "array" },
-                    summary: { type: "object" },
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                target: { type: "string" },
+                                success: { type: "boolean" },
+                                iconUrl: { type: "string" },
+                                faviconHash: { type: "string" },
+                                contentType: { type: "string" },
+                                bytes: { type: "number" },
+                                error: { type: "string" },
+                            },
+                            required: ["target", "success"],
+                        },
+                    },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "number" },
+                            successfulFingerprints: { type: "number" },
+                            failedFingerprints: { type: "number" },
+                        },
+                        required: ["totalTargets", "successfulFingerprints", "failedFingerprints"],
+                    },
                     surface_artifacts: {
                         type: "object",
                         description: "Favicon fingerprint and evidence artifacts that enrich matching existing web assets without creating web assets",
@@ -502,10 +547,12 @@ export function get_output_schema() {
                             fingerprints: {
                                 type: "array",
                                 description: "Strict favicon fingerprint artifacts with explicit rule_* and normalized_* fields",
+                                items: { type: "object" },
                             },
                             evidences: {
                                 type: "array",
                                 description: "Structured favicon evidence artifacts",
+                                items: { type: "object" },
                             },
                         },
                     },

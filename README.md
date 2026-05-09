@@ -7,7 +7,7 @@ Official plugin repository for [Sentinel AI](https://github.com/o0x1024/sentinel
 ## Introduction
 
 This repository contains community-contributed and official plugins for Sentinel AI, including:
-- **Passive Scan Plugins** - Analyze HTTP traffic and actively verify vulnerabilities
+- **Traffic Scan Plugins** - Analyze HTTP traffic and actively verify vulnerabilities
 - **Agent Tool Plugins** - Provide tools for AI agents to perform security tasks
 - **Bug Bounty Plugins** - Execution plugins for bug bounty asset discovery, verification, and monitoring
 
@@ -19,7 +19,7 @@ sentinel-plugin/
 ├── README_ZH.md           # Chinese documentation
 ├── plugins.json           # Plugin manifest (required)
 └── plugins/
-    ├── traffic/           # Traffic/passive scan plugins
+    ├── traffic/           # Traffic scan plugins
     │   ├── sql_injection_detector.ts
     │   ├── xss_detector.ts
     │   └── sensitive_info_detector.ts
@@ -122,9 +122,9 @@ import axios from "https://unpkg.com/axios/dist/axios.min.js";
 
 ## Plugin Development
 
-### Passive Scan Plugin
+### Traffic Scan Plugin
 
-Passive plugins intercept HTTP transactions from the proxy. Unlike simple pattern matching, **effective passive plugins should actively send payloads to verify vulnerabilities**.
+Traffic plugins intercept HTTP transactions from the proxy. Unlike simple pattern matching, **effective traffic plugins should actively send payloads to verify vulnerabilities**.
 
 #### Plugin Modes
 
@@ -460,7 +460,7 @@ Sentinel.emitFinding({
 
 ## Plugin Categories
 
-### Passive Scan Categories
+### Traffic Scan Categories
 - `sqli` - SQL Injection
 - `xss` - Cross-Site Scripting
 - `command_injection` - Command Injection

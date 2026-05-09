@@ -3,13 +3,13 @@
  * 
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.2.0
+ * @version 1.3.1
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
  * @default_severity high
  * @tags api, endpoint, monitor, change-detection, rest, javascript, spa
- * @description Monitor API endpoints for changes by discovering JavaScript assets and extracting API-like path literals from JS bundles and pages
+ * @description Monitor API endpoints and HTML routes by discovering JavaScript assets from pages and bundles, extracting API-like and route-like path literals, and comparing snapshot changes over time
  */
 
 // Declare Sentinel API for JS analysis
@@ -67,7 +67,6 @@ async function reportMonitorProgress(
 
 interface ToolInput {
     targets: string[];  // Base URLs or JS files to analyze
-    timeout?: number;
     userAgent?: string;
     crawlDepth?: number;
     maxPages?: number;
@@ -115,6 +114,24 @@ interface JsDiscoveryResult {
     jsLinks: JsLink[];
     scriptContents: ScriptContentSource[];
     crawledPages: string[];
+    htmlRoutes: HtmlRoute[];
+    jsFetchFailures: JsFetchFailure[];
+    timings: {
+        pageCrawlMs: number;
+        manifestProbeMs: number;
+        jsFetchMs: number;
+        sourceMapFetchMs: number;
+        nestedJsDiscoveryMs: number;
+    };
+    metrics: {
+        pageFetchCount: number;
+        manifestRequests: number;
+        jsFetchCount: number;
+        jsFetchFailureCount: number;
+        sourceMapFetchCount: number;
+        jsLinksDiscovered: number;
+        inlineScriptCount: number;
+    };
 }
 
 interface ApiEndpoint {
@@ -122,10 +139,27 @@ interface ApiEndpoint {
     source: string;
 }
 
+interface HtmlRoute {
+    path: string;
+    source: string;
+}
+
 interface ApiSnapshot {
     baseUrl: string;
-    endpoints: ApiEndpoint[];
+    htmlRoutes: HtmlRoute[];
+    apiEndpoints: ApiEndpoint[];
     lastChecked: string;
+}
+
+interface JsFetchFailure {
+    url: string;
+    finalUrl?: string;
+    linkType: JsLink["type"];
+    discoverySource: string;
+    status: number | null;
+    contentType?: string;
+    size?: number;
+    error?: string;
 }
 
 interface ChangeEvent {
@@ -148,8 +182,36 @@ interface ApiResult {
     baseUrl: string;
     success: boolean;
     snapshot?: ApiSnapshot;
-    addedEndpoints?: ApiEndpoint[];
-    removedEndpoints?: ApiEndpoint[];
+    addedHtmlRoutes?: HtmlRoute[];
+    removedHtmlRoutes?: HtmlRoute[];
+    addedApiEndpoints?: ApiEndpoint[];
+    removedApiEndpoints?: ApiEndpoint[];
+    jsFetchFailures?: JsFetchFailure[];
+    timings?: {
+        targetFetchMs: number;
+        assetDiscoveryMs: number;
+        pageCrawlMs: number;
+        manifestProbeMs: number;
+        jsFetchMs: number;
+        sourceMapFetchMs: number;
+        nestedJsDiscoveryMs: number;
+        astExtractionMs: number;
+        compareMs: number;
+        totalMs: number;
+    };
+    metrics?: {
+        crawledPages: number;
+        htmlRoutesDiscovered: number;
+        scriptSources: number;
+        jsFilesAnalyzed: number;
+        pageFetchCount: number;
+        manifestRequests: number;
+        jsFetchCount: number;
+        jsFetchFailureCount: number;
+        sourceMapFetchCount: number;
+        jsLinksDiscovered: number;
+        inlineScriptCount: number;
+    };
     error?: string;
 }
 
@@ -163,10 +225,14 @@ interface ToolOutput {
             totalTargets: number;
             successfulChecks: number;
             failedChecks: number;
-            totalEndpoints: number;
+            totalHtmlRoutes: number;
+            totalApiEndpoints: number;
             totalJsFiles: number;
-            addedEndpoints: number;
-            removedEndpoints: number;
+            addedHtmlRoutes: number;
+            removedHtmlRoutes: number;
+            addedApiEndpoints: number;
+            removedApiEndpoints: number;
+            routeChanges: number;
             apiChanges: number;
         };
     };
@@ -199,9 +265,24 @@ async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> 
     return results;
 }
 
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    const results: T[] = [];
+    let index = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
 const DEFAULT_MAX_JS_FILES = 100;
 const DEFAULT_PAGE_CRAWL_LIMIT = 20;
 const DEFAULT_MAX_PAGES = 20;
+const PAGE_FETCH_CONCURRENCY_LIMIT = 6;
 const MAX_LITERAL_SCAN_MATCHES = 5000;
 const MAX_PATH_CANDIDATE_LENGTH = 2048;
 const EXCLUDED_STATIC_PREFIXES = [
@@ -267,6 +348,65 @@ const EXCLUDED_STATIC_EXTENSIONS = new Set([
     "ttf",
     "eot",
 ]);
+const API_ROUTE_PREFIXES = [
+    "/api/",
+    "/rest/",
+    "/graphql",
+    "/graphiql",
+    "/content/",
+    "/channel/",
+    "/service/",
+    "/services/",
+    "/gateway/",
+    "/open/",
+    "/rpc/",
+    "/v1/",
+    "/v2/",
+    "/v3/",
+    "/v4/",
+    "/v5/",
+];
+const API_ROUTE_EXACT_PATHS = new Set([
+    "/api",
+    "/rest",
+    "/graphql",
+    "/graphiql",
+]);
+
+function normalizeCommonPathCandidate(value: string, allowRoot: boolean): string | null {
+    const pathCandidate = extractPathCandidate(value);
+    if (!pathCandidate) return null;
+
+    const normalizedPath = pathCandidate.split("#")[0].split("?")[0].trim();
+    if (!normalizedPath || !normalizedPath.startsWith("/") || normalizedPath.startsWith("//")) {
+        return null;
+    }
+    if (normalizedPath.length > MAX_PATH_CANDIDATE_LENGTH) {
+        return null;
+    }
+    if (/[\s\\]/.test(normalizedPath)) {
+        return null;
+    }
+    if (!allowRoot && EXCLUDED_EXACT_PATHS.has(normalizedPath)) {
+        return null;
+    }
+    if (EXCLUDED_STATIC_PREFIXES.some(prefix => normalizedPath.startsWith(prefix))) {
+        return null;
+    }
+    if (isStaticAssetPath(normalizedPath)) {
+        return null;
+    }
+
+    return normalizedPath;
+}
+
+function looksLikeApiPath(path: string): boolean {
+    if (API_ROUTE_EXACT_PATHS.has(path)) {
+        return true;
+    }
+
+    return API_ROUTE_PREFIXES.some(prefix => path.startsWith(prefix));
+}
 
 function extractPathCandidate(value: string): string | null {
     const normalizedValue = String(value || "").trim();
@@ -298,29 +438,20 @@ function isStaticAssetPath(path: string): boolean {
 }
 
 function normalizeEndpointPath(value: string): string | null {
-    const pathCandidate = extractPathCandidate(value);
-    if (!pathCandidate) return null;
+    const normalizedPath = normalizeCommonPathCandidate(value, false);
+    if (!normalizedPath) return null;
+    if (!looksLikeApiPath(normalizedPath)) {
+        return null;
+    }
+    return normalizedPath;
+}
 
-    const normalizedPath = pathCandidate.split("#")[0].split("?")[0].trim();
-    if (!normalizedPath || !normalizedPath.startsWith("/") || normalizedPath.startsWith("//")) {
+function normalizeHtmlRoutePath(value: string): string | null {
+    const normalizedPath = normalizeCommonPathCandidate(value, true);
+    if (!normalizedPath) return null;
+    if (looksLikeApiPath(normalizedPath)) {
         return null;
     }
-    if (normalizedPath.length > MAX_PATH_CANDIDATE_LENGTH) {
-        return null;
-    }
-    if (/[\s\\]/.test(normalizedPath)) {
-        return null;
-    }
-    if (EXCLUDED_EXACT_PATHS.has(normalizedPath)) {
-        return null;
-    }
-    if (EXCLUDED_STATIC_PREFIXES.some(prefix => normalizedPath.startsWith(prefix))) {
-        return null;
-    }
-    if (isStaticAssetPath(normalizedPath)) {
-        return null;
-    }
-
     return normalizedPath;
 }
 
@@ -341,16 +472,42 @@ function pushApiEndpoint(
     });
 }
 
-// Extract API endpoints from JavaScript content
-function extractApisFromJs(content: string, source: string): ApiEndpoint[] {
-    const endpoints: ApiEndpoint[] = [];
-    const seen = new Set<string>();
+function pushHtmlRoute(
+    routes: HtmlRoute[],
+    seen: Set<string>,
+    pathCandidate: string,
+    source: string,
+) {
+    const normalizedPath = normalizeHtmlRoutePath(pathCandidate);
+    if (!normalizedPath) return;
+
+    if (seen.has(normalizedPath)) return;
+    seen.add(normalizedPath);
+    routes.push({
+        path: normalizedPath,
+        source,
+    });
+}
+
+function extractPathsFromJs(content: string, source: string): {
+    htmlRoutes: HtmlRoute[];
+    apiEndpoints: ApiEndpoint[];
+} {
+    const htmlRoutes: HtmlRoute[] = [];
+    const apiEndpoints: ApiEndpoint[] = [];
+    const seenHtmlRoutes = new Set<string>();
+    const seenApiEndpoints = new Set<string>();
     const result = Sentinel.AST.parse(content, source);
     for (const literal of result.literals.slice(0, MAX_LITERAL_SCAN_MATCHES)) {
-        pushApiEndpoint(endpoints, seen, literal.value.trim(), source);
+        const candidate = literal.value.trim();
+        pushApiEndpoint(apiEndpoints, seenApiEndpoints, candidate, source);
+        pushHtmlRoute(htmlRoutes, seenHtmlRoutes, candidate, source);
     }
-    
-    return endpoints;
+
+    return {
+        htmlRoutes,
+        apiEndpoints,
+    };
 }
 
 function simpleHash(str: string): string {
@@ -398,13 +555,9 @@ function looksLikeJs(path: string): boolean {
 
 async function fetchWithTimeout(
     url: string,
-    timeout: number,
     userAgent: string,
     accept = "text/html,application/xhtml+xml,application/xml;q=0.9,application/javascript,*/*;q=0.8",
 ): Promise<FetchResult | null> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-
     try {
         const response = await fetch(url, {
             headers: {
@@ -412,18 +565,13 @@ async function fetchWithTimeout(
                 "Accept": accept,
                 "Accept-Language": "en-US,en;q=0.5",
             },
-            signal: controller.signal,
             redirect: "follow",
         });
 
-        clearTimeout(timeoutId);
         const text = await response.text();
         return { ok: response.ok, status: response.status, text, size: text.length, contentType: response.headers.get("content-type") || "", finalUrl: response.url || url };
     } catch (error: any) {
-        clearTimeout(timeoutId);
-        const message = error?.name === "AbortError"
-            ? `Request timed out after ${timeout}ms`
-            : (error?.message || String(error) || "Unknown fetch error");
+        const message = error?.message || String(error) || "Unknown fetch error";
         return { ok: false, status: null, text: "", size: 0, contentType: "", finalUrl: url, error: message };
     }
 }
@@ -537,6 +685,46 @@ function extractInlineScripts(html: string): Array<{ content: string; hash: stri
     return scripts;
 }
 
+function extractWebpackRuntimeChunkLinks(content: string, baseUrl: string): JsLink[] {
+    const links: JsLink[] = [];
+    const seenUrls = new Set<string>();
+    const publicPaths = new Set<string>();
+    let match: RegExpExecArray | null;
+
+    const publicPathRegex = /\b[\w$]+\.p\s*=\s*["']([^"']+\/)["']/g;
+    while ((match = publicPathRegex.exec(content)) !== null) {
+        publicPaths.add(match[1]);
+    }
+
+    if (publicPaths.size === 0) {
+        return links;
+    }
+
+    const chunkMapRegex = /\{((?:(?:"[^"]+"|'[^']+'|\d+)\s*:\s*"[^"]+"\s*,?\s*)+)\}\[e\]\+\s*["']\.js["']/g;
+    while ((match = chunkMapRegex.exec(content)) !== null) {
+        const mapBody = match[1];
+        const pairRegex = /(?:"[^"]+"|'[^']+'|\d+)\s*:\s*"([^"]+)"/g;
+        let pairMatch: RegExpExecArray | null;
+
+        while ((pairMatch = pairRegex.exec(mapBody)) !== null) {
+            const chunkName = pairMatch[1];
+            if (!chunkName) continue;
+            for (const publicPath of publicPaths) {
+                pushDiscoveredJsLink(
+                    links,
+                    seenUrls,
+                    baseUrl,
+                    `${publicPath}${chunkName}.js`,
+                    "webpack",
+                    "webpack_runtime",
+                );
+            }
+        }
+    }
+
+    return links;
+}
+
 function pushDiscoveredJsLink(
     links: JsLink[],
     seenUrls: Set<string>,
@@ -607,6 +795,10 @@ function extractJsFromContent(content: string, baseUrl: string): JsLink[] {
     const escapedChunkRegex = /((?:\\\/)+(?:_next|_nuxt|assets|static|build|dist|js|chunks?|webpack|runtime)(?:[^"'\\]|\\.)+?\.js(?:\?[^"'\\\s]*)?)/gi;
     while ((match = escapedChunkRegex.exec(content)) !== null) {
         pushDiscoveredJsLink(links, seenUrls, baseUrl, match[1], "webpack", "escaped_chunk");
+    }
+
+    for (const runtimeChunkLink of extractWebpackRuntimeChunkLinks(content, baseUrl)) {
+        pushDiscoveredJsLink(links, seenUrls, baseUrl, runtimeChunkLink.url, runtimeChunkLink.type, runtimeChunkLink.source);
     }
 
     return links;
@@ -733,8 +925,8 @@ function getManifestUrls(baseUrl: string): string[] {
         .filter(Boolean);
 }
 
-function getSameOriginLinks(html: string, baseUrl: string): string[] {
-    const links: string[] = [];
+function extractSameOriginPageLinks(html: string, baseUrl: string): Array<{ url: string; path: string }> {
+    const links: Array<{ url: string; path: string }> = [];
     const seenUrls = new Set<string>();
     const linkRegex = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>/gi;
     let match;
@@ -745,10 +937,10 @@ function getSameOriginLinks(html: string, baseUrl: string): string[] {
 
         const url = resolveUrl(baseUrl, href);
         if (url && !seenUrls.has(url) && isSameOrigin(baseUrl, url)) {
-            const path = new URL(url).pathname;
-            if (!/\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|pdf|zip)$/i.test(path)) {
+            const path = normalizeHtmlRoutePath(url);
+            if (path) {
                 seenUrls.add(url);
-                links.push(url);
+                links.push({ url, path });
             }
         }
     }
@@ -775,7 +967,6 @@ function pushJsLink(
 async function discoverJavascriptAssets(
     baseUrl: string,
     initialHtml: string,
-    timeout: number,
     userAgent: string,
     crawlDepth: number,
     maxPages: number,
@@ -786,8 +977,28 @@ async function discoverJavascriptAssets(
 ): Promise<JsDiscoveryResult> {
     const jsLinks: JsLink[] = [];
     const scriptContents: ScriptContentSource[] = [];
+    const htmlRoutes: HtmlRoute[] = [];
+    const jsFetchFailures: JsFetchFailure[] = [];
     const crawledPages: string[] = [baseUrl];
+    const discoveryTimings = {
+        pageCrawlMs: 0,
+        manifestProbeMs: 0,
+        jsFetchMs: 0,
+        sourceMapFetchMs: 0,
+        nestedJsDiscoveryMs: 0,
+    };
+    const discoveryMetrics = {
+        pageFetchCount: 0,
+        manifestRequests: 0,
+        jsFetchCount: 0,
+        jsFetchFailureCount: 0,
+        sourceMapFetchCount: 0,
+        jsLinksDiscovered: 0,
+        inlineScriptCount: 0,
+    };
     const seenJsUrls = new Set<string>();
+    const seenHtmlRoutes = new Set<string>();
+    const pageFetchConcurrency = PAGE_FETCH_CONCURRENCY_LIMIT;
     const pagesToCrawl: Array<{ url: string; depth: number; html?: string }> = [
         { url: baseUrl, depth: 0, html: initialHtml },
     ];
@@ -795,57 +1006,106 @@ async function discoverJavascriptAssets(
     const queuedPages = new Set<string>([baseUrl]);
 
     while (pagesToCrawl.length > 0 && jsLinks.length < maxJsFiles && visitedPages.size < maxPages) {
-        const current = pagesToCrawl.shift();
-        if (!current || visitedPages.has(current.url)) {
-            continue;
+        const remainingPageBudget = maxPages - visitedPages.size;
+        if (remainingPageBudget <= 0) {
+            break;
         }
-        visitedPages.add(current.url);
 
-        let html = current.html;
-        if (typeof html !== "string") {
-            const pageResult = await fetchWithTimeout(current.url, timeout, userAgent);
-            if (!pageResult || !pageResult.ok) {
+        const batch = pagesToCrawl.splice(0, Math.min(pageFetchConcurrency, remainingPageBudget, pagesToCrawl.length));
+        const pageBatch = await runWithConcurrency(
+            batch.map((current) => async () => {
+                if (visitedPages.has(current.url)) {
+                    return null;
+                }
+                visitedPages.add(current.url);
+
+                if (typeof current.html === "string") {
+                    return {
+                        current,
+                        html: current.html,
+                        fetchedRemotely: false,
+                        fetchDurationMs: 0,
+                    };
+                }
+
+                const pageFetchStartedAt = Date.now();
+                const pageResult = await fetchWithTimeout(current.url, userAgent);
+                if (!pageResult || !pageResult.ok) {
+                    return null;
+                }
+
+                return {
+                    current,
+                    html: pageResult.text,
+                    fetchedRemotely: true,
+                    fetchDurationMs: Date.now() - pageFetchStartedAt,
+                };
+            }),
+            Math.min(pageFetchConcurrency, batch.length || 1),
+        );
+
+        for (const page of pageBatch) {
+            if (!page) {
                 continue;
             }
-            html = pageResult.text;
-            crawledPages.push(current.url);
-        }
 
-        for (const link of extractScriptTags(html, current.url)) {
-            pushJsLink(jsLinks, seenJsUrls, link, maxJsFiles, includeSameOriginOnly, baseUrl);
-        }
-        for (const link of extractLinkTags(html, current.url)) {
-            pushJsLink(jsLinks, seenJsUrls, link, maxJsFiles, includeSameOriginOnly, baseUrl);
-        }
+            const { current, html, fetchedRemotely } = page;
+            if (fetchedRemotely) {
+                crawledPages.push(current.url);
+                discoveryMetrics.pageFetchCount += 1;
+                discoveryTimings.pageCrawlMs += page.fetchDurationMs;
+            }
 
-        for (const inlineScript of extractInlineScripts(html)) {
-            scriptContents.push({
-                source: `inline://${current.url}#${inlineScript.hash}`,
-                content: inlineScript.content,
-            });
-            for (const link of extractJsFromContent(inlineScript.content, current.url)) {
+            pushHtmlRoute(htmlRoutes, seenHtmlRoutes, current.url, `page:${current.url}`);
+
+            for (const link of extractScriptTags(html, current.url)) {
                 pushJsLink(jsLinks, seenJsUrls, link, maxJsFiles, includeSameOriginOnly, baseUrl);
             }
-        }
+            for (const link of extractLinkTags(html, current.url)) {
+                pushJsLink(jsLinks, seenJsUrls, link, maxJsFiles, includeSameOriginOnly, baseUrl);
+            }
 
-        if (crawlDepth > 1 && current.depth < crawlDepth - 1) {
-            for (const pageUrl of getSameOriginLinks(html, current.url).slice(0, DEFAULT_PAGE_CRAWL_LIMIT)) {
-                if (visitedPages.size + pagesToCrawl.length >= maxPages) {
-                    break;
+            for (const inlineScript of extractInlineScripts(html)) {
+                discoveryMetrics.inlineScriptCount += 1;
+                scriptContents.push({
+                    source: `inline://${current.url}#${inlineScript.hash}`,
+                    content: inlineScript.content,
+                });
+                const nestedDiscoveryStartedAt = Date.now();
+                for (const link of extractJsFromContent(inlineScript.content, current.url)) {
+                    pushJsLink(jsLinks, seenJsUrls, link, maxJsFiles, includeSameOriginOnly, baseUrl);
                 }
-                if (!visitedPages.has(pageUrl) && !queuedPages.has(pageUrl)) {
-                    queuedPages.add(pageUrl);
-                    pagesToCrawl.push({ url: pageUrl, depth: current.depth + 1 });
+                discoveryTimings.nestedJsDiscoveryMs += Date.now() - nestedDiscoveryStartedAt;
+            }
+
+            const pageLinks = extractSameOriginPageLinks(html, current.url).slice(0, DEFAULT_PAGE_CRAWL_LIMIT);
+            for (const pageLink of pageLinks) {
+                pushHtmlRoute(htmlRoutes, seenHtmlRoutes, pageLink.path, `html_link:${current.url}`);
+            }
+
+            if (crawlDepth > 1 && current.depth < crawlDepth - 1) {
+                for (const pageLink of pageLinks) {
+                    if (visitedPages.size + pagesToCrawl.length >= maxPages) {
+                        break;
+                    }
+                    if (!visitedPages.has(pageLink.url) && !queuedPages.has(pageLink.url)) {
+                        queuedPages.add(pageLink.url);
+                        pagesToCrawl.push({ url: pageLink.url, depth: current.depth + 1 });
+                    }
                 }
             }
         }
     }
 
     if (probeSpaManifests && jsLinks.length < maxJsFiles) {
-        const manifestResults = await runSequentially(getManifestUrls(baseUrl).map(manifestUrl => async () => ({
+        const manifestUrls = getManifestUrls(baseUrl);
+        discoveryMetrics.manifestRequests = manifestUrls.length;
+        const manifestProbeStartedAt = Date.now();
+        const manifestResults = await runWithConcurrency(manifestUrls.map(manifestUrl => async () => ({
                 manifestUrl,
-                result: await fetchWithTimeout(manifestUrl, timeout, userAgent, "application/json,*/*"),
-            })));
+                result: await fetchWithTimeout(manifestUrl, userAgent, "application/json,*/*"),
+            })), 3);
+        discoveryTimings.manifestProbeMs += Date.now() - manifestProbeStartedAt;
 
         for (const { manifestUrl, result } of manifestResults) {
             if (!result || !result.ok || !result.contentType.includes("json")) {
@@ -864,30 +1124,46 @@ async function discoverJavascriptAssets(
         const visitedScriptUrls = new Set<string>();
 
         while (jsFetchQueue.length > 0 && scriptContents.length < maxJsFiles * 2) {
-            const batch = jsFetchQueue.splice(0, 1);
-            const batchResults = await runSequentially(batch.map(link => async () => ({
+            const batch = jsFetchQueue.splice(0, pageFetchConcurrency);
+            const batchResults = await runWithConcurrency(batch.map(link => async () => ({
+                    fetchStartedAt: Date.now(),
                     link,
                     result: await fetchWithTimeout(
                         link.url,
-                        timeout,
                         userAgent,
                         link.type === "sourcemap"
                             ? "application/json,text/plain,*/*"
                             : "application/javascript,text/javascript,text/plain,*/*",
                     ),
-                })));
+                })), Math.min(pageFetchConcurrency, batch.length || 1));
 
-            for (const { link, result } of batchResults) {
+            for (const { link, result, fetchStartedAt } of batchResults) {
+                const fetchDurationMs = Date.now() - fetchStartedAt;
+                discoveryMetrics.jsFetchCount += 1;
+                discoveryTimings.jsFetchMs += fetchDurationMs;
                 if (visitedScriptUrls.has(link.url)) {
                     continue;
                 }
                 visitedScriptUrls.add(link.url);
                 if (!result || !result.ok) {
+                    discoveryMetrics.jsFetchFailureCount += 1;
+                    jsFetchFailures.push({
+                        url: link.url,
+                        finalUrl: result?.finalUrl || link.url,
+                        linkType: link.type,
+                        discoverySource: link.source,
+                        status: result?.status ?? null,
+                        contentType: result?.contentType || "",
+                        size: result?.size ?? 0,
+                        error: result?.error,
+                    });
                     continue;
                 }
 
                 link.size = result.size;
                 if (link.type === "sourcemap") {
+                    discoveryMetrics.sourceMapFetchCount += 1;
+                    discoveryTimings.sourceMapFetchMs += fetchDurationMs;
                     for (const sourceContent of parseSourceMapScriptContents(result.text, link.url)) {
                         scriptContents.push(sourceContent);
                     }
@@ -899,6 +1175,7 @@ async function discoverJavascriptAssets(
                     content: result.text,
                 });
 
+                const nestedDiscoveryStartedAt = Date.now();
                 for (const nestedLink of extractJsFromContent(result.text, link.url)) {
                     if (nestedLink.type === "sourcemap" && !followSourceMaps) {
                         continue;
@@ -917,14 +1194,20 @@ async function discoverJavascriptAssets(
                         }
                     }
                 }
+                discoveryTimings.nestedJsDiscoveryMs += Date.now() - nestedDiscoveryStartedAt;
             }
         }
     }
 
+    discoveryMetrics.jsLinksDiscovered = jsLinks.length;
     return {
         jsLinks,
         scriptContents,
         crawledPages,
+        htmlRoutes,
+        jsFetchFailures,
+        timings: discoveryTimings,
+        metrics: discoveryMetrics,
     };
 }
 
@@ -940,6 +1223,8 @@ function calculateRiskScore(severity: string, eventType: string, count: number):
     }
     
     switch (eventType) {
+        case "html_routes_added": score += 10; break;
+        case "html_routes_removed": score += 8; break;
         case "api_endpoints_added": score += 20; break;
         case "api_endpoints_removed": score += 15; break;
         case "api_change": score += 15; break;
@@ -963,13 +1248,6 @@ export function get_input_schema() {
                 type: "array",
                 items: { type: "string" },
                 description: "List of base URLs to monitor for API changes"
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 3000,
-                minimum: 3000,
-                maximum: 5000
             },
             userAgent: {
                 type: "string",
@@ -1013,7 +1291,7 @@ export function get_input_schema() {
             },
             previousSnapshots: {
                 type: "object",
-                description: "Previous API snapshots for comparison"
+                description: "Previous API and HTML route snapshots for comparison"
             }
         }
     };
@@ -1044,7 +1322,17 @@ export function get_output_schema() {
                                     properties: {
                                         baseUrl: { type: "string" },
                                         lastChecked: { type: "string" },
-                                        endpoints: {
+                                        htmlRoutes: {
+                                            type: "array",
+                                            items: {
+                                                type: "object",
+                                                properties: {
+                                                    path: { type: "string" },
+                                                    source: { type: "string" },
+                                                }
+                                            }
+                                        },
+                                        apiEndpoints: {
                                             type: "array",
                                             items: {
                                                 type: "object",
@@ -1056,22 +1344,76 @@ export function get_output_schema() {
                                         }
                                     }
                                 },
-                                addedEndpoints: { type: "array" },
-                                removedEndpoints: { type: "array" }
+                                timings: {
+                                    type: "object",
+                                    properties: {
+                                        targetFetchMs: { type: "integer" },
+                                        assetDiscoveryMs: { type: "integer" },
+                                        pageCrawlMs: { type: "integer" },
+                                        manifestProbeMs: { type: "integer" },
+                                        jsFetchMs: { type: "integer" },
+                                        sourceMapFetchMs: { type: "integer" },
+                                        nestedJsDiscoveryMs: { type: "integer" },
+                                        astExtractionMs: { type: "integer" },
+                                        compareMs: { type: "integer" },
+                                        totalMs: { type: "integer" },
+                                    }
+                                },
+                                metrics: {
+                                    type: "object",
+                                    properties: {
+                                        crawledPages: { type: "integer" },
+                                        htmlRoutesDiscovered: { type: "integer" },
+                                        scriptSources: { type: "integer" },
+                                        jsFilesAnalyzed: { type: "integer" },
+                                        pageFetchCount: { type: "integer" },
+                                        manifestRequests: { type: "integer" },
+                                        jsFetchCount: { type: "integer" },
+                                        jsFetchFailureCount: { type: "integer" },
+                                        sourceMapFetchCount: { type: "integer" },
+                                        jsLinksDiscovered: { type: "integer" },
+                                        inlineScriptCount: { type: "integer" },
+                                    }
+                                },
+                                jsFetchFailures: {
+                                    type: "array",
+                                    items: {
+                                        type: "object",
+                                        properties: {
+                                            url: { type: "string" },
+                                            finalUrl: { type: "string" },
+                                            linkType: { type: "string" },
+                                            discoverySource: { type: "string" },
+                                            status: { type: ["integer", "null"] },
+                                            contentType: { type: "string" },
+                                            size: { type: "integer" },
+                                            error: { type: "string" },
+                                        }
+                                    }
+                                },
+                                addedHtmlRoutes: { type: "array" },
+                                removedHtmlRoutes: { type: "array" },
+                                addedApiEndpoints: { type: "array" },
+                                removedApiEndpoints: { type: "array" }
                             }
                         },
-                        description: "API monitoring results"
+                        description: "API and HTML route monitoring results"
                     },
                     changeEvents: { type: "array", description: "Change events detected" },
-                    snapshots: { type: "object", description: "API snapshots by URL" },
+                    snapshots: { type: "object", description: "API and HTML route snapshots by URL" },
                     summary: {
                         type: "object",
                         properties: {
                             totalTargets: { type: "integer" },
-                            totalEndpoints: { type: "integer" },
+                            totalHtmlRoutes: { type: "integer" },
+                            totalApiEndpoints: { type: "integer" },
                             totalJsFiles: { type: "integer" },
-                            addedEndpoints: { type: "integer" },
-                            removedEndpoints: { type: "integer" }
+                            addedHtmlRoutes: { type: "integer" },
+                            removedHtmlRoutes: { type: "integer" },
+                            addedApiEndpoints: { type: "integer" },
+                            removedApiEndpoints: { type: "integer" },
+                            routeChanges: { type: "integer" },
+                            apiChanges: { type: "integer" }
                         }
                     }
                 }
@@ -1104,7 +1446,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = Math.max(3000, Math.min(input.timeout || 3000, 5000));
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const crawlDepth = input.crawlDepth ?? 1;
         const maxPages = Math.max(1, Math.min(input.maxPages || DEFAULT_MAX_PAGES, 50));
@@ -1129,10 +1470,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         let successfulChecks = 0;
         let failedChecks = 0;
-        let totalEndpoints = 0;
+        let totalHtmlRoutes = 0;
+        let totalApiEndpoints = 0;
         let totalJsFiles = 0;
-        let addedEndpointsCount = 0;
-        let removedEndpointsCount = 0;
+        let addedHtmlRoutesCount = 0;
+        let removedHtmlRoutesCount = 0;
+        let addedApiEndpointsCount = 0;
+        let removedApiEndpointsCount = 0;
+        let routeChanges = 0;
         let apiChanges = 0;
         let completedTargets = 0;
         
@@ -1148,15 +1493,37 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
             
             try {
-                const allEndpoints: ApiEndpoint[] = [];
+                const targetStartedAt = Date.now();
+                const allHtmlRoutes: HtmlRoute[] = [];
+                const allApiEndpoints: ApiEndpoint[] = [];
                 let jsFilesAnalyzed = 0;
+                let crawledPages = 1;
+                let htmlRoutesDiscovered = 0;
+                let scriptSourceCount = 0;
+                let targetFetchMs = 0;
+                let assetDiscoveryMs = 0;
+                let pageCrawlMs = 0;
+                let manifestProbeMs = 0;
+                let jsFetchMs = 0;
+                let sourceMapFetchMs = 0;
+                let nestedJsDiscoveryMs = 0;
+                let astExtractionMs = 0;
+                let compareMs = 0;
+                let pageFetchCount = 0;
+                let manifestRequests = 0;
+                let jsFetchCount = 0;
+                let jsFetchFailureCount = 0;
+                let sourceMapFetchCount = 0;
+                let jsLinksDiscovered = 0;
+                let inlineScriptCount = 0;
                 
+                const targetFetchStartedAt = Date.now();
                 const pageResult = await fetchWithTimeout(
                     baseUrl,
-                    timeout,
                     userAgent,
                     "text/html,application/xhtml+xml,*/*",
                 );
+                targetFetchMs = Date.now() - targetFetchStartedAt;
 
                 if (!pageResult || pageResult.status === null) {
                     result.error = describeTargetFetchFailure(pageResult);
@@ -1169,35 +1536,88 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
                 const pageContent = canAnalyzePageResponse(pageResult) ? pageResult.text : "";
                 const directJsTarget = Boolean(pageContent) && (looksLikeJs(baseUrl) || pageResult.contentType.includes("javascript"));
-                const scriptSources = !pageContent ? [] : directJsTarget ? [{ source: baseUrl, content: pageContent }] : (await discoverJavascriptAssets(baseUrl, pageContent, timeout, userAgent, crawlDepth, maxPages, maxJsFiles, includeSameOriginOnly, followSourceMaps, probeSpaManifests)).scriptContents;
+                let scriptSources: ScriptContentSource[] = [];
+
+                if (pageContent) {
+                    if (directJsTarget) {
+                        scriptSources = [{ source: baseUrl, content: pageContent }];
+                    } else {
+                        const assetDiscoveryStartedAt = Date.now();
+                        const discoveryResult = await discoverJavascriptAssets(
+                            baseUrl,
+                            pageContent,
+                            userAgent,
+                            crawlDepth,
+                            maxPages,
+                            maxJsFiles,
+                            includeSameOriginOnly,
+                            followSourceMaps,
+                            probeSpaManifests,
+                        );
+                        assetDiscoveryMs = Date.now() - assetDiscoveryStartedAt;
+                        scriptSources = discoveryResult.scriptContents;
+                        allHtmlRoutes.push(...discoveryResult.htmlRoutes);
+                        crawledPages = discoveryResult.crawledPages.length;
+                        htmlRoutesDiscovered = discoveryResult.htmlRoutes.length;
+                        pageCrawlMs = discoveryResult.timings.pageCrawlMs;
+                        manifestProbeMs = discoveryResult.timings.manifestProbeMs;
+                        jsFetchMs = discoveryResult.timings.jsFetchMs;
+                        sourceMapFetchMs = discoveryResult.timings.sourceMapFetchMs;
+                        nestedJsDiscoveryMs = discoveryResult.timings.nestedJsDiscoveryMs;
+                        pageFetchCount = discoveryResult.metrics.pageFetchCount;
+                        manifestRequests = discoveryResult.metrics.manifestRequests;
+                        jsFetchCount = discoveryResult.metrics.jsFetchCount;
+                        jsFetchFailureCount = discoveryResult.metrics.jsFetchFailureCount;
+                        sourceMapFetchCount = discoveryResult.metrics.sourceMapFetchCount;
+                        jsLinksDiscovered = discoveryResult.metrics.jsLinksDiscovered;
+                        inlineScriptCount = discoveryResult.metrics.inlineScriptCount;
+                        result.jsFetchFailures = discoveryResult.jsFetchFailures;
+                    }
+                }
+
+                scriptSourceCount = scriptSources.length;
 
                 jsFilesAnalyzed = directJsTarget
                     ? 1
                     : scriptSources.filter(source => !source.source.startsWith("inline://")).length;
                 totalJsFiles += jsFilesAnalyzed;
 
+                const astExtractionStartedAt = Date.now();
                 for (const source of scriptSources) {
                     try {
-                        const endpoints = extractApisFromJs(source.content, source.source);
-                        allEndpoints.push(...endpoints);
+                        const extracted = extractPathsFromJs(source.content, source.source);
+                        allHtmlRoutes.push(...extracted.htmlRoutes);
+                        allApiEndpoints.push(...extracted.apiEndpoints);
                     } catch {
                         continue;
                     }
                 }
+                astExtractionMs = Date.now() - astExtractionStartedAt;
                 
-                const uniqueEndpoints: ApiEndpoint[] = [];
-                const seen = new Set<string>();
-                for (const ep of allEndpoints) {
-                    if (!seen.has(ep.path)) {
-                        seen.add(ep.path);
-                        uniqueEndpoints.push(ep);
+                const uniqueHtmlRoutes: HtmlRoute[] = [];
+                const seenHtmlRoutes = new Set<string>();
+                for (const route of allHtmlRoutes) {
+                    if (!seenHtmlRoutes.has(route.path)) {
+                        seenHtmlRoutes.add(route.path);
+                        uniqueHtmlRoutes.push(route);
                     }
                 }
-                totalEndpoints += uniqueEndpoints.length;
+                const uniqueApiEndpoints: ApiEndpoint[] = [];
+                const seenApiEndpoints = new Set<string>();
+                for (const endpoint of allApiEndpoints) {
+                    if (!seenApiEndpoints.has(endpoint.path)) {
+                        seenApiEndpoints.add(endpoint.path);
+                        uniqueApiEndpoints.push(endpoint);
+                    }
+                }
+                totalHtmlRoutes += uniqueHtmlRoutes.length;
+                totalApiEndpoints += uniqueApiEndpoints.length;
+                htmlRoutesDiscovered = uniqueHtmlRoutes.length;
                 
                 const snapshot: ApiSnapshot = {
                     baseUrl,
-                    endpoints: uniqueEndpoints,
+                    htmlRoutes: uniqueHtmlRoutes,
+                    apiEndpoints: uniqueApiEndpoints,
                     lastChecked: new Date().toISOString(),
                 };
                 
@@ -1210,22 +1630,79 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     total: totalProgressUnits,
                     phase: "scan",
                     currentTarget: baseUrl,
-                    message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${uniqueEndpoints.length} API endpoints`,
+                    message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${uniqueHtmlRoutes.length} HTML routes and ${uniqueApiEndpoints.length} API endpoints`,
                 });
                 
+                const compareStartedAt = Date.now();
                 const prevSnapshot = previousSnapshots[baseUrl];
                 if (prevSnapshot) {
-                    const prevPaths = new Set(prevSnapshot.endpoints.map(e => e.path));
-                    const newPaths = new Set(uniqueEndpoints.map(e => e.path));
-                    const addedEndpoints = uniqueEndpoints.filter(e => !prevPaths.has(e.path));
-                    const removedEndpoints = prevSnapshot.endpoints.filter(e => !newPaths.has(e.path));
-                    
-                    result.addedEndpoints = addedEndpoints;
-                    result.removedEndpoints = removedEndpoints;
-                    
-                    if (addedEndpoints.length > 0) {
+                    const prevHtmlRoutePaths = new Set(prevSnapshot.htmlRoutes.map(route => route.path));
+                    const newHtmlRoutePaths = new Set(uniqueHtmlRoutes.map(route => route.path));
+                    const addedHtmlRoutes = uniqueHtmlRoutes.filter(route => !prevHtmlRoutePaths.has(route.path));
+                    const removedHtmlRoutes = prevSnapshot.htmlRoutes.filter(route => !newHtmlRoutePaths.has(route.path));
+                    const prevApiPaths = new Set(prevSnapshot.apiEndpoints.map(endpoint => endpoint.path));
+                    const newApiPaths = new Set(uniqueApiEndpoints.map(endpoint => endpoint.path));
+                    const addedApiEndpoints = uniqueApiEndpoints.filter(endpoint => !prevApiPaths.has(endpoint.path));
+                    const removedApiEndpoints = prevSnapshot.apiEndpoints.filter(endpoint => !newApiPaths.has(endpoint.path));
+
+                    result.addedHtmlRoutes = addedHtmlRoutes;
+                    result.removedHtmlRoutes = removedHtmlRoutes;
+                    result.addedApiEndpoints = addedApiEndpoints;
+                    result.removedApiEndpoints = removedApiEndpoints;
+
+                    if (addedHtmlRoutes.length > 0) {
+                        routeChanges++;
+                        addedHtmlRoutesCount += addedHtmlRoutes.length;
+
+                        const event: ChangeEvent = {
+                            id: generateId(),
+                            assetId: baseUrl,
+                            eventType: "html_routes_added",
+                            severity: "low",
+                            title: `New HTML Routes Discovered: ${new URL(baseUrl).hostname}`,
+                            description: `${addedHtmlRoutes.length} new HTML route(s) discovered: ${addedHtmlRoutes.map(route => route.path).join(", ")}`,
+                            newValue: JSON.stringify(addedHtmlRoutes.map(route => route.path)),
+                            detectionMethod: "api_monitor",
+                            tags: ["html", "route", "new", "discovery"],
+                            autoTriggerEnabled: false,
+                            riskScore: 0,
+                            metadata: {
+                                addedHtmlRoutes,
+                                count: addedHtmlRoutes.length,
+                            },
+                        };
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, addedHtmlRoutes.length);
+                        changeEvents.push(event);
+                    }
+
+                    if (removedHtmlRoutes.length > 0) {
+                        routeChanges++;
+                        removedHtmlRoutesCount += removedHtmlRoutes.length;
+
+                        const event: ChangeEvent = {
+                            id: generateId(),
+                            assetId: baseUrl,
+                            eventType: "html_routes_removed",
+                            severity: "low",
+                            title: `HTML Routes Removed: ${new URL(baseUrl).hostname}`,
+                            description: `${removedHtmlRoutes.length} HTML route(s) removed: ${removedHtmlRoutes.map(route => route.path).join(", ")}`,
+                            oldValue: JSON.stringify(removedHtmlRoutes.map(route => route.path)),
+                            detectionMethod: "api_monitor",
+                            tags: ["html", "route", "removed"],
+                            autoTriggerEnabled: false,
+                            riskScore: 0,
+                            metadata: {
+                                removedHtmlRoutes,
+                                count: removedHtmlRoutes.length,
+                            },
+                        };
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, removedHtmlRoutes.length);
+                        changeEvents.push(event);
+                    }
+
+                    if (addedApiEndpoints.length > 0) {
                         apiChanges++;
-                        addedEndpointsCount += addedEndpoints.length;
+                        addedApiEndpointsCount += addedApiEndpoints.length;
                         
                         const event: ChangeEvent = {
                             id: generateId(),
@@ -1233,24 +1710,24 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             eventType: "api_endpoints_added",
                             severity: "high",
                             title: `New API Endpoints Discovered: ${new URL(baseUrl).hostname}`,
-                            description: `${addedEndpoints.length} new API endpoint(s) discovered: ${addedEndpoints.map(e => e.path).join(", ")}`,
-                            newValue: JSON.stringify(addedEndpoints.map(e => e.path)),
+                            description: `${addedApiEndpoints.length} new API endpoint(s) discovered: ${addedApiEndpoints.map(endpoint => endpoint.path).join(", ")}`,
+                            newValue: JSON.stringify(addedApiEndpoints.map(endpoint => endpoint.path)),
                             detectionMethod: "api_monitor",
                             tags: ["api", "endpoint", "new", "discovery"],
                             autoTriggerEnabled: true,
                             riskScore: 0,
                             metadata: {
-                                addedEndpoints,
-                                count: addedEndpoints.length,
+                                addedApiEndpoints,
+                                count: addedApiEndpoints.length,
                             },
                         };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, addedEndpoints.length);
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, addedApiEndpoints.length);
                         changeEvents.push(event);
                     }
                     
-                    if (removedEndpoints.length > 0) {
+                    if (removedApiEndpoints.length > 0) {
                         apiChanges++;
-                        removedEndpointsCount += removedEndpoints.length;
+                        removedApiEndpointsCount += removedApiEndpoints.length;
                         
                         const event: ChangeEvent = {
                             id: generateId(),
@@ -1258,42 +1735,90 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             eventType: "api_endpoints_removed",
                             severity: "low",
                             title: `API Endpoints Removed: ${new URL(baseUrl).hostname}`,
-                            description: `${removedEndpoints.length} API endpoint(s) removed: ${removedEndpoints.map(e => e.path).join(", ")}`,
-                            oldValue: JSON.stringify(removedEndpoints.map(e => e.path)),
+                            description: `${removedApiEndpoints.length} API endpoint(s) removed: ${removedApiEndpoints.map(endpoint => endpoint.path).join(", ")}`,
+                            oldValue: JSON.stringify(removedApiEndpoints.map(endpoint => endpoint.path)),
                             detectionMethod: "api_monitor",
                             tags: ["api", "endpoint", "removed"],
                             autoTriggerEnabled: false,
                             riskScore: 0,
                             metadata: {
-                                removedEndpoints,
-                                count: removedEndpoints.length,
+                                removedApiEndpoints,
+                                count: removedApiEndpoints.length,
                             },
                         };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, removedEndpoints.length);
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, removedApiEndpoints.length);
                         changeEvents.push(event);
                     }
                 } else {
-                    if (uniqueEndpoints.length > 0) {
+                    if (uniqueHtmlRoutes.length > 0) {
+                        const event: ChangeEvent = {
+                            id: generateId(),
+                            assetId: baseUrl,
+                            eventType: "html_routes_discovered",
+                            severity: "low",
+                            title: `HTML Routes Discovered: ${new URL(baseUrl).hostname}`,
+                            description: `Initial scan discovered ${uniqueHtmlRoutes.length} HTML route(s).`,
+                            newValue: JSON.stringify(uniqueHtmlRoutes.map(route => route.path)),
+                            detectionMethod: "api_monitor",
+                            tags: ["html", "route", "initial-scan"],
+                            autoTriggerEnabled: false,
+                            riskScore: 0,
+                            metadata: {
+                                htmlRoutes: uniqueHtmlRoutes,
+                            },
+                        };
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueHtmlRoutes.length);
+                        changeEvents.push(event);
+                    }
+
+                    if (uniqueApiEndpoints.length > 0) {
                         const event: ChangeEvent = {
                             id: generateId(),
                             assetId: baseUrl,
                             eventType: "api_endpoints_discovered",
                             severity: "medium",
                             title: `API Endpoints Discovered: ${new URL(baseUrl).hostname}`,
-                            description: `Initial scan discovered ${uniqueEndpoints.length} API endpoint(s).`,
-                            newValue: JSON.stringify(uniqueEndpoints.map(e => e.path)),
+                            description: `Initial scan discovered ${uniqueApiEndpoints.length} API endpoint(s).`,
+                            newValue: JSON.stringify(uniqueApiEndpoints.map(endpoint => endpoint.path)),
                             detectionMethod: "api_monitor",
                             tags: ["api", "endpoint", "initial-scan"],
                             autoTriggerEnabled: false,
                             riskScore: 0,
                             metadata: {
-                                endpoints: uniqueEndpoints,
+                                apiEndpoints: uniqueApiEndpoints,
                             },
                         };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueEndpoints.length);
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueApiEndpoints.length);
                         changeEvents.push(event);
                     }
                 }
+                compareMs = Date.now() - compareStartedAt;
+
+                result.timings = {
+                    targetFetchMs,
+                    assetDiscoveryMs,
+                    pageCrawlMs,
+                    manifestProbeMs,
+                    jsFetchMs,
+                    sourceMapFetchMs,
+                    nestedJsDiscoveryMs,
+                    astExtractionMs,
+                    compareMs,
+                    totalMs: Date.now() - targetStartedAt,
+                };
+                result.metrics = {
+                    crawledPages,
+                    htmlRoutesDiscovered,
+                    scriptSources: scriptSourceCount,
+                    jsFilesAnalyzed,
+                    pageFetchCount,
+                    manifestRequests,
+                    jsFetchCount,
+                    jsFetchFailureCount,
+                    sourceMapFetchCount,
+                    jsLinksDiscovered,
+                    inlineScriptCount,
+                };
                 
             } catch (error: any) {
                 result.error = error.message || String(error);
@@ -1337,10 +1862,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     totalTargets: validTargets.length,
                     successfulChecks,
                     failedChecks,
-                    totalEndpoints,
+                    totalHtmlRoutes,
+                    totalApiEndpoints,
                     totalJsFiles,
-                    addedEndpoints: addedEndpointsCount,
-                    removedEndpoints: removedEndpointsCount,
+                    addedHtmlRoutes: addedHtmlRoutesCount,
+                    removedHtmlRoutes: removedHtmlRoutesCount,
+                    addedApiEndpoints: addedApiEndpointsCount,
+                    removedApiEndpoints: removedApiEndpointsCount,
+                    routeChanges,
                     apiChanges,
                 },
             },
