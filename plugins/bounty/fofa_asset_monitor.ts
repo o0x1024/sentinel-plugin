@@ -3,13 +3,13 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
  * @default_severity medium
  * @tags fofa, asset, monitor, reconnaissance, osint, surface, change-detection
- * @description Query FOFA Search API for scoped domains or explicit FOFA syntax, normalize discovered hosts, IPs, services, and web assets, and emit asset change events for monitoring workflows.
+ * @description Query FOFA Search API with domain and enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.
  */
 
 interface ToolInput {
@@ -19,6 +19,14 @@ interface ToolInput {
     target_objects?: MonitorTargetObject[];
     targetObjects?: MonitorTargetObject[];
     queries?: string[] | string;
+    iconHashes?: string[] | string;
+    brandKeywords?: string[] | string;
+    orgNames?: string[] | string;
+    asnList?: Array<string | number> | string;
+    cnameKeywords?: string[] | string;
+    titleKeywords?: string[] | string;
+    bodyKeywords?: string[] | string;
+    headerKeywords?: string[] | string;
     fields?: string[] | string;
     pageSize?: number;
     maxPages?: number;
@@ -91,7 +99,7 @@ interface FofaAsset {
 interface FofaQueryPlan {
     id: string;
     query: string;
-    source: "domain" | "ip" | "service" | "web" | "explicit";
+    source: "domain" | "ip" | "service" | "web" | "explicit" | "icon" | "org" | "asn" | "cname" | "title" | "body" | "header";
     target: string;
 }
 
@@ -213,6 +221,59 @@ export function get_input_schema() {
                 description: "Explicit FOFA query syntax. Example: domain=\"example.com\" && protocol=\"https\"",
                 default: [],
             },
+            iconHashes: {
+                type: "array",
+                items: { type: "string" },
+                description: "Website favicon hash values used with FOFA icon_hash syntax.",
+                default: [],
+            },
+            brandKeywords: {
+                type: "array",
+                items: { type: "string" },
+                description: "Enterprise brand keywords used to anchor icon/org/asn/cname queries through title/body matching.",
+                default: [],
+            },
+            orgNames: {
+                type: "array",
+                items: { type: "string" },
+                description: "Enterprise organization names for FOFA org queries.",
+                default: [],
+            },
+            asnList: {
+                type: "array",
+                items: {
+                    anyOf: [
+                        { type: "integer" },
+                        { type: "string" },
+                    ],
+                },
+                description: "Owned ASN values for enterprise web infrastructure.",
+                default: [],
+            },
+            cnameKeywords: {
+                type: "array",
+                items: { type: "string" },
+                description: "CNAME keywords or full CNAME values for website infrastructure.",
+                default: [],
+            },
+            titleKeywords: {
+                type: "array",
+                items: { type: "string" },
+                description: "Website title keywords for direct FOFA title queries.",
+                default: [],
+            },
+            bodyKeywords: {
+                type: "array",
+                items: { type: "string" },
+                description: "HTML body keywords for enterprise website matching.",
+                default: [],
+            },
+            headerKeywords: {
+                type: "array",
+                items: { type: "string" },
+                description: "HTTP header keywords for reverse proxy, CDN, or enterprise gateway matching.",
+                default: [],
+            },
             fields: {
                 type: "array",
                 items: { type: "string" },
@@ -332,6 +393,39 @@ function normalizeStringList(value: unknown): string[] {
     return [];
 }
 
+function uniqueStrings(values: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const value of values) {
+        const normalized = String(value || "").trim();
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        result.push(normalized);
+    }
+    return result;
+}
+
+function normalizeAsnList(value: unknown): string[] {
+    if (Array.isArray(value)) {
+        return uniqueStrings(
+            value
+                .map(item => String(item ?? "").trim())
+                .filter(item => /^\d+$/.test(item)),
+        );
+    }
+
+    if (typeof value === "string") {
+        return uniqueStrings(
+            value
+                .split(/[,\n]/)
+                .map(item => item.trim())
+                .filter(item => /^\d+$/.test(item)),
+        );
+    }
+
+    return [];
+}
+
 function normalizeFields(value: unknown): string[] {
     const fields = normalizeStringList(value);
     return fields.length > 0 ? fields : DEFAULT_FIELDS;
@@ -426,14 +520,71 @@ function encodeBase64Utf8(value: string): string {
     return btoa(binary);
 }
 
+function escapeQueryValue(value: string): string {
+    return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').trim();
+}
+
+function addPlan(
+    plans: Map<string, FofaQueryPlan>,
+    source: FofaQueryPlan["source"],
+    target: string,
+    query: string,
+) {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) return;
+    const id = `${source}-${stableHash(normalizedQuery)}`;
+    plans.set(id, { id, query: normalizedQuery, source, target: target.trim() || normalizedQuery });
+}
+
+function addFieldQueryPlan(
+    plans: Map<string, FofaQueryPlan>,
+    source: Extract<FofaQueryPlan["source"], "icon" | "org" | "asn" | "cname" | "title" | "body" | "header">,
+    field: string,
+    value: string,
+) {
+    const normalized = escapeQueryValue(value);
+    if (!normalized) return;
+    addPlan(plans, source, normalized, `${field}="${normalized}"`);
+}
+
+function addBrandAnchoredFieldQueries(
+    plans: Map<string, FofaQueryPlan>,
+    source: Extract<FofaQueryPlan["source"], "icon" | "org" | "asn" | "cname">,
+    field: string,
+    value: string,
+    brandKeywords: string[],
+) {
+    const normalized = escapeQueryValue(value);
+    if (!normalized) return;
+
+    if (brandKeywords.length === 0) {
+        addPlan(plans, source, normalized, `${field}="${normalized}"`);
+        return;
+    }
+
+    for (const brandKeyword of brandKeywords) {
+        const anchor = escapeQueryValue(brandKeyword);
+        if (!anchor) continue;
+        addPlan(plans, source, `${normalized} + title:${anchor}`, `${field}="${normalized}" && title="${anchor}"`);
+        addPlan(plans, source, `${normalized} + body:${anchor}`, `${field}="${normalized}" && body="${anchor}"`);
+    }
+}
+
 function buildQueryPlans(input: ToolInput): FofaQueryPlan[] {
     const plans = new Map<string, FofaQueryPlan>();
-    const explicitQueries = normalizeStringList(input.queries);
+    const explicitQueries = uniqueStrings(normalizeStringList(input.queries));
+    const brandKeywords = uniqueStrings(normalizeStringList(input.brandKeywords));
+    const iconHashes = uniqueStrings(normalizeStringList(input.iconHashes));
+    const orgNames = uniqueStrings(normalizeStringList(input.orgNames));
+    const asnList = normalizeAsnList(input.asnList);
+    const cnameKeywords = uniqueStrings(normalizeStringList(input.cnameKeywords));
+    const titleKeywords = uniqueStrings(normalizeStringList(input.titleKeywords));
+    const bodyKeywords = uniqueStrings(normalizeStringList(input.bodyKeywords));
+    const headerKeywords = uniqueStrings(normalizeStringList(input.headerKeywords));
 
     for (const query of explicitQueries) {
         const normalized = query.trim();
-        const id = `query-${stableHash(normalized)}`;
-        plans.set(id, { id, query: normalized, source: "explicit", target: normalized });
+        addPlan(plans, "explicit", normalized, normalized);
     }
 
     const targetObjects = Array.isArray(input.target_objects)
@@ -449,8 +600,7 @@ function buildQueryPlans(input: ToolInput): FofaQueryPlan[] {
 
         if (type === "ip") {
             const ip = normalizeTargetValue(rawValue);
-            const query = `ip="${ip}"`;
-            plans.set(`ip-${stableHash(query)}`, { id: `ip-${stableHash(query)}`, query, source: "ip", target: ip });
+            addPlan(plans, "ip", ip, `ip="${escapeQueryValue(ip)}"`);
             continue;
         }
 
@@ -459,8 +609,12 @@ function buildQueryPlans(input: ToolInput): FofaQueryPlan[] {
             const port = Number(targetObject.port || extractPort(rawValue));
             if (host && Number.isInteger(port) && port > 0) {
                 const field = isIpLiteral(host) ? "ip" : "host";
-                const query = `${field}="${host}" && port="${port}"`;
-                plans.set(`service-${stableHash(query)}`, { id: `service-${stableHash(query)}`, query, source: "service", target: `${host}:${port}` });
+                addPlan(
+                    plans,
+                    "service",
+                    `${host}:${port}`,
+                    `${field}="${escapeQueryValue(host)}" && port="${port}"`,
+                );
             }
             continue;
         }
@@ -468,27 +622,88 @@ function buildQueryPlans(input: ToolInput): FofaQueryPlan[] {
         if (type === "web") {
             const host = extractHost(rawValue);
             if (host) {
-                const query = `host="${host}"`;
-                plans.set(`web-${stableHash(query)}`, { id: `web-${stableHash(query)}`, query, source: "web", target: host });
+                addPlan(plans, "web", host, `host="${escapeQueryValue(host)}"`);
             }
+            continue;
+        }
+
+        if (type === "icon" || type === "icon_hash") {
+            addBrandAnchoredFieldQueries(plans, "icon", "icon_hash", rawValue, brandKeywords);
+            continue;
+        }
+
+        if (type === "org") {
+            addBrandAnchoredFieldQueries(plans, "org", "org", rawValue, brandKeywords);
+            continue;
+        }
+
+        if (type === "asn") {
+            addBrandAnchoredFieldQueries(plans, "asn", "asn", rawValue, brandKeywords);
+            continue;
+        }
+
+        if (type === "cname") {
+            addBrandAnchoredFieldQueries(plans, "cname", "cname", rawValue, brandKeywords);
+            continue;
+        }
+
+        if (type === "title") {
+            addFieldQueryPlan(plans, "title", "title", rawValue);
+            continue;
+        }
+
+        if (type === "body") {
+            addFieldQueryPlan(plans, "body", "body", rawValue);
+            continue;
+        }
+
+        if (type === "header") {
+            addFieldQueryPlan(plans, "header", "header", rawValue);
             continue;
         }
 
         const domain = normalizeTargetValue(rawValue);
         if (domain && !isIpLiteral(domain)) {
-            const query = `domain="${domain}"`;
-            plans.set(`domain-${stableHash(query)}`, { id: `domain-${stableHash(query)}`, query, source: "domain", target: domain });
+            addPlan(plans, "domain", domain, `domain="${escapeQueryValue(domain)}"`);
         }
     }
 
-    const domains = [...normalizeStringList(input.domains), ...normalizeStringList(input.targets)];
+    const domains = uniqueStrings([...normalizeStringList(input.domains), ...normalizeStringList(input.targets)]);
     for (const value of domains) {
         const target = normalizeTargetValue(value);
         if (!target) continue;
-        const query = isIpLiteral(target) ? `ip="${target}"` : `domain="${target}"`;
+        const escapedTarget = escapeQueryValue(target);
+        const query = isIpLiteral(target) ? `ip="${escapedTarget}"` : `domain="${escapedTarget}"`;
         const source = isIpLiteral(target) ? "ip" : "domain";
-        const id = `${source}-${stableHash(query)}`;
-        plans.set(id, { id, query, source, target });
+        addPlan(plans, source, target, query);
+    }
+
+    for (const iconHash of iconHashes) {
+        addBrandAnchoredFieldQueries(plans, "icon", "icon_hash", iconHash, brandKeywords);
+    }
+
+    for (const orgName of orgNames) {
+        addBrandAnchoredFieldQueries(plans, "org", "org", orgName, brandKeywords);
+    }
+
+    for (const asn of asnList) {
+        addBrandAnchoredFieldQueries(plans, "asn", "asn", asn, brandKeywords);
+    }
+
+    for (const cnameKeyword of cnameKeywords) {
+        addBrandAnchoredFieldQueries(plans, "cname", "cname", cnameKeyword, brandKeywords);
+    }
+
+    for (const titleKeyword of titleKeywords) {
+        addFieldQueryPlan(plans, "title", "title", titleKeyword);
+    }
+
+    for (const bodyKeyword of bodyKeywords) {
+        addFieldQueryPlan(plans, "body", "body", bodyKeyword);
+    }
+
+    for (const headerKeyword of headerKeywords) {
+        addFieldQueryPlan(plans, "header", "header", headerKeyword);
     }
 
     return Array.from(plans.values());
@@ -758,7 +973,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const plans = buildQueryPlans(input);
         if (plans.length === 0) {
-            throw new Error("At least one domain, target, target_object, or explicit FOFA query is required");
+            throw new Error("At least one domain, target, target_object, explicit FOFA query, or enterprise website fingerprint input is required");
         }
 
         const fields = normalizeFields(input.fields);
