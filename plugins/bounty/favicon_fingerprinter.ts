@@ -3,7 +3,7 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.1.1
+ * @version 1.2.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -56,7 +56,7 @@ interface FingerprintResult {
     target: string;
     success: boolean;
     iconUrl?: string;
-    faviconSha256?: string;
+    faviconHash?: string;
     contentType?: string;
     bytes?: number;
     error?: string;
@@ -183,13 +183,67 @@ function normalizeTarget(value: string): string {
     }
 }
 
-function bytesToHex(bytes: Uint8Array): string {
-    return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+function toWrappedBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (const byte of bytes) {
+        binary += String.fromCharCode(byte);
+    }
+    const base64 = btoa(binary);
+    return `${base64.match(/.{1,76}/g)?.join("\n") || ""}\n`;
 }
 
-async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
-    const digest = await crypto.subtle.digest("SHA-256", buffer);
-    return bytesToHex(new Uint8Array(digest));
+function murmurHash3X86_32(value: string, seed = 0): number {
+    let remainder = value.length & 3;
+    const bytes = value.length - remainder;
+    let hash = seed;
+    let cursor = 0;
+    const c1 = 0xcc9e2d51;
+    const c2 = 0x1b873593;
+
+    while (cursor < bytes) {
+        let k1 =
+            (value.charCodeAt(cursor) & 0xff)
+            | ((value.charCodeAt(cursor + 1) & 0xff) << 8)
+            | ((value.charCodeAt(cursor + 2) & 0xff) << 16)
+            | ((value.charCodeAt(cursor + 3) & 0xff) << 24);
+        cursor += 4;
+
+        k1 = Math.imul(k1, c1);
+        k1 = (k1 << 15) | (k1 >>> 17);
+        k1 = Math.imul(k1, c2);
+
+        hash ^= k1;
+        hash = (hash << 13) | (hash >>> 19);
+        hash = (Math.imul(hash, 5) + 0xe6546b64) | 0;
+    }
+
+    let k1 = 0;
+    switch (remainder) {
+        case 3:
+            k1 ^= (value.charCodeAt(cursor + 2) & 0xff) << 16;
+        case 2:
+            k1 ^= (value.charCodeAt(cursor + 1) & 0xff) << 8;
+        case 1:
+            k1 ^= value.charCodeAt(cursor) & 0xff;
+            k1 = Math.imul(k1, c1);
+            k1 = (k1 << 15) | (k1 >>> 17);
+            k1 = Math.imul(k1, c2);
+            hash ^= k1;
+    }
+
+    hash ^= value.length;
+    hash ^= hash >>> 16;
+    hash = Math.imul(hash, 0x85ebca6b);
+    hash ^= hash >>> 13;
+    hash = Math.imul(hash, 0xc2b2ae35);
+    hash ^= hash >>> 16;
+
+    return hash | 0;
+}
+
+function computeFofaIconHash(buffer: ArrayBuffer): string {
+    return String(murmurHash3X86_32(toWrappedBase64(buffer), 0));
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
@@ -223,7 +277,7 @@ function extractIconCandidates(baseUrl: URL, html: string): string[] {
     return Array.from(new Set(candidates));
 }
 
-function matchFaviconRule(faviconSha256: string, iconUrl: string, rules: RuleEntry[]): RuleEntry | undefined {
+function matchFaviconRule(faviconHash: string, iconUrl: string, rules: RuleEntry[]): RuleEntry | undefined {
     for (const rule of rules) {
         const metadata = parseMetadata(rule.metadata);
         const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
@@ -233,7 +287,7 @@ function matchFaviconRule(faviconSha256: string, iconUrl: string, rules: RuleEnt
                 ? matchers.every((matcher: any) => {
                     const part = String(matcher?.part || "").toLowerCase();
                     const type = String(matcher?.type || "contains").toLowerCase();
-                    const source = part.includes("url") ? iconUrl : faviconSha256;
+                    const source = part.includes("url") ? iconUrl : faviconHash;
                     const value = String(matcher?.value || "");
                     if (type === "equals") return source.toLowerCase() === value.toLowerCase();
                     if (type === "regex") {
@@ -248,7 +302,7 @@ function matchFaviconRule(faviconSha256: string, iconUrl: string, rules: RuleEnt
                 : matchers.some((matcher: any) => {
                     const part = String(matcher?.part || "").toLowerCase();
                     const type = String(matcher?.type || "contains").toLowerCase();
-                    const source = part.includes("url") ? iconUrl : faviconSha256;
+                    const source = part.includes("url") ? iconUrl : faviconHash;
                     const value = String(matcher?.value || "");
                     if (type === "equals") return source.toLowerCase() === value.toLowerCase();
                     if (type === "regex") {
@@ -266,7 +320,7 @@ function matchFaviconRule(faviconSha256: string, iconUrl: string, rules: RuleEnt
             continue;
         }
 
-        if (faviconSha256.toLowerCase().includes(rule.word.toLowerCase())) {
+        if (faviconHash.toLowerCase().includes(rule.word.toLowerCase())) {
             return rule;
         }
     }
@@ -307,14 +361,14 @@ async function fingerprintTarget(
                 const buffer = await iconResponse.arrayBuffer();
                 if (!buffer || buffer.byteLength === 0) continue;
 
-                const faviconSha256 = await sha256Hex(buffer);
-                const matchedRule = matchFaviconRule(faviconSha256, iconUrl, rules);
+                const faviconHash = computeFofaIconHash(buffer);
+                const matchedRule = matchFaviconRule(faviconHash, iconUrl, rules);
                 const metadata = parseMetadata(matchedRule?.metadata);
                 return {
                     target: canonicalUrl.toString(),
                     success: true,
                     iconUrl,
-                    faviconSha256,
+                    faviconHash,
                     contentType: iconResponse.headers.get("content-type") || undefined,
                     bytes: buffer.byteLength,
                     fingerprint: matchedRule && metadata.product && metadata.asset_category
@@ -323,7 +377,7 @@ async function fingerprintTarget(
                             asset_key: canonicalUrl.toString(),
                             fingerprint_type: "favicon",
                             fingerprint_key: iconUrl,
-                            fingerprint_value: faviconSha256,
+                            fingerprint_value: faviconHash,
                             rule_id: metadata.rule_id || matchedRule.id || `favicon_rule:${matchedRule.word}`,
                             rule_word: matchedRule.word,
                             rule_name: metadata.name || matchedRule.word,
@@ -342,7 +396,7 @@ async function fingerprintTarget(
                         title: `Favicon fingerprint for ${canonicalUrl.hostname}`,
                         content_json: {
                             icon_url: iconUrl,
-                            sha256: faviconSha256,
+                            icon_hash: faviconHash,
                             content_type: iconResponse.headers.get("content-type"),
                             size_bytes: buffer.byteLength,
                         },

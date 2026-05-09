@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.1
+ * @version 2.2.2
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -13,7 +13,10 @@
  */
 
 interface ToolInput {
-    domain: string;
+    domain?: string;
+    domains?: string[] | string;
+    targets?: string[] | string;
+    target_objects?: Array<{ type?: string; value?: string }>;
     sources?: string[];
     timeout?: number;
     removeDuplicates?: boolean;
@@ -255,11 +258,16 @@ const SOURCE_REQUIRED_CONFIG: Partial<Record<DataSource, Array<keyof ApiConfig>>
 export function get_input_schema() {
     return {
         type: "object",
-        required: ["domain"],
+        required: [],
         properties: {
             domain: {
                 type: "string",
                 description: "Target domain to enumerate subdomains for (e.g., 'example.com')"
+            },
+            domains: {
+                type: "array",
+                items: { type: "string" },
+                description: "Root domains to enumerate. Monitor scheduler can inject this automatically."
             },
             sources: {
                 type: "array",
@@ -332,6 +340,41 @@ export function get_input_schema() {
 }
 
 pluginGlobals.get_input_schema = get_input_schema;
+
+function normalizeStringList(value: unknown): string[] {
+    if (Array.isArray(value)) {
+        return value
+            .map(item => String(item || "").trim())
+            .filter(Boolean);
+    }
+    if (typeof value === "string") {
+        return value
+            .split(",")
+            .map(item => item.trim())
+            .filter(Boolean);
+    }
+    return [];
+}
+
+function resolveInputDomain(input: ToolInput): string {
+    const candidates = [
+        typeof input.domain === "string" ? input.domain : "",
+        ...normalizeStringList(input.domains),
+        ...normalizeStringList(input.targets),
+        ...((Array.isArray(input.target_objects) ? input.target_objects : [])
+            .filter(item => item?.type === "domain" || item?.type === "root_domain")
+            .map(item => String(item?.value || "").trim())),
+    ];
+
+    for (const candidate of candidates) {
+        const normalized = candidate.toLowerCase().trim();
+        if (normalized) {
+            return normalized;
+        }
+    }
+
+    return "";
+}
 
 /**
  * Export output schema
@@ -2499,15 +2542,15 @@ async function runThroughRuntimeQueue(tasks: Array<() => Promise<SourceResult>>)
  */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        if (!input.domain || typeof input.domain !== "string") {
+        const domain = resolveInputDomain(input);
+
+        if (!domain) {
             return {
                 success: false,
                 error: "Invalid input: domain parameter is required"
             };
         }
-        
-        const domain = input.domain.toLowerCase().trim();
-        
+
         if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
             return {
                 success: false,

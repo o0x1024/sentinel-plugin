@@ -3,7 +3,7 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.1.0
+ * @version 1.2.0
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor

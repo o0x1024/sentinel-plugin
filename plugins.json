@@ -1,6 +1,6 @@
 {
-  "version": "2.3.20",
-  "updated_at": "2026-05-07",
+  "version": "2.3.21",
+  "updated_at": "2026-05-09",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -77,13 +77,17 @@
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "2.2.1",
+      "version": "2.2.2",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
       "description": "Comprehensive subdomain enumeration using 50 data sources with batch-submitted runtime scheduling, source-level timing, lightweight retry handling for transient failures, and automatic skipping of unconfigured premium sources in default mode.",
       "default_severity": "info",
       "tags": ["subdomain", "reconnaissance", "domain", "enumeration", "dns", "osint", "certificate-transparency", "threat-intelligence", "passive-dns", "api"],
+      "seed_bindings": [
+        { "seed_type": "root_domain", "input_key": "domains" },
+        { "seed_type": "domain", "input_key": "domains" }
+      ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_enumerator.ts"
     },
     {
@@ -161,13 +165,13 @@
     {
       "id": "favicon_fingerprinter",
       "name": "Favicon Fingerprinter",
-      "version": "1.1.1",
+      "version": "1.2.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
-      "description": "Fetch favicons from existing web targets, apply dictionary-driven rule matching, and emit normalized favicon fingerprint/evidence enrichment artifacts without creating web assets.",
+      "description": "Fetch favicons from existing web targets, compute mmh3-based favicon hashes for external discovery systems, apply dictionary-driven rule matching, and emit favicon enrichment artifacts without creating web assets.",
       "default_severity": "info",
-      "tags": ["favicon", "fingerprint", "web", "asm", "surface", "dictionary", "normalized"],
+      "tags": ["favicon", "icon-hash", "fingerprint", "web", "asm", "surface", "dictionary"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/favicon_fingerprinter.ts"
     },
     {
@@ -185,13 +189,26 @@
     {
       "id": "fofa_asset_monitor",
       "name": "FOFA Asset Monitor",
-      "version": "1.1.0",
+      "version": "1.2.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
+      "input_mode": "seed",
       "description": "Query FOFA Search API with enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.",
       "default_severity": "medium",
       "tags": ["fofa", "website", "monitor", "reconnaissance", "osint", "surface", "change-detection"],
+      "seed_bindings": [
+        { "seed_type": "root_domain", "input_key": "domains" },
+        { "seed_type": "domain", "input_key": "domains" },
+        { "seed_type": "favicon_hash", "input_key": "iconHashes" },
+        { "seed_type": "brand_keyword", "input_key": "brandKeywords" },
+        { "seed_type": "org_name", "input_key": "orgNames" },
+        { "seed_type": "asn", "input_key": "asnList" },
+        { "seed_type": "cname_keyword", "input_key": "cnameKeywords" },
+        { "seed_type": "title_keyword", "input_key": "titleKeywords" },
+        { "seed_type": "body_keyword", "input_key": "bodyKeywords" },
+        { "seed_type": "header_keyword", "input_key": "headerKeywords" }
+      ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/fofa_asset_monitor.ts"
     },
     {
@@ -233,7 +250,7 @@
     {
       "id": "ssrf_detector",
       "name": "SSRF Detector",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
@@ -269,7 +286,7 @@
     {
       "id": "open_redirect_detector",
       "name": "Open Redirect Detector",
-      "version": "1.2.0",
+      "version": "1.3.1",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
@@ -333,7 +350,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
-      "description": "Monitor API endpoints by discovering JavaScript assets from pages and bundles, extracting API-like path literals from JS, and comparing endpoint changes over time.",
+      "description": "Monitor API endpoints and HTML routes by discovering JavaScript assets from pages and bundles, extracting API-like and route-like path literals, and comparing snapshot changes over time.",
       "default_severity": "high",
       "tags": ["api", "endpoint", "monitor", "change-detection", "rest", "javascript", "spa"],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/api_monitor.ts"
