@@ -458,40 +458,52 @@ function normalizeTargetValue(value: string): string {
 function extractHost(value: string): string {
     const trimmed = value.trim();
     if (!trimmed) return "";
-    try {
-        const parsed = new URL(trimmed);
-        return parsed.hostname.toLowerCase();
-    } catch {
-        return normalizeTargetValue(trimmed).split(":")[0] || "";
+    if (/^(https?|wss?):\/\//i.test(trimmed)) {
+        try {
+            const parsed = new URL(trimmed);
+            return parsed.hostname.toLowerCase();
+        } catch {
+            return "";
+        }
     }
+    return normalizeTargetValue(trimmed).split(":")[0] || "";
 }
 
 function extractPort(value: string): number | null {
     const trimmed = value.trim();
-    try {
-        const parsed = new URL(trimmed);
-        if (parsed.port) return Number(parsed.port);
-        if (parsed.protocol === "https:") return 443;
-        if (parsed.protocol === "http:") return 80;
-    } catch {
-        const withoutPath = trimmed.replace(/^https?:\/\//i, "").split("/")[0] || "";
-        const parts = withoutPath.split(":");
-        if (parts.length > 1) {
-            const parsed = Number(parts[parts.length - 1]);
-            return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    if (/^(https?|wss?):\/\//i.test(trimmed)) {
+        try {
+            const parsed = new URL(trimmed);
+            if (parsed.port) return Number(parsed.port);
+            if (parsed.protocol === "https:") return 443;
+            if (parsed.protocol === "http:") return 80;
+        } catch {
+            return null;
         }
+    }
+
+    const withoutPath = trimmed.replace(/^https?:\/\//i, "").split("/")[0] || "";
+    const parts = withoutPath.split(":");
+    if (parts.length > 1) {
+        const parsed = Number(parts[parts.length - 1]);
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
     }
     return null;
 }
 
 function isIpLiteral(value: string): boolean {
-    return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || value.includes(":");
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(value) || (/^[0-9a-f:]+$/i.test(value) && value.includes(":"));
 }
 
 function guessRootDomain(hostname: string): string {
     const parts = hostname.toLowerCase().split(".").filter(Boolean);
     if (parts.length <= 2) return parts.join(".");
     return parts.slice(-2).join(".");
+}
+
+function computeSubdomainLevel(hostname: string): number {
+    const parts = hostname.toLowerCase().split(".").filter(Boolean);
+    return Math.max(0, parts.length - 2);
 }
 
 function stableHash(value: string): string {
@@ -887,7 +899,17 @@ function buildWebUrl(host: string, protocol: string, port: number | null): strin
           : "";
     if (!webProtocol) return null;
 
-    return `${webProtocol}://${trimmed}`;
+    const resolvedHost = extractHost(trimmed) || trimmed;
+    const resolvedPort = port && port > 0 ? port : extractPort(trimmed);
+    const needsPort =
+        resolvedPort !== null
+        && !((webProtocol === "http" && resolvedPort === 80) || (webProtocol === "https" && resolvedPort === 443));
+    const hostForUrl =
+        isIpLiteral(resolvedHost) && resolvedHost.includes(":")
+            ? `[${resolvedHost}]`
+            : resolvedHost;
+
+    return `${webProtocol}://${hostForUrl}${needsPort ? `:${resolvedPort}` : ""}`;
 }
 
 function createChangeEvent(
@@ -926,37 +948,49 @@ function createChangeEvent(
 }
 
 function buildArtifacts(allAssets: FofaAsset[]) {
+    const domains = new Map<string, any>();
     const webs = new Map<string, any>();
 
     for (const asset of allAssets) {
+        const fqdn = asset.hostname && !isIpLiteral(asset.hostname)
+            ? asset.hostname
+            : asset.domain && !isIpLiteral(asset.domain)
+              ? asset.domain
+              : "";
+
+        if (fqdn) {
+            const rootDomain = guessRootDomain(fqdn);
+            domains.set(fqdn, {
+                fqdn,
+                main_domain: rootDomain,
+                root_domain: rootDomain,
+                subdomain_level: computeSubdomainLevel(fqdn),
+            });
+        }
+
         if (asset.url) {
             const parsed = new URL(asset.url);
             webs.set(asset.url, {
                 canonical_url: asset.url,
+                url: asset.url,
                 scheme: parsed.protocol.replace(":", ""),
+                host: asset.host || parsed.host,
+                hostname: parsed.hostname || asset.hostname || null,
+                ip_address: asset.ip || null,
+                port: asset.port,
                 site_title: asset.title || null,
+                title: asset.title || null,
                 http_status_code: 0,
-                server_header: asset.server || null,
                 response_headers: {},
-                page_fingerprint: asset.product || null,
-                favicon_hash: null,
-                framework: asset.productCategory || null,
-                cms: null,
-                waf_flag: null,
-                cdn_flag: null,
-                login_flag: null,
-                api_flag: null,
-                openapi_url: null,
-                business_type: null,
-                language: null,
-                filing_info: null,
-                content_summary: [asset.title, asset.product, asset.version].filter(Boolean).join(" / "),
+                content_summary: asset.title || parsed.hostname || asset.hostname || asset.host || asset.ip,
                 last_accessed_at: asset.lastUpdateTime || null,
+                lastUpdateTime: asset.lastUpdateTime || null,
             });
         }
     }
 
     return {
+        domains: Array.from(domains.values()),
         webs: Array.from(webs.values()),
         changes: [],
         evidences: [],
