@@ -710,79 +710,10 @@ function createChangeEvent(
     };
 }
 
-function buildArtifacts(allAssets: FofaAsset[], changeEvents: ChangeEvent[]) {
-    const domains = new Map<string, any>();
-    const ips = new Map<string, any>();
-    const services = new Map<string, any>();
+function buildArtifacts(allAssets: FofaAsset[]) {
     const webs = new Map<string, any>();
-    const evidences: any[] = [];
-    const relations = new Map<string, any>();
 
     for (const asset of allAssets) {
-        if (asset.hostname && !isIpLiteral(asset.hostname)) {
-            domains.set(asset.hostname, {
-                fqdn: asset.hostname,
-                root_domain: guessRootDomain(asset.hostname),
-                main_domain: guessRootDomain(asset.hostname),
-                source: PLUGIN_ID,
-                confidence: 0.9,
-                metadata: {
-                    fofa_domain: asset.domain,
-                    cname: asset.cname,
-                    lastupdatetime: asset.lastUpdateTime,
-                },
-            });
-        }
-
-        if (asset.domain && !isIpLiteral(asset.domain)) {
-            domains.set(asset.domain, {
-                fqdn: asset.domain,
-                root_domain: guessRootDomain(asset.domain),
-                main_domain: guessRootDomain(asset.domain),
-                source: PLUGIN_ID,
-                confidence: 0.85,
-            });
-        }
-
-        if (asset.ip) {
-            ips.set(asset.ip, {
-                ip_address: asset.ip,
-                ip_version: asset.ip.includes(":") ? "IPv6" : "IPv4",
-                country: asset.countryName,
-                region: asset.region,
-                city: asset.city,
-                source: PLUGIN_ID,
-                confidence: 0.9,
-            });
-        }
-
-        if (asset.ip && asset.port) {
-            const serviceKey = `${asset.ip}:${asset.port}/${asset.protocol || "tcp"}`;
-            services.set(serviceKey, {
-                host: asset.hostname || asset.ip,
-                ip_address: asset.ip,
-                port_number: asset.port,
-                protocol_name: asset.protocol || "tcp",
-                service_name: asset.protocol || asset.product || "",
-                service_product: asset.product,
-                service_version: asset.version,
-                banner: asset.server,
-                source: PLUGIN_ID,
-                confidence: 0.82,
-                last_seen_at: asset.lastUpdateTime,
-                metadata: asset.raw,
-            });
-            relations.set(`${asset.ip}->${serviceKey}`, {
-                from_type: "ip",
-                from_key: asset.ip,
-                to_type: "service",
-                to_key: serviceKey,
-                relation_type: "exposes_service",
-                source: PLUGIN_ID,
-                confidence: 0.82,
-            });
-        }
-
         if (asset.url) {
             const parsed = new URL(asset.url);
             webs.set(asset.url, {
@@ -807,62 +738,14 @@ function buildArtifacts(allAssets: FofaAsset[], changeEvents: ChangeEvent[]) {
                 content_summary: [asset.title, asset.product, asset.version].filter(Boolean).join(" / "),
                 last_accessed_at: asset.lastUpdateTime || null,
             });
-
-            if (asset.hostname && !isIpLiteral(asset.hostname)) {
-                relations.set(`${asset.hostname}->${asset.url}`, {
-                    from_type: "domain",
-                    from_key: asset.hostname,
-                    to_type: "web",
-                    to_key: asset.url,
-                    relation_type: "hosts_web",
-                    source: PLUGIN_ID,
-                    confidence: 0.85,
-                });
-            }
         }
-
-        if (asset.hostname && asset.ip && !isIpLiteral(asset.hostname)) {
-            relations.set(`${asset.hostname}->${asset.ip}`, {
-                from_type: "domain",
-                from_key: asset.hostname,
-                to_type: "ip",
-                to_key: asset.ip,
-                relation_type: "resolves_to",
-                source: PLUGIN_ID,
-                confidence: 0.75,
-            });
-        }
-
-        evidences.push({
-            asset_type: asset.url ? "web" : asset.ip ? "service" : "domain",
-            asset_key: asset.url || asset.assetKey,
-            evidence_type: "fofa_search_result",
-            title: `FOFA asset: ${asset.host || asset.ip}`,
-            content_json: asset.raw,
-            source: PLUGIN_ID,
-        });
     }
 
     return {
-        domains: Array.from(domains.values()),
-        ips: Array.from(ips.values()),
-        services: Array.from(services.values()),
         webs: Array.from(webs.values()),
-        changes: changeEvents.map(event => ({
-            asset_key: event.assetId,
-            asset_type: "domain",
-            change_type: event.eventType,
-            severity: event.severity,
-            title: event.title,
-            description: event.description,
-            old_value: event.oldValue,
-            new_value: event.newValue,
-            risk_score: event.riskScore,
-            source: PLUGIN_ID,
-            metadata: event.metadata,
-        })),
-        evidences,
-        relations: Array.from(relations.values()),
+        changes: [],
+        evidences: [],
+        relations: [],
     };
 }
 
@@ -980,26 +863,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         )).sort();
         const urls = Array.from(new Set(allAssets.map(asset => asset.url).filter((url): url is string => Boolean(url)))).sort();
         const ips = Array.from(new Set(allAssets.map(asset => asset.ip).filter(Boolean))).sort();
-        const standardAssets = [
-            ...subdomains.map(value => ({ type: "domain", value, metadata: { source: PLUGIN_ID } })),
-            ...urls.map(value => ({ type: "url", value, metadata: { source: PLUGIN_ID } })),
-            ...ips.map(value => ({ type: "ip", value, metadata: { source: PLUGIN_ID } })),
-            ...allAssets
-                .filter(asset => asset.ip && asset.port)
-                .map(asset => ({
-                    type: "service",
-                    value: `${asset.ip}:${asset.port}`,
-                    metadata: {
-                        source: PLUGIN_ID,
-                        host: asset.host,
-                        protocol: asset.protocol,
-                        product: asset.product,
-                        version: asset.version,
-                    },
-                })),
-        ];
-
-        const surfaceArtifacts = buildArtifacts(allAssets, changeEvents);
+        const surfaceArtifacts = buildArtifacts(allAssets);
         const successfulQueries = results.filter(result => result.success).length;
 
         return {
@@ -1007,10 +871,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             data: {
                 queries: plans,
                 results,
-                subdomains,
-                urls,
-                ips,
-                assets: standardAssets,
+                subdomains: [],
+                urls: [],
+                ips: [],
+                assets: [],
                 changeEvents,
                 snapshots,
                 summary: {
