@@ -3,10 +3,12 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.0
+ * @version 1.2.1
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
+ * @monitor_type web
+ * @input_mode seed
  * @default_severity medium
  * @tags fofa, asset, monitor, reconnaissance, osint, surface, change-detection
  * @description Query FOFA Search API with domain and enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.

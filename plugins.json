@@ -193,6 +193,7 @@
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
+      "monitor_type": "web",
       "input_mode": "seed",
       "description": "Query FOFA Search API with enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.",
       "default_severity": "medium",
