@@ -63,7 +63,7 @@ interface FofaApiResponse {
     page?: number;
     mode?: string;
     query?: string;
-    results?: string[][];
+    results?: Array<string[] | Record<string, unknown>>;
 }
 
 interface FofaAsset {
@@ -576,29 +576,68 @@ async function searchFofa(
     };
 }
 
-function parseFofaRow(row: string[], fields: string[]): FofaAsset {
+function readRowValue(row: string[] | Record<string, unknown>, field: string, index: number): string {
+    if (Array.isArray(row)) {
+        const value = row[index];
+        return value === undefined || value === null ? "" : String(value);
+    }
+
+    const record = row as Record<string, unknown>;
+    const direct = record[field];
+    if (direct !== undefined && direct !== null) {
+        return String(direct);
+    }
+
+    const aliases: Record<string, string[]> = {
+        host: ["url", "link"],
+        domain: ["hostname"],
+        protocol: ["base_protocol", "scheme"],
+        country_name: ["country"],
+        region: ["province"],
+        product_category: ["category"],
+    };
+
+    for (const alias of aliases[field] || []) {
+        const aliased = record[alias];
+        if (aliased !== undefined && aliased !== null) {
+            return String(aliased);
+        }
+    }
+
+    return "";
+}
+
+function parseFofaRow(row: string[] | Record<string, unknown>, fields: string[]): FofaAsset {
     const raw: Record<string, string> = {};
     fields.forEach((field, index) => {
-        raw[field] = row[index] === undefined || row[index] === null ? "" : String(row[index]);
+        raw[field] = readRowValue(row, field, index);
     });
 
-    const host = raw.host || raw.link || "";
-    const ip = raw.ip || "";
+    const record = Array.isArray(row) ? null : row as Record<string, unknown>;
+    const host = raw.host || raw.link || (record?.url ? String(record.url) : "");
+    const ip = raw.ip || (record?.ip ? String(record.ip) : "");
     const portValue = Number(raw.port || 0);
-    const port = Number.isInteger(portValue) && portValue > 0 ? portValue : extractPort(host);
+    const objectPort = record?.port === undefined || record?.port === null ? 0 : Number(record.port);
+    const port = Number.isInteger(portValue) && portValue > 0
+        ? portValue
+        : Number.isInteger(objectPort) && objectPort > 0
+          ? objectPort
+          : extractPort(host);
     const protocol = (raw.protocol || raw.base_protocol || "").toLowerCase();
-    const hostname = extractHost(host || raw.domain || ip);
-    const url = buildWebUrl(host, protocol, port);
-    const assetKey = buildAssetKey(host, ip, port, protocol);
+    const domain = raw.domain || (record?.domain ? String(record.domain) : "");
+    const hostname = extractHost(host || domain || ip);
+    const canonicalHost = host || domain || hostname || ip;
+    const url = buildWebUrl(canonicalHost, protocol, port);
+    const assetKey = buildAssetKey(canonicalHost, ip, port, protocol);
 
     return {
         assetKey,
-        host,
+        host: canonicalHost,
         ip,
         port,
         protocol,
         title: raw.title || "",
-        domain: raw.domain || "",
+        domain,
         countryName: raw.country_name || raw.country || "",
         region: raw.region || raw.province || "",
         city: raw.city || "",
