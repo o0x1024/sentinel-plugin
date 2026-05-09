@@ -183,6 +183,18 @@
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/service_monitor.ts"
     },
     {
+      "id": "fofa_asset_monitor",
+      "name": "FOFA Asset Monitor",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "bounty",
+      "category": "monitor",
+      "description": "Query FOFA Search API for scoped domains or explicit FOFA syntax, normalize discovered hosts, IPs, services, and web assets, and emit asset change events for monitoring workflows.",
+      "default_severity": "medium",
+      "tags": ["fofa", "asset", "monitor", "reconnaissance", "osint", "surface", "change-detection"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/fofa_asset_monitor.ts"
+    },
+    {
       "id": "service_probe",
       "name": "Service Probe",
       "version": "1.2.2",
