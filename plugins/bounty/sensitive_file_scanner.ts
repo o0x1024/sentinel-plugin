@@ -3,7 +3,7 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.3.2
+ * @version 1.3.3
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -68,7 +68,6 @@ interface ToolInput {
     targets?: string[];
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
-    timeout?: number;
     userAgent?: string;
     maxTargets?: number;
     __monitorExecution?: MonitorExecutionContext;
@@ -199,13 +198,6 @@ export function get_input_schema() {
                         }
                     }
                 }
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 3000,
-                minimum: 1000,
-                maximum: 60000
             },
             userAgent: {
                 type: "string",
@@ -352,30 +344,23 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
     return [];
 }
 
-async function fetchWithTimeout(url: string, timeout: number, userAgent: string, method: "GET" | "HEAD" = "GET"): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-        return await fetch(url, {
-            method,
-            redirect: "manual",
-            signal: controller.signal,
-            headers: { "User-Agent": userAgent },
-        });
-    } finally {
-        clearTimeout(timer);
-    }
+async function fetchResponse(url: string, userAgent: string, method: "GET" | "HEAD" = "GET"): Promise<Response> {
+    return await fetch(url, {
+        method,
+        redirect: "manual",
+        headers: { "User-Agent": userAgent },
+    });
 }
 
-async function probeStatus(url: string, timeout: number, userAgent: string): Promise<Response> {
-    const headResponse = await fetchWithTimeout(url, timeout, userAgent, "HEAD");
+async function probeStatus(url: string, userAgent: string): Promise<Response> {
+    const headResponse = await fetchResponse(url, userAgent, "HEAD");
     if (headResponse.status === 405 || headResponse.status === 501) {
         try {
             await headResponse.body?.cancel();
         } catch {
             // Ignore body cleanup failures on fallback probes.
         }
-        return fetchWithTimeout(url, timeout, userAgent, "GET");
+        return fetchResponse(url, userAgent, "GET");
     }
     return headResponse;
 }
@@ -503,11 +488,11 @@ function randomProbePath(): string {
     return `.sentinel-soft404-${seed}.txt`;
 }
 
-async function buildTargetBaseline(target: string, timeout: number, userAgent: string): Promise<TargetBaseline> {
+async function buildTargetBaseline(target: string, userAgent: string): Promise<TargetBaseline> {
     const baselineUrl = joinUrl(target, randomProbePath());
     let response: Response | null = null;
     try {
-        response = await fetchWithTimeout(baselineUrl, timeout, userAgent, "GET");
+        response = await fetchResponse(baselineUrl, userAgent, "GET");
         const body = await response.text();
         if (response.status !== 200) {
             return { soft404: null };
@@ -590,7 +575,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return { success: false, error: "Invalid input: expected an object payload" };
         }
 
-        const timeout = Number(input.timeout || 3000);
         const userAgent = input.userAgent || "Sentinel-Sensitive-File-Scanner/1.0";
                 const normalizedTargets = Array.from(new Set([
             normalizeTarget(input.url),
@@ -650,7 +634,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let completedTargets = 0;
         await runSequentially(targets.map((target) => async () => {
                 try {
-                    const baseline = await buildTargetBaseline(target, timeout, userAgent);
+                    const baseline = await buildTargetBaseline(target, userAgent);
                     for (const preparedRule of preparedRules) {
                         const { rule, metadata, path, matchers, negativeMatchers } = preparedRule;
                         const url = joinUrl(target, path);
@@ -660,8 +644,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         try {
                             stats.attemptedRequests += 1;
                             response = shouldReadBody
-                                ? await fetchWithTimeout(url, timeout, userAgent)
-                                : await probeStatus(url, timeout, userAgent);
+                                ? await fetchResponse(url, userAgent)
+                                : await probeStatus(url, userAgent);
                             let body: string | null = null;
                             if (shouldReadBody) {
                                 body = await response.text();

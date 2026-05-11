@@ -3,7 +3,7 @@
  * 
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.3.1
+ * @version 1.3.2
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -553,7 +553,7 @@ function looksLikeJs(path: string): boolean {
     return false;
 }
 
-async function fetchWithTimeout(
+async function fetchDocument(
     url: string,
     userAgent: string,
     accept = "text/html,application/xhtml+xml,application/xml;q=0.9,application/javascript,*/*;q=0.8",
@@ -1029,7 +1029,7 @@ async function discoverJavascriptAssets(
                 }
 
                 const pageFetchStartedAt = Date.now();
-                const pageResult = await fetchWithTimeout(current.url, userAgent);
+                const pageResult = await fetchDocument(current.url, userAgent);
                 if (!pageResult || !pageResult.ok) {
                     return null;
                 }
@@ -1103,7 +1103,7 @@ async function discoverJavascriptAssets(
         const manifestProbeStartedAt = Date.now();
         const manifestResults = await runWithConcurrency(manifestUrls.map(manifestUrl => async () => ({
                 manifestUrl,
-                result: await fetchWithTimeout(manifestUrl, userAgent, "application/json,*/*"),
+                result: await fetchDocument(manifestUrl, userAgent, "application/json,*/*"),
             })), 3);
         discoveryTimings.manifestProbeMs += Date.now() - manifestProbeStartedAt;
 
@@ -1128,7 +1128,7 @@ async function discoverJavascriptAssets(
             const batchResults = await runWithConcurrency(batch.map(link => async () => ({
                     fetchStartedAt: Date.now(),
                     link,
-                    result: await fetchWithTimeout(
+                    result: await fetchDocument(
                         link.url,
                         userAgent,
                         link.type === "sourcemap"
@@ -1518,7 +1518,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 let inlineScriptCount = 0;
                 
                 const targetFetchStartedAt = Date.now();
-                const pageResult = await fetchWithTimeout(
+                const pageResult = await fetchDocument(
                     baseUrl,
                     userAgent,
                     "text/html,application/xhtml+xml,*/*",

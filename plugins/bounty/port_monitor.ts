@@ -3,7 +3,7 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.3
+ * @version 1.3.4
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -17,7 +17,6 @@ interface ToolInput {
     target_objects?: Array<string | ServiceTarget>;
     service_targets?: Array<string | ServiceTarget>;
     ports?: number[];   // Specific ports to scan (default: common ports)
-    timeout?: number;
     detectService?: boolean;
     previousSnapshots?: Record<string, PortSnapshot>;
     __monitorExecution?: MonitorExecutionContext;
@@ -333,13 +332,6 @@ export function get_input_schema() {
                 items: { type: "integer" },
                 description: "Specific ports to scan (default: common ports)"
             },
-            timeout: {
-                type: "integer",
-                description: "Connection timeout in milliseconds per port",
-                default: 1500,
-                minimum: 1000,
-                maximum: 30000
-            },
             detectService: {
                 type: "boolean",
                 description: "Reserved for compatibility; service fingerprinting is handled by dedicated service plugins",
@@ -418,7 +410,6 @@ function mapOpenPorts(openPorts: number[]): PortInfo[] {
 async function scanPortsWithNativeEngine(
     targets: NativePortScanTarget[],
     defaultPorts: number[],
-    timeout: number,
     monitorExecution?: MonitorExecutionContext
 ): Promise<NativePortScanResponse> {
     if (typeof Sentinel === "undefined" || !Sentinel.Network || typeof Sentinel.Network.scanPorts !== "function") {
@@ -428,7 +419,6 @@ async function scanPortsWithNativeEngine(
     return await Sentinel.Network.scanPorts({
         targets,
         ports: defaultPorts,
-        timeout_ms: timeout,
         tries: 1,
         monitor_progress: monitorExecution ? {
             taskId: monitorExecution.task_id,
@@ -482,8 +472,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const validTargets = [...targetPortMap.keys()];
         const defaultPorts = [...new Set(input.ports || COMMON_PORTS)].sort((left, right) => left - right);
-        const timeout = input.timeout || 1500;
-                const previousSnapshots = input.previousSnapshots || {};
+        const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
         
         const results: PortResult[] = [];
@@ -502,7 +491,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const nativeScan = await scanPortsWithNativeEngine(
             nativeTargets,
             defaultPorts,
-            timeout,
             monitorExecution,
         );
         if (!nativeScan.success && (!nativeScan.results || nativeScan.results.length === 0)) {

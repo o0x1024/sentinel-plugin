@@ -3,7 +3,7 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.2
+ * @version 1.0.3
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -22,7 +22,6 @@ declare const Sentinel: {
             targets: Array<{ host: string; port: number; protocol: string }>;
             rules?: Array<{ id?: string; word: string; category?: string | null; metadata?: any }>;
             dictionaryId?: string;
-            timeoutMs?: number;
             followHttpRedirects?: boolean;
             readBanner?: boolean;
             engine?: string;
@@ -68,7 +67,6 @@ interface ToolInput {
     service_targets?: Array<string | PortLikeTarget>;
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
-    timeout?: number;
     followHttpRedirects?: boolean;
     readBanner?: boolean;
     serviceProbeEngine?: string;
@@ -499,34 +497,19 @@ function extractProductInfo(banner?: string, serverHeader?: string): {
     };
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, {
-            ...init,
-            signal: controller.signal,
-        });
-    } finally {
-        clearTimeout(timeoutId);
-    }
-}
-
 async function fingerprintHttp(
     host: string,
     port: number,
-    timeout: number,
     followRedirects: boolean,
 ): Promise<Partial<MonitorResult>> {
     const protocol = TLS_PORTS.has(port) ? "https" : "http";
     const url = `${protocol}://${host}:${port}/`;
-    const response = await fetchWithTimeout(
+    const response = await fetch(
         url,
         {
             method: "GET",
             redirect: followRedirects ? "follow" : "manual",
         },
-        timeout,
     );
 
     const serverHeader = response.headers.get("server") || undefined;
@@ -542,7 +525,6 @@ async function fingerprintHttp(
 async function fingerprintTcp(
     host: string,
     port: number,
-    timeout: number,
     readBanner: boolean,
 ): Promise<Partial<MonitorResult>> {
     // @ts-ignore
@@ -550,8 +532,6 @@ async function fingerprintTcp(
     try {
         const buffer = new Uint8Array(512);
         // @ts-ignore
-        conn.setReadDeadline(Date.now() + timeout);
-
         if (!readBanner) {
             return {};
         }
@@ -730,7 +710,6 @@ async function probeServicesWithNativeEngine(
     targets: Array<{ host: string; port: number; protocol: string }>,
     dictionaryId: string | null,
     rules: RuleEntry[],
-    timeout: number,
     followHttpRedirects: boolean,
     readBanner: boolean,
     engine: string,
@@ -748,7 +727,6 @@ async function probeServicesWithNativeEngine(
         targets,
         rules,
         dictionaryId: dictionaryId || undefined,
-        timeoutMs: timeout,
         followHttpRedirects,
         readBanner,
         engine,
@@ -790,12 +768,6 @@ export function get_input_schema() {
             dictionaryEntries: {
                 type: "array",
                 description: "Structured service fingerprint rule entries injected by workflow",
-            },
-            timeout: {
-                type: "integer",
-                default: 5000,
-                minimum: 1000,
-                maximum: 30000,
             },
             followHttpRedirects: {
                 type: "boolean",
@@ -867,7 +839,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const timeout = Math.max(1000, Math.min(input.timeout || 5000, 30000));
         const followHttpRedirects = input.followHttpRedirects !== false;
         const readBanner = input.readBanner !== false;
         const monitorExecution = input.__monitorExecution;
@@ -882,7 +853,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             normalizedTargets,
             dictionaryId,
             explicitRules,
-            timeout,
             followHttpRedirects,
             readBanner,
             requestedProbeEngine.used,
@@ -912,9 +882,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 try {
                     let details: Partial<MonitorResult>;
                     if (HTTP_PORTS.has(target.port) || target.protocol === "http" || target.protocol === "https") {
-                        details = await fingerprintHttp(target.host, target.port, timeout, followHttpRedirects);
+                        details = await fingerprintHttp(target.host, target.port, followHttpRedirects);
                     } else {
-                        details = await fingerprintTcp(target.host, target.port, timeout, readBanner);
+                        details = await fingerprintTcp(target.host, target.port, readBanner);
                     }
 
                     const protocol = String(details.protocol || target.protocol || "tcp");

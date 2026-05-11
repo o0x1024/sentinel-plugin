@@ -3,13 +3,13 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.2.1
+ * @version 1.3.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
  * @default_severity info
  * @tags favicon, fingerprint, web, asm, surface
- * @description Fetch favicons from existing web targets and emit fingerprint/evidence enrichment artifacts without creating new web assets
+ * @description Fetch favicons from website targets, discover or enrich web assets, and emit favicon fingerprints/evidence
  */
 
 declare const Sentinel: {
@@ -26,7 +26,6 @@ interface ToolInput {
     targets: string[];
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
-    timeout?: number;
     concurrency?: number;
     followRedirects?: boolean;
     __monitorExecution?: MonitorExecutionContext;
@@ -55,8 +54,11 @@ interface RuleEntry {
 interface FingerprintResult {
     target: string;
     success: boolean;
+    pageUrl?: string;
     iconUrl?: string;
     faviconHash?: string;
+    httpStatusCode?: number;
+    siteTitle?: string;
     contentType?: string;
     bytes?: number;
     error?: string;
@@ -71,6 +73,7 @@ interface ToolOutput {
             totalTargets: number;
             successfulFingerprints: number;
             failedFingerprints: number;
+            emittedWebAssets: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -84,9 +87,6 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
-const DEFAULT_TIMEOUT_MS = 5000;
-const MIN_TIMEOUT_MS = 1000;
-const MAX_TIMEOUT_MS = 30000;
 const DEFAULT_CONCURRENCY = 32;
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 64;
@@ -191,7 +191,88 @@ function normalizeWebAssetKey(value: string): string {
 }
 
 function normalizeTarget(value: string): string {
-    return normalizeWebAssetKey(value);
+    const trimmed = String(value || "").trim();
+    if (!trimmed) return "";
+    if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) {
+        return normalizeWebAssetKey(trimmed);
+    }
+    return trimmed.replace(/\/+$/, "");
+}
+
+function hasExplicitScheme(value: string): boolean {
+    return /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value.trim());
+}
+
+function buildPageCandidates(target: string): string[] {
+    const trimmed = String(target || "").trim();
+    if (!trimmed) return [];
+    if (hasExplicitScheme(trimmed)) {
+        return [normalizeWebAssetKey(trimmed)].filter(Boolean);
+    }
+
+    const candidates = [`https://${trimmed}`, `http://${trimmed}`]
+        .map(candidate => normalizeWebAssetKey(candidate))
+        .filter(Boolean);
+    return Array.from(new Set(candidates));
+}
+
+function extractTitle(html: string): string | undefined {
+    const match = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
+    if (!match?.[1]) return undefined;
+    const normalized = match[1].replace(/\s+/g, " ").trim();
+    return normalized || undefined;
+}
+
+function headersToObject(headers: Headers): Record<string, string> {
+    const result: Record<string, string> = {};
+    headers.forEach((value, key) => {
+        result[key] = value;
+    });
+    return result;
+}
+
+function buildDefaultIconCandidates(baseUrl: URL): string[] {
+    return [
+        new URL("/favicon.ico", baseUrl).toString(),
+        new URL("/favicon.png", baseUrl).toString(),
+        new URL("/apple-touch-icon.png", baseUrl).toString(),
+        new URL("/apple-touch-icon-precomposed.png", baseUrl).toString(),
+    ];
+}
+
+function parseHtmlAttributes(tagSource: string): Record<string, string> {
+    const attributes: Record<string, string> = {};
+    const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(tagSource)) !== null) {
+        const key = String(match[1] || "").toLowerCase();
+        if (!key) continue;
+        const value = match[2] ?? match[3] ?? match[4] ?? "";
+        attributes[key] = value;
+    }
+    return attributes;
+}
+
+function buildWebArtifact(
+    pageUrl: URL,
+    statusCode: number,
+    headers: Record<string, string>,
+    title: string | undefined,
+    faviconHash: string,
+): Record<string, unknown> {
+    return {
+        canonical_url: normalizeWebAssetKey(pageUrl.toString()),
+        scheme: pageUrl.protocol.replace(":", ""),
+        hostname: pageUrl.hostname,
+        port: Number(pageUrl.port || (pageUrl.protocol === "https:" ? 443 : 80)),
+        site_title: title || null,
+        http_status_code: statusCode,
+        response_headers: headers,
+        content_summary: title || `${statusCode} ${pageUrl.hostname}`,
+        favicon_hash: faviconHash,
+        source: "favicon_fingerprinter",
+        confidence: 0.95,
+    };
 }
 
 function toWrappedBase64(buffer: ArrayBuffer): string {
@@ -257,25 +338,100 @@ function computeFofaIconHash(buffer: ArrayBuffer): string {
     return String(murmurHash3X86_32(toWrappedBase64(buffer), 0));
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, {
-            ...init,
-            signal: controller.signal,
-        });
-    } finally {
-        clearTimeout(timeoutId);
+function isDirectIconTarget(url: URL, contentType: string | null): boolean {
+    const normalizedContentType = String(contentType || "").toLowerCase();
+    if (normalizedContentType.startsWith("image/")) {
+        return true;
     }
+
+    const pathname = url.pathname.toLowerCase();
+    return pathname.endsWith(".ico")
+        || pathname.endsWith(".png")
+        || pathname.endsWith(".svg")
+        || pathname.endsWith(".gif")
+        || pathname.endsWith(".jpg")
+        || pathname.endsWith(".jpeg")
+        || pathname.endsWith(".webp")
+        || pathname.endsWith(".bmp");
+}
+
+function buildFingerprintSuccessResult(
+    target: string,
+    pageUrl: URL,
+    assetKey: string,
+    iconUrl: string,
+    buffer: ArrayBuffer,
+    contentType: string | null,
+    rules: RuleEntry[],
+    webArtifact?: Record<string, unknown>,
+    statusCode?: number,
+    siteTitle?: string,
+): FingerprintResult & { fingerprint?: any; evidence?: any } {
+    const faviconHash = computeFofaIconHash(buffer);
+    const matchedRule = matchFaviconRule(faviconHash, iconUrl, rules);
+    const metadata = parseMetadata(matchedRule?.metadata);
+    const resolvedWebArtifact = webArtifact || buildWebArtifact(
+        pageUrl,
+        statusCode || 200,
+        {},
+        siteTitle,
+        faviconHash,
+    );
+    resolvedWebArtifact.favicon_hash = faviconHash;
+    return {
+        target,
+        success: true,
+        pageUrl: assetKey,
+        iconUrl,
+        faviconHash,
+        httpStatusCode: statusCode,
+        siteTitle,
+        contentType: contentType || undefined,
+        bytes: buffer.byteLength,
+        webArtifact: resolvedWebArtifact,
+        fingerprint: matchedRule && metadata.product && metadata.asset_category
+            ? {
+                asset_type: "web",
+                asset_key: assetKey,
+                fingerprint_type: "favicon",
+                fingerprint_key: iconUrl,
+                fingerprint_value: faviconHash,
+                rule_id: metadata.rule_id || matchedRule.id || `favicon_rule:${matchedRule.word}`,
+                rule_word: matchedRule.word,
+                rule_name: metadata.name || matchedRule.word,
+                normalized_product: metadata.product,
+                normalized_vendor: metadata.vendor,
+                normalized_category: metadata.asset_category,
+                normalized_family: metadata.asset_family,
+                confidence: 0.95,
+                evidence: `Fetched favicon from ${iconUrl}`,
+            }
+            : undefined,
+        evidence: {
+            asset_type: "web",
+            asset_key: assetKey,
+            evidence_type: "favicon_metadata",
+            title: `Favicon fingerprint for ${pageUrl.hostname}`,
+            content_json: {
+                page_url: assetKey,
+                icon_url: iconUrl,
+                icon_hash: faviconHash,
+                content_type: contentType,
+                size_bytes: buffer.byteLength,
+            },
+        },
+    };
 }
 
 function extractIconCandidates(baseUrl: URL, html: string): string[] {
     const candidates: string[] = [];
-    const pattern = /<link\b[^>]*rel=["'][^"']*icon[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>/gi;
+    const pattern = /<link\b[^>]*>/gi;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(html)) !== null) {
-        const rawHref = match[1]?.trim();
+        const attrs = parseHtmlAttributes(match[0] || "");
+        const rel = String(attrs.rel || "").toLowerCase();
+        if (!rel.includes("icon")) continue;
+        const rawHref = String(attrs.href || "").trim();
         if (!rawHref) continue;
         try {
             candidates.push(new URL(rawHref, baseUrl).toString());
@@ -284,7 +440,7 @@ function extractIconCandidates(baseUrl: URL, html: string): string[] {
         }
     }
 
-    candidates.push(new URL("/favicon.ico", baseUrl).toString());
+    candidates.push(...buildDefaultIconCandidates(baseUrl));
     return Array.from(new Set(candidates));
 }
 
@@ -341,96 +497,106 @@ function matchFaviconRule(faviconHash: string, iconUrl: string, rules: RuleEntry
 
 async function fingerprintTarget(
     target: string,
-    timeout: number,
     followRedirects: boolean,
     rules: RuleEntry[],
-): Promise<FingerprintResult & { fingerprint?: any; evidence?: any }> {
-    const canonicalUrl = new URL(target);
-    const assetKey = normalizeWebAssetKey(canonicalUrl.toString());
-    try {
-        const pageResponse = await fetchWithTimeout(
-            canonicalUrl.toString(),
-            {
-                method: "GET",
-                redirect: followRedirects ? "follow" : "manual",
-            },
-            timeout,
-        );
-        const html = await pageResponse.text();
-        const candidates = extractIconCandidates(canonicalUrl, html);
-
-        for (const iconUrl of candidates) {
-            try {
-                const iconResponse = await fetchWithTimeout(
-                    iconUrl,
-                    {
-                        method: "GET",
-                        redirect: followRedirects ? "follow" : "manual",
-                    },
-                    timeout,
-                );
-                if (!iconResponse.ok) continue;
-                const buffer = await iconResponse.arrayBuffer();
-                if (!buffer || buffer.byteLength === 0) continue;
-
-                const faviconHash = computeFofaIconHash(buffer);
-                const matchedRule = matchFaviconRule(faviconHash, iconUrl, rules);
-                const metadata = parseMetadata(matchedRule?.metadata);
-                return {
-                    target: assetKey,
-                    success: true,
-                    iconUrl,
-                    faviconHash,
-                    contentType: iconResponse.headers.get("content-type") || undefined,
-                    bytes: buffer.byteLength,
-                    fingerprint: matchedRule && metadata.product && metadata.asset_category
-                        ? {
-                            asset_type: "web",
-                            asset_key: assetKey,
-                            fingerprint_type: "favicon",
-                            fingerprint_key: iconUrl,
-                            fingerprint_value: faviconHash,
-                            rule_id: metadata.rule_id || matchedRule.id || `favicon_rule:${matchedRule.word}`,
-                            rule_word: matchedRule.word,
-                            rule_name: metadata.name || matchedRule.word,
-                            normalized_product: metadata.product,
-                            normalized_vendor: metadata.vendor,
-                            normalized_category: metadata.asset_category,
-                            normalized_family: metadata.asset_family,
-                            confidence: 0.95,
-                            evidence: `Fetched favicon from ${iconUrl}`,
-                        }
-                        : undefined,
-                    evidence: {
-                        asset_type: "web",
-                        asset_key: assetKey,
-                        evidence_type: "favicon_metadata",
-                        title: `Favicon fingerprint for ${canonicalUrl.hostname}`,
-                        content_json: {
-                            icon_url: iconUrl,
-                            icon_hash: faviconHash,
-                            content_type: iconResponse.headers.get("content-type"),
-                            size_bytes: buffer.byteLength,
-                        },
-                    },
-                };
-            } catch {
-                continue;
-            }
-        }
-
+): Promise<FingerprintResult & { fingerprint?: any; evidence?: any; webArtifact?: any }> {
+    const pageCandidates = buildPageCandidates(target);
+    if (pageCandidates.length === 0) {
         return {
-            target: assetKey,
+            target,
             success: false,
-            error: "No favicon could be fetched",
-        };
-    } catch (error) {
-        return {
-            target: assetKey,
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: "Invalid target",
         };
     }
+
+    const errors: string[] = [];
+    for (const candidate of pageCandidates) {
+        try {
+            const requestedUrl = new URL(candidate);
+            const pageResponse = await fetch(
+                requestedUrl.toString(),
+                {
+                    method: "GET",
+                    redirect: followRedirects ? "follow" : "manual",
+                },
+            );
+            const responseUrl = new URL(pageResponse.url || requestedUrl.toString());
+            const responseContentType = pageResponse.headers.get("content-type");
+            const assetKey = normalizeWebAssetKey(responseUrl.toString());
+
+            if (pageResponse.ok && isDirectIconTarget(responseUrl, responseContentType)) {
+                const buffer = await pageResponse.arrayBuffer();
+                if (!buffer || buffer.byteLength === 0) {
+                    errors.push(`${candidate}: fetched favicon is empty`);
+                    continue;
+                }
+                return buildFingerprintSuccessResult(
+                    target,
+                    new URL(`${responseUrl.protocol}//${responseUrl.host}`),
+                    normalizeWebAssetKey(`${responseUrl.protocol}//${responseUrl.host}`),
+                    responseUrl.toString(),
+                    buffer,
+                    responseContentType,
+                    rules,
+                    undefined,
+                    pageResponse.status,
+                    undefined,
+                );
+            }
+
+            const html = await pageResponse.text();
+            const siteTitle = extractTitle(html);
+            const headerObject = headersToObject(pageResponse.headers);
+            const webArtifactBase = buildWebArtifact(
+                responseUrl,
+                pageResponse.status,
+                headerObject,
+                siteTitle,
+                "",
+            );
+            const candidates = extractIconCandidates(responseUrl, html);
+
+            for (const iconUrl of candidates) {
+                try {
+                    const iconResponse = await fetch(
+                        iconUrl,
+                        {
+                            method: "GET",
+                            redirect: followRedirects ? "follow" : "manual",
+                        },
+                    );
+                    if (!iconResponse.ok) continue;
+                    const buffer = await iconResponse.arrayBuffer();
+                    if (!buffer || buffer.byteLength === 0) continue;
+                    return buildFingerprintSuccessResult(
+                        target,
+                        responseUrl,
+                        assetKey,
+                        iconUrl,
+                        buffer,
+                        iconResponse.headers.get("content-type"),
+                        rules,
+                        webArtifactBase,
+                        pageResponse.status,
+                        siteTitle,
+                    );
+                } catch (error) {
+                    errors.push(`${iconUrl}: ${error instanceof Error ? error.message : String(error)}`);
+                    continue;
+                }
+            }
+
+            errors.push(`${candidate}: no favicon candidates responded successfully`);
+        } catch (error) {
+            errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    return {
+        target,
+        success: false,
+        error: errors[0] || "No favicon could be fetched",
+    };
 }
 
 async function runConcurrently<T>(
@@ -461,7 +627,7 @@ export function get_input_schema() {
             targets: {
                 type: "array",
                 items: { type: "string" },
-                description: "HTTP or HTTPS URLs to fingerprint via favicon",
+                description: "HTTP or HTTPS website URLs, or direct favicon file URLs, to fingerprint",
             },
             dictionaryId: {
                 type: "string",
@@ -480,13 +646,6 @@ export function get_input_schema() {
                     },
                     required: ["word"],
                 },
-            },
-            timeout: {
-                type: "integer",
-                description: "Network timeout in milliseconds",
-                default: DEFAULT_TIMEOUT_MS,
-                minimum: MIN_TIMEOUT_MS,
-                maximum: MAX_TIMEOUT_MS,
             },
             concurrency: {
                 type: "integer",
@@ -522,8 +681,11 @@ export function get_output_schema() {
                             properties: {
                                 target: { type: "string" },
                                 success: { type: "boolean" },
+                                pageUrl: { type: "string" },
                                 iconUrl: { type: "string" },
                                 faviconHash: { type: "string" },
+                                httpStatusCode: { type: "number" },
+                                siteTitle: { type: "string" },
                                 contentType: { type: "string" },
                                 bytes: { type: "number" },
                                 error: { type: "string" },
@@ -537,13 +699,19 @@ export function get_output_schema() {
                             totalTargets: { type: "number" },
                             successfulFingerprints: { type: "number" },
                             failedFingerprints: { type: "number" },
+                            emittedWebAssets: { type: "number" },
                         },
-                        required: ["totalTargets", "successfulFingerprints", "failedFingerprints"],
+                        required: ["totalTargets", "successfulFingerprints", "failedFingerprints", "emittedWebAssets"],
                     },
                     surface_artifacts: {
                         type: "object",
-                        description: "Favicon fingerprint and evidence artifacts that enrich matching existing web assets without creating web assets",
+                        description: "Favicon-driven web discovery plus fingerprint and evidence artifacts",
                         properties: {
+                            webs: {
+                                type: "array",
+                                description: "Discovered or refreshed web assets keyed by canonical URL",
+                                items: { type: "object" },
+                            },
                             fingerprints: {
                                 type: "array",
                                 description: "Strict favicon fingerprint artifacts with explicit rule_* and normalized_* fields",
@@ -576,7 +744,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return { success: false, error: "No valid web targets provided" };
         }
 
-        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
         const concurrency = clampInteger(
             input.concurrency,
             DEFAULT_CONCURRENCY,
@@ -596,7 +763,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let completedTargets = 0;
         const tasks = targets.map((target) => async () => {
             try {
-                return await fingerprintTarget(target, timeout, input.followRedirects !== false, rules);
+                return await fingerprintTarget(target, input.followRedirects !== false, rules);
             } finally {
                 completedTargets += 1;
                 await reportMonitorProgress(monitorExecution, {
@@ -614,13 +781,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             success: true,
             data: {
                 targets,
-                results: fingerprints.map(({ fingerprint, evidence, ...result }) => result),
+                results: fingerprints.map(({ fingerprint, evidence, webArtifact, ...result }) => result),
                 summary: {
                     totalTargets: targets.length,
                     successfulFingerprints: fingerprints.filter((item) => item.success).length,
                     failedFingerprints: fingerprints.filter((item) => !item.success).length,
+                    emittedWebAssets: fingerprints.filter((item) => item.success && item.webArtifact).length,
                 },
                 surface_artifacts: {
+                    webs: fingerprints
+                        .map((item) => item.webArtifact)
+                        .filter(Boolean),
                     fingerprints: fingerprints
                         .map((item) => item.fingerprint)
                         .filter(Boolean),

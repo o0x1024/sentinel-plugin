@@ -3,7 +3,7 @@
  * 
  * @plugin cors_misconfiguration
  * @name CORS Misconfiguration Detector
- * @version 1.1.0
+ * @version 1.1.2
  * @author Sentinel Team
  * @main_category agent
  * @category vuln
@@ -16,7 +16,6 @@ interface ToolInput {
     url: string;
     method?: string;
     headers?: Record<string, string>;
-    timeout?: number;
     userAgent?: string;
     testOrigins?: string[];
     checkCredentials?: boolean;
@@ -109,13 +108,6 @@ export function get_input_schema() {
                 type: "object",
                 description: "Additional headers to include",
                 additionalProperties: { type: "string" }
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 30000
             },
             userAgent: {
                 type: "string",
@@ -323,7 +315,6 @@ async function testCors(
     options: {
         method: string;
         headers: Record<string, string>;
-        timeout: number;
     }
 ): Promise<CorsTest> {
     const result: CorsTest = {
@@ -342,8 +333,6 @@ async function testCors(
                 ...options.headers,
                 "Origin": origin,
             },
-            // @ts-ignore
-            timeout: options.timeout,
         });
         
         // Extract CORS headers
@@ -439,7 +428,6 @@ async function testPreflight(
     origin: string,
     options: {
         headers: Record<string, string>;
-        timeout: number;
     }
 ): Promise<CorsTest> {
     const result: CorsTest = {
@@ -459,8 +447,6 @@ async function testPreflight(
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Headers": "X-Custom-Header",
             },
-            // @ts-ignore
-            timeout: options.timeout,
         });
         
         const acao = response.headers.get("access-control-allow-origin");
@@ -520,7 +506,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const method = input.method || "GET";
-        const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
                 const checkCredentials = input.checkCredentials !== false;
         const checkWildcard = input.checkWildcard !== false;
@@ -562,8 +547,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const baselineResponse = await fetch(url, {
                 method,
                 headers,
-                // @ts-ignore
-                timeout,
             });
             
             const baselineAcao = baselineResponse.headers.get("access-control-allow-origin");
@@ -590,14 +573,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 return await testCors(url, origin, testType, {
                     method,
                     headers,
-                    timeout,
                 });
             })));
         
         // Test preflight
         const preflightResult = await testPreflight(url, "https://evil.com", {
             headers,
-            timeout,
         });
         tests.push(preflightResult);
         

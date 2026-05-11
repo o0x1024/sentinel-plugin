@@ -3,7 +3,7 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.2
+ * @version 1.4.3
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -17,7 +17,6 @@ interface ToolInput {
     target_objects?: Array<string | ServiceLikeTarget>;
     service_targets?: Array<string | ServiceLikeTarget>;
     ports?: number[];
-    timeout?: number;
     followRedirects?: boolean;
     maxRedirects?: number;
     userAgent?: string;
@@ -235,13 +234,6 @@ export function get_input_schema() {
                 description: `Ports to probe. Default: ${DEFAULT_PORTS.join(", ")}`,
                 default: DEFAULT_PORTS
             },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: DEFAULT_TIMEOUT,
-                minimum: 1000,
-                maximum: 60000
-            },
             followRedirects: {
                 type: "boolean",
                 description: "Follow HTTP redirects",
@@ -367,48 +359,12 @@ function buildContentSummary(text: string): string {
 }
 
 type ProbeFetchInit = RequestInit & {
-    timeout: number;
     maxRedirects: number;
     maxBodyBytes?: number;
 };
 
-async function fetchWithTimeout(url: string, init: ProbeFetchInit): Promise<any> {
-    const controller = new AbortController();
-    const upstreamSignal = init.signal;
-    const timeoutMs = Number.isFinite(init.timeout) ? Math.max(0, init.timeout) : 0;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-
-    const abortFromUpstream = () => {
-        controller.abort();
-    };
-
-    if (upstreamSignal) {
-        if (upstreamSignal.aborted) {
-            controller.abort();
-        } else {
-            upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
-        }
-    }
-
-    if (timeoutMs > 0) {
-        timeoutId = setTimeout(() => {
-            controller.abort();
-        }, timeoutMs);
-    }
-
-    try {
-        return await fetch(url, {
-            ...init,
-            signal: controller.signal,
-        });
-    } finally {
-        if (timeoutId !== undefined) {
-            clearTimeout(timeoutId);
-        }
-        if (upstreamSignal) {
-            upstreamSignal.removeEventListener("abort", abortFromUpstream);
-        }
-    }
+async function fetchProbe(url: string, init: ProbeFetchInit): Promise<any> {
+    return await fetch(url, init);
 }
 
 /**
@@ -712,7 +668,6 @@ function buildCandidateUrls(
 async function probeUrl(
     url: string,
     options: {
-        timeout: number;
         followRedirects: boolean;
         maxRedirects: number;
         userAgent: string;
@@ -729,7 +684,6 @@ async function probeUrl(
         },
         redirect: options.followRedirects ? "follow" : "manual",
         maxRedirects: options.maxRedirects,
-        timeout: options.timeout,
     } satisfies ProbeFetchInit;
     const getRequestInit = {
         ...requestInit,
@@ -745,16 +699,16 @@ async function probeUrl(
         let response: any;
         let requestMethod: "HEAD" | "GET" = options.extractTitle ? "GET" : "HEAD";
         if (requestMethod === "GET") {
-            response = await fetchWithTimeout(url, getRequestInit);
+            response = await fetchProbe(url, getRequestInit);
         } else {
             try {
-                response = await fetchWithTimeout(url, {
+                response = await fetchProbe(url, {
                     method: "HEAD",
                     ...requestInit,
                 });
             } catch {
                 requestMethod = "GET";
-                response = await fetchWithTimeout(url, getRequestInit);
+                response = await fetchProbe(url, getRequestInit);
             }
         }
 
@@ -762,7 +716,7 @@ async function probeUrl(
 
         if (requestMethod === "HEAD" && shouldFallbackToGet(response.status)) {
             requestMethod = "GET";
-            response = await fetchWithTimeout(url, getRequestInit);
+            response = await fetchProbe(url, getRequestInit);
             headers = collectResponseHeaders(response);
         }
         
@@ -771,7 +725,7 @@ async function probeUrl(
         let contentSummary: string | undefined;
         
         if (requestMethod === "HEAD" && shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
-            response = await fetchWithTimeout(url, getRequestInit);
+            response = await fetchProbe(url, getRequestInit);
             headers = collectResponseHeaders(response);
             contentLength = parseContentLength(headers);
             requestMethod = "GET";
@@ -981,8 +935,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const timeout = input.timeout || DEFAULT_TIMEOUT;
-                const followRedirects = input.followRedirects !== false;
+        const followRedirects = input.followRedirects !== false;
         const maxRedirects = input.maxRedirects || DEFAULT_MAX_REDIRECTS;
         const userAgent = input.userAgent || DEFAULT_USER_AGENT;
         const extractTitle = input.extractTitle !== false;
@@ -1022,7 +975,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const tasks = uniqueUrls.map(url => async () => {
             try {
                 return await probeUrl(url, {
-                    timeout,
                     followRedirects,
                     maxRedirects,
                     userAgent,

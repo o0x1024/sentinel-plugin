@@ -3,7 +3,7 @@
  * 
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.1
+ * @version 1.2.2
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -14,7 +14,6 @@
 
 interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
-    timeout?: number;
     checkExpiry?: boolean;
     expiryWarningDays?: number;  // Warn if expiring within N days
     previousSnapshots?: Record<string, CertSnapshot>;  // Previous state for comparison
@@ -198,13 +197,6 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: "List of domains or URLs to monitor certificates"
             },
-            timeout: {
-                type: "integer",
-                description: "Connection timeout in milliseconds",
-                default: 10000,
-                minimum: 5000,
-                maximum: 60000
-            },
             checkExpiry: {
                 type: "boolean",
                 description: "Check certificate expiry dates",
@@ -300,30 +292,15 @@ function parseDomain(target: string): string {
     }
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-        return await fetch(url, {
-            ...init,
-            signal: controller.signal,
-        });
-    } finally {
-        clearTimeout(timeoutId);
-    }
-}
-
 /**
  * Get certificate info via HTTPS probe
  */
-async function getCertificateInfo(domain: string, timeout: number): Promise<CertInfo | null> {
+async function getCertificateInfo(domain: string): Promise<CertInfo | null> {
     try {
         const tlsApi = (globalThis as any)?.Sentinel?.TLS;
         if (tlsApi?.getCertificate) {
             const tlsResult: TlsProbeResponse = await tlsApi.getCertificate(domain, {
                 port: 443,
-                timeout,
             });
 
             if (tlsResult?.success && tlsResult.cert) {
@@ -343,13 +320,12 @@ async function getCertificateInfo(domain: string, timeout: number): Promise<Cert
             }
         }
 
-        const response = await fetchWithTimeout(
+        const response = await fetch(
             `https://${domain}/`,
             {
                 method: "HEAD",
                 redirect: "manual",
             },
-            timeout,
         );
 
         const now = new Date();
@@ -401,7 +377,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const timeout = input.timeout || 10000;
         const checkExpiry = input.checkExpiry !== false;
         const expiryWarningDays = input.expiryWarningDays || 30;
         const previousSnapshots = input.previousSnapshots || {};
@@ -467,7 +442,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     message: `Connecting to ${domain}`,
                 }, 1);
 
-                const certInfo = await getCertificateInfo(domain, timeout);
+                const certInfo = await getCertificateInfo(domain);
 
                 await advanceProgress({
                     currentTarget: targetLabel,

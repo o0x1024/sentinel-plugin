@@ -3,7 +3,7 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.1
+ * @version 3.1.2
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -34,7 +34,6 @@ declare const Sentinel: {
 interface ToolInput {
     url?: string;
     urls?: string[];
-    timeout?: number;
     concurrency?: number;
     userAgent?: string;
     maxFileSize?: number;
@@ -277,13 +276,6 @@ export function get_input_schema() {
                 type: "array",
                 items: { type: "string" },
                 description: "Array of target URLs to analyze (supports batch processing)"
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: DEFAULT_TIMEOUT_MS,
-                minimum: MIN_TIMEOUT_MS,
-                maximum: MAX_TIMEOUT_MS
             },
             concurrency: {
                 type: "integer",
@@ -667,7 +659,6 @@ function extractInlineScripts(html: string): string {
 async function analyzeJsFile(
     url: string,
     options: {
-        timeout: number;
         userAgent: string;
         maxFileSize: number;
         extractEndpoints: boolean;
@@ -691,8 +682,6 @@ async function analyzeJsFile(
                 "User-Agent": options.userAgent,
                 "Accept": "*/*",
             },
-            // @ts-ignore
-            timeout: options.timeout,
         });
 
         if (!response.ok) {
@@ -751,7 +740,6 @@ async function analyzeJsFile(
 async function processSingleUrl(
     baseUrl: string,
     options: {
-        timeout: number;
         userAgent: string;
         maxFileSize: number;
         extractEndpoints: boolean;
@@ -776,8 +764,6 @@ async function processSingleUrl(
                     "User-Agent": options.userAgent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
-                // @ts-ignore
-                timeout: options.timeout,
             });
 
             if (response.ok) {
@@ -816,7 +802,6 @@ async function processSingleUrl(
     // Analyze JS files through runtime scheduling
     const jsFileResults = await executeConcurrently(urlsToAnalyze, async (url) => {
             return await analyzeJsFile(url, {
-                timeout: options.timeout,
                 userAgent: options.userAgent,
                 maxFileSize: options.maxFileSize,
                 extractEndpoints: options.extractEndpoints,
@@ -861,7 +846,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return url;
         }))];
 
-        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
         const concurrency = clampInteger(
             input.concurrency,
             DEFAULT_CONCURRENCY,
@@ -888,7 +872,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const allFilesArrays = await executeConcurrently(baseUrls, async (baseUrl) => {
                 try {
                     return await processSingleUrl(baseUrl, {
-                        timeout,
                         userAgent,
                         maxFileSize,
                         extractEndpoints: extractEndpointsFlag,

@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.2.1
+ * @version 2.2.2
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -29,7 +29,6 @@ interface ToolInput {
     targets?: string[];
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
-    timeout?: number;
     concurrency?: number;
     userAgent?: string;
     maxTargets?: number;
@@ -169,7 +168,6 @@ export function get_input_schema() {
             targets: { type: "array", items: { type: "string" }, description: "Multiple target URLs" },
             dictionaryId: { type: "string", description: "Structured fingerprint dictionary ID or name" },
             dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
-            timeout: { type: "integer", default: 10000, minimum: 1000, maximum: 60000 },
             concurrency: {
                 type: "integer",
                 default: DEFAULT_CONCURRENCY,
@@ -303,22 +301,15 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
     return [];
 }
 
-async function fetchWithTimeout(url: string, timeout: number, userAgent: string): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-        return await fetch(url, {
-            method: "GET",
-            redirect: "follow",
-            signal: controller.signal,
-            headers: {
-                "User-Agent": userAgent,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-        });
-    } finally {
-        clearTimeout(timer);
-    }
+async function fetchPage(url: string, userAgent: string): Promise<Response> {
+    return await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        headers: {
+            "User-Agent": userAgent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+    });
 }
 
 function normalizeTechnologySnapshot(technologies: Array<{ name: string; category: string; version?: string }>): Array<{ name: string; category: string; version?: string }> {
@@ -453,7 +444,6 @@ function normalizeConfidence(value: unknown): number {
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
-        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
         const concurrency = clampInteger(
             input.concurrency,
             DEFAULT_CONCURRENCY,
@@ -496,7 +486,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let completedTargets = 0;
         await runConcurrently(targets.map((target) => async () => {
                 try {
-                    const response = await fetchWithTimeout(target, timeout, userAgent);
+                    const response = await fetchPage(target, userAgent);
                     const body = await response.text();
                     const headers: Record<string, string> = {};
                     response.headers.forEach((value, key) => { headers[String(key).toLowerCase()] = value; });

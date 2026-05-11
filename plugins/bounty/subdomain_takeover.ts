@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.1.0
+ * @version 1.1.2
  * @author Sentinel Team
  * @main_category bounty
  * @category vuln
@@ -14,7 +14,6 @@
 
 interface ToolInput {
     subdomains: string[];
-    timeout?: number;
     concurrency?: number;
     checkCname?: boolean;
     checkHttp?: boolean;
@@ -493,13 +492,6 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: "List of subdomains to check for takeover vulnerabilities"
             },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 30000
-            },
             concurrency: {
                 type: "integer",
                 description: "Number of concurrent checks",
@@ -575,7 +567,7 @@ pluginGlobals.get_output_schema = get_output_schema;
 /**
  * Resolve CNAME for a subdomain using DNS-over-HTTPS
  */
-async function resolveCname(subdomain: string, timeout: number): Promise<string | null> {
+async function resolveCname(subdomain: string): Promise<string | null> {
     try {
         // Use Cloudflare DNS-over-HTTPS
         const response = await fetch(
@@ -584,8 +576,6 @@ async function resolveCname(subdomain: string, timeout: number): Promise<string 
                 headers: {
                     "Accept": "application/dns-json",
                 },
-                // @ts-ignore
-                timeout,
             }
         );
         
@@ -613,7 +603,7 @@ async function resolveCname(subdomain: string, timeout: number): Promise<string 
 /**
  * Check if subdomain resolves (has A/AAAA record)
  */
-async function checkResolution(subdomain: string, timeout: number): Promise<boolean> {
+async function checkResolution(subdomain: string): Promise<boolean> {
     try {
         const response = await fetch(
             `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(subdomain)}&type=A`,
@@ -621,8 +611,6 @@ async function checkResolution(subdomain: string, timeout: number): Promise<bool
                 headers: {
                     "Accept": "application/dns-json",
                 },
-                // @ts-ignore
-                timeout,
             }
         );
         
@@ -670,7 +658,7 @@ function matchHttpFingerprint(
 
 async function fetchHttpEvidence(
     subdomain: string,
-    options: { timeout: number; userAgent: string }
+    options: { userAgent: string }
 ): Promise<{ matches: boolean; evidence?: string; status?: number; body?: string }> {
     // Try both HTTP and HTTPS
     for (const protocol of ["https", "http"]) {
@@ -682,8 +670,6 @@ async function fetchHttpEvidence(
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
                 redirect: "follow",
-                // @ts-ignore
-                timeout: options.timeout,
             });
             
             const body = await response.text();
@@ -706,7 +692,6 @@ async function fetchHttpEvidence(
 async function checkSubdomain(
     subdomain: string,
     options: {
-        timeout: number;
         userAgent: string;
         checkCname: boolean;
         checkHttp: boolean;
@@ -722,7 +707,7 @@ async function checkSubdomain(
         // Step 1: Resolve CNAME
         let cname: string | null = null;
         if (options.checkCname) {
-            cname = await resolveCname(subdomain, options.timeout);
+            cname = await resolveCname(subdomain);
             if (cname) {
                 result.cname = cname;
             }
@@ -746,7 +731,7 @@ async function checkSubdomain(
         
         // Step 3: Check DNS resolution (NXDOMAIN indicates potential takeover)
         if (matchedService && matchedService.nxdomain) {
-            const resolves = await checkResolution(cname || subdomain, options.timeout);
+            const resolves = await checkResolution(cname || subdomain);
             if (!resolves) {
                 result.vulnerable = true;
                 result.riskLevel = matchedService.riskLevel;
@@ -758,7 +743,6 @@ async function checkSubdomain(
         // Step 4: Check HTTP fingerprint
         if (options.checkHttp && matchedService) {
             const httpResult = await fetchHttpEvidence(subdomain, {
-                timeout: options.timeout,
                 userAgent: options.userAgent,
             });
 
@@ -779,7 +763,6 @@ async function checkSubdomain(
         // Step 5: Even without CNAME, check HTTP for common fingerprints
         if (options.checkHttp && !matchedService) {
             const httpResult = await fetchHttpEvidence(subdomain, {
-                timeout: options.timeout,
                 userAgent: options.userAgent,
             });
 
@@ -846,7 +829,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = input.timeout || 10000;
         const concurrency = Math.max(1, Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
         const checkCname = input.checkCname !== false;
         const checkHttp = input.checkHttp !== false;
@@ -854,7 +836,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         
         // Create check tasks
         const tasks = validSubdomains.map(subdomain => () => checkSubdomain(subdomain, {
-            timeout,
             userAgent,
             checkCname,
             checkHttp,

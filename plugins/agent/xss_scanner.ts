@@ -3,7 +3,7 @@
  * 
  * @plugin xss_scanner
  * @name XSS Scanner
- * @version 1.1.0
+ * @version 1.1.1
  * @author Sentinel Team
  * @main_category agent
  * @category vuln
@@ -30,7 +30,6 @@ interface ToolInput {
     headers?: Record<string, string>;
     body?: string;
     contentType?: string;
-    timeout?: number;
     userAgent?: string;
     testReflected?: boolean;
     testStored?: boolean;
@@ -194,13 +193,6 @@ export function get_input_schema() {
                 type: "string",
                 description: "Content-Type header",
                 default: "application/x-www-form-urlencoded"
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 30000
             },
             userAgent: {
                 type: "string",
@@ -575,8 +567,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const method = (input.method || "GET").toUpperCase();
-        const timeout = input.timeout || 10000;
-                const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const contentType = input.contentType || "application/x-www-form-urlencoded";
         
         // Extract parameters
@@ -646,8 +637,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             headers,
                             body: method !== "GET" ? testBody : undefined,
                             redirect: "follow",
-                            // @ts-ignore
-                            timeout,
                         });
                         
                         const responseTime = Math.round(performance.now() - testStart);

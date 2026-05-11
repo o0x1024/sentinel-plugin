@@ -3,7 +3,7 @@
  * 
  * @plugin ssrf_detector
  * @name SSRF Detector
- * @version 1.2.0
+ * @version 1.3.1
  * @author Sentinel Team
  * @main_category agent
  * @category vuln
@@ -18,7 +18,6 @@ interface ToolInput {
     params?: Record<string, string>;
     headers?: Record<string, string>;
     body?: string;
-    timeout?: number;
     userAgent?: string;
     callbackUrl?: string;
     testInternal?: boolean;
@@ -237,13 +236,6 @@ export function get_input_schema() {
                 type: "string",
                 description: "Request body for POST/PUT requests"
             },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 30000
-            },
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
@@ -407,17 +399,6 @@ function dedupeTypedPayloads(payloads: { payload: string; type: string }[]): { p
     return deduped;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeout: number): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-
-    try {
-        return await fetch(url, { ...init, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 function hasStrongSsrfEvidence(test: SsrfTest): boolean {
     if (!test.vulnerable || typeof test.evidence !== "string") return false;
     return !test.evidence.toLowerCase().startsWith("slow response");
@@ -435,7 +416,6 @@ async function testPayload(
     options: {
         method: string;
         headers: Record<string, string>;
-        timeout: number;
     }
 ): Promise<SsrfTest> {
     const testParams = { ...params, [targetParam]: payload };
@@ -443,11 +423,11 @@ async function testPayload(
     const startTime = performance.now();
     
     try {
-        const response = await fetchWithTimeout(testUrl, {
+        const response = await fetch(testUrl, {
             method: options.method,
             headers: options.headers,
             redirect: "follow",
-        }, options.timeout);
+        });
         
         const responseTime = Math.round(performance.now() - startTime);
         const responseText = await response.text();
@@ -507,7 +487,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const params = { ...urlParams, ...(input.params || {}) };
         
         const method = input.method || "GET";
-        const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
                 const testInternal = input.testInternal !== false;
         const testCloud = input.testCloud !== false;
@@ -595,7 +574,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         param,
                         payload,
                         type,
-                        { method, headers, timeout }
+                        { method, headers }
                     );
 
                     if (hasStrongSsrfEvidence(result)) {

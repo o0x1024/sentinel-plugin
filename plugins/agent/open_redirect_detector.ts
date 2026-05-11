@@ -3,7 +3,7 @@
  * 
  * @plugin open_redirect_detector
  * @name Open Redirect Detector
- * @version 1.2.0
+ * @version 1.3.2
  * @author Sentinel Team
  * @main_category agent
  * @category vuln
@@ -17,7 +17,6 @@ interface ToolInput {
     method?: string;
     params?: Record<string, string>;
     headers?: Record<string, string>;
-    timeout?: number;
     userAgent?: string;
     followRedirects?: boolean;
     targetDomain?: string;
@@ -210,13 +209,6 @@ export function get_input_schema() {
                 type: "object",
                 description: "Custom headers to include",
                 additionalProperties: { type: "string" }
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 10000,
-                minimum: 1000,
-                maximum: 30000
             },
             userAgent: {
                 type: "string",
@@ -416,17 +408,6 @@ function generatePayloads(targetDomain: string): { payload: string; type: string
     return dedupeTypedPayloads(payloads);
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeout: number): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-
-    try {
-        return await fetch(url, { ...init, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 /**
  * Check if redirect is to external domain
  */
@@ -473,7 +454,6 @@ async function testPayload(
     options: {
         method: string;
         headers: Record<string, string>;
-        timeout: number;
         followRedirects: boolean;
         originalDomain: string;
     }
@@ -490,11 +470,11 @@ async function testPayload(
     };
     
     try {
-        const response = await fetchWithTimeout(testUrl, {
+        const response = await fetch(testUrl, {
             method: options.method,
             headers: options.headers,
             redirect: options.followRedirects ? "follow" : "manual",
-        }, options.timeout);
+        });
         
         result.responseCode = response.status;
         
@@ -566,7 +546,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const params = { ...urlParams, ...(input.params || {}) };
         
         const method = input.method || "GET";
-        const timeout = input.timeout || 10000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
                 const followRedirects = input.followRedirects === true;
         const testAllParams = input.testAllParams === true;
@@ -617,7 +596,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         param,
                         payload,
                         type,
-                        { method, headers, timeout, followRedirects, originalDomain }
+                        { method, headers, followRedirects, originalDomain }
                     );
 
                     if (result.vulnerable) {

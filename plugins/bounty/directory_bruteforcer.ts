@@ -3,7 +3,7 @@
  * 
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.2
+ * @version 1.2.3
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -30,7 +30,6 @@ interface ToolInput {
     wordlist?: string;
     dictionaryId?: string;  // Use dictionary from DB by ID or name
     extensions?: string[];
-    timeout?: number;
     concurrency?: number;
     userAgent?: string;
     followRedirects?: boolean;
@@ -223,13 +222,6 @@ export function get_input_schema() {
                 description: "File extensions to append (e.g., ['php', 'html', 'js'])",
                 default: []
             },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: DEFAULT_TIMEOUT_MS,
-                minimum: MIN_TIMEOUT_MS,
-                maximum: MAX_TIMEOUT_MS
-            },
             concurrency: {
                 type: "integer",
                 description: "Maximum concurrent path probes",
@@ -344,7 +336,6 @@ async function probePath(
     baseUrl: string,
     path: string,
     options: {
-        timeout: number;
         userAgent: string;
         followRedirects: boolean;
     }
@@ -360,8 +351,6 @@ async function probePath(
                 "Accept": "*/*",
             },
             redirect: options.followRedirects ? "follow" : "manual",
-            // @ts-ignore
-            timeout: options.timeout,
         });
         
         const responseTime = Math.round(performance.now() - startTime);
@@ -432,7 +421,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             baseUrl = `https://${baseUrl}`;
         }
         
-        const timeout = clampInteger(input.timeout, DEFAULT_TIMEOUT_MS, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS);
         const concurrency = clampInteger(
             input.concurrency,
             DEFAULT_CONCURRENCY,
@@ -503,7 +491,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const tasks = uniquePaths.map(path => async () => {
             try {
                 return await probePath(baseUrl, path, {
-                    timeout,
                     userAgent,
                     followRedirects,
                 });

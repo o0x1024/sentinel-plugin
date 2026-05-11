@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.1
+ * @version 2.2.2
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -69,7 +69,6 @@ interface ToolInput {
     dictionaryEntries?: RuleEntry[];
     safe_mode?: boolean;
     maxRules?: number;
-    timeout?: number;
     userAgent?: string;
     stopOnFirstHit?: boolean;
     variables?: Record<string, any>;
@@ -210,13 +209,6 @@ export function get_input_schema() {
                 default: 20,
                 minimum: 1,
                 maximum: 200
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 3000,
-                minimum: 3000,
-                maximum: 5000
             },
             userAgent: {
                 type: "string",
@@ -540,16 +532,6 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
     return [];
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeout: number): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-        return await fetch(url, { ...init, signal: controller.signal });
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
 function normalizeRequests(metadata: Record<string, any>): any[] {
     const requests = Array.isArray(metadata.requests) ? metadata.requests : metadata.request ? [metadata.request] : [];
     return requests.map((request, index) => ({
@@ -558,7 +540,6 @@ function normalizeRequests(metadata: Record<string, any>): any[] {
         path: request?.path || "/",
         headers: request?.headers || {},
         body: request?.body,
-        timeout_ms: Number(request?.timeout_ms || 8000),
         matchers: Array.isArray(request?.matchers) ? request.matchers : undefined,
         extractors: Array.isArray(request?.extractors) ? request.extractors : [],
     }));
@@ -647,7 +628,7 @@ async function executeRule(target: string, rule: RuleEntry, input: ToolInput): P
         const body = request.body == null ? undefined : renderTemplate(request.body, context);
 
         try {
-            const response = await fetchWithTimeout(
+            const response = await fetch(
                 url,
                 {
                     method,
@@ -657,7 +638,6 @@ async function executeRule(target: string, rule: RuleEntry, input: ToolInput): P
                     },
                     body: body == null ? undefined : String(body),
                 },
-                Number(request.timeout_ms || input.timeout || 8000)
             );
 
             const responseBody = await response.text();
@@ -753,14 +733,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const safeMode = getInputBoolean(input, "safe_mode", "safe_mode", true);
         const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
-        const timeout = getInputNumber(input, "timeout", "timeout_ms", 3000);
         const userAgent = getInputString(input, "userAgent", "user_agent", "Sentinel-Risk-Scanner/2.0");
         const stopOnFirstHit = getInputBoolean(input, "stopOnFirstHit", "stop_on_first_hit", false);
         const normalizedInput: ToolInput = {
             ...input,
             safe_mode: safeMode,
             maxRules,
-            timeout,
             userAgent,
             stopOnFirstHit,
             dictionaryId: getInputString(input, "dictionaryId", "dictionary_id") || input.dictionaryId,

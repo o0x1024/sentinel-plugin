@@ -3,7 +3,7 @@
  * 
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.1
+ * @version 1.1.2
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -14,7 +14,6 @@
 
 interface ToolInput {
     targets: string[];  // List of URLs to monitor
-    timeout?: number;
     userAgent?: string;
     includeHeaders?: boolean;
     excludePatterns?: string[];  // Patterns to exclude from hash (e.g., timestamps)
@@ -232,13 +231,6 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: "List of URLs to monitor for content changes"
             },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 15000,
-                minimum: 5000,
-                maximum: 60000
-            },
             userAgent: {
                 type: "string",
                 description: "Custom User-Agent header"
@@ -329,7 +321,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
                 const includeHeaders = input.includeHeaders || false;
         const excludePatterns = input.excludePatterns || [];
@@ -373,8 +364,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         "User-Agent": userAgent,
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     },
-                    // @ts-ignore
-                    timeout,
                 });
                 
                 const content = await response.text();

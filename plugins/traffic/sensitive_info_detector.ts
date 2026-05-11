@@ -392,7 +392,7 @@ export function scan_transaction(transaction: HttpTransaction): Promise<any[]> {
   const { request, response } = transaction;
   
   if (!response?.body) {
-    return;
+    return Promise.resolve(findings);
   }
   
   // Skip binary responses
@@ -404,14 +404,14 @@ export function scan_transaction(transaction: HttpTransaction): Promise<any[]> {
     contentType.includes('font/') ||
     contentType.includes('application/octet-stream')
   ) {
-    return;
+    return Promise.resolve(findings);
   }
   
   const responseBody = bytesToString(response.body);
   
   // Skip empty or very short responses
   if (responseBody.length < 10) {
-    return;
+    return Promise.resolve(findings);
   }
   
   const foundPatterns = new Map<string, { matches: string[]; pattern: SensitivePattern }>();
@@ -504,6 +504,8 @@ export function scan_transaction(transaction: HttpTransaction): Promise<any[]> {
       remediation: getRemediation(pattern.category),
     });
   }
+
+  return Promise.resolve(findings);
 }
 
 function getRemediation(category: string): string {
@@ -523,7 +525,6 @@ function getRemediation(category: string): string {
     default:
       return 'Review and remove sensitive information from responses.';
   }
-  return findings;
 }
 
 // Required: bind to globalThis

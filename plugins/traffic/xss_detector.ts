@@ -3,7 +3,7 @@
  * 
  * @plugin xss_detector
  * @name XSS Detector
- * @version 2.0.0
+ * @version 2.0.1
  * @author Sentinel Team
  * @category xss
  * @default_severity high
@@ -311,7 +311,6 @@ async function verifyXss(
       const response = await fetch(testUrl, {
         method: 'GET',
         headers: testHeaders,
-        timeout: 10000,
         activeProbe: buildActiveProbeMetadata(paramName, payload, context),
       });
       

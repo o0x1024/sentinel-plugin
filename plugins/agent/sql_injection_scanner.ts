@@ -3,7 +3,7 @@
  * 
  * @plugin sql_injection_scanner
  * @name SQL Injection Scanner
- * @version 1.1.0
+ * @version 1.1.1
  * @author Sentinel Team
  * @main_category agent
  * @category vuln
@@ -30,7 +30,6 @@ interface ToolInput {
     headers?: Record<string, string>;
     body?: string;
     contentType?: string;
-    timeout?: number;
     userAgent?: string;
     testErrorBased?: boolean;
     testBlind?: boolean;
@@ -314,13 +313,6 @@ export function get_input_schema() {
                 type: "string",
                 description: "Content-Type header",
                 default: "application/x-www-form-urlencoded"
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: 15000,
-                minimum: 5000,
-                maximum: 60000
             },
             userAgent: {
                 type: "string",
@@ -678,7 +670,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         const method = (input.method || "GET").toUpperCase();
-        const timeout = input.timeout || 15000;
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const contentType = input.contentType || "application/x-www-form-urlencoded";
         const timeThreshold = input.timeThreshold || 5000;
@@ -736,8 +727,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         method,
                         headers,
                         body: method !== "GET" ? testBody : undefined,
-                        // @ts-ignore
-                        timeout,
                     });
                     const baselineTime = Math.round(performance.now() - startReq);
                     const body = await response.text();
@@ -790,8 +779,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             method,
                             headers,
                             body: method !== "GET" ? testBody : undefined,
-                            // @ts-ignore
-                            timeout: technique === "time-based" ? timeout + timeThreshold + 5000 : timeout,
                         });
                         
                         const responseTime = Math.round(performance.now() - testStart);
@@ -853,23 +840,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         return null;
                         
                     } catch (e: any) {
-                        // Timeout might indicate time-based SQLi
-                        if (technique === "time-based" && e.message?.includes("timeout")) {
-                            compromisedParams.add(paramName);
-                            return {
-                                parameter: paramName,
-                                location,
-                                payload,
-                                technique: "time-based",
-                                vulnerable: true,
-                                confidence: "medium",
-                                evidence: "Request timed out, possible time-based SQLi",
-                                dbType: dbType || "unknown",
-                                responseCode: 0,
-                                responseTime: timeout,
-                                baselineTime: baseline?.time,
-                            };
-                        }
                         return null;
                     }
                 });

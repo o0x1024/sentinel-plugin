@@ -3,7 +3,7 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.1
+ * @version 1.2.2
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -33,7 +33,6 @@ interface ToolInput {
     pageSize?: number;
     maxPages?: number;
     full?: boolean;
-    timeout?: number;
     fofaBaseUrl?: string;
     previousSnapshots?: Record<string, FofaQuerySnapshot>;
     includeRemovedAssets?: boolean;
@@ -174,13 +173,10 @@ type PluginGlobals = typeof globalThis & {
     analyze?: typeof analyze;
 };
 
-type FetchInitWithTimeout = RequestInit & { timeout?: number };
-
 const pluginGlobals = globalThis as PluginGlobals;
 
 const PLUGIN_ID = "fofa_asset_monitor";
 const DEFAULT_BASE_URL = "https://fofa.info";
-const DEFAULT_TIMEOUT = 5000;
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_PAGES = 5;
 const MAX_PAGE_SIZE = 10000;
@@ -300,13 +296,6 @@ export function get_input_schema() {
                 type: "boolean",
                 description: "Request FOFA full-history search instead of the default recent-data window",
                 default: false,
-            },
-            timeout: {
-                type: "integer",
-                description: "HTTP request timeout in milliseconds",
-                default: DEFAULT_TIMEOUT,
-                minimum: 5000,
-                maximum: 120000,
             },
             fofaBaseUrl: {
                 type: "string",
@@ -723,31 +712,22 @@ function buildQueryPlans(input: ToolInput): FofaQueryPlan[] {
     return Array.from(plans.values());
 }
 
-async function fetchJson(url: string, timeoutMs: number): Promise<FofaApiResponse> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+async function fetchJson(url: string): Promise<FofaApiResponse> {
+    const response = await fetch(url, {
+        method: "GET",
+        headers: { accept: "application/json" },
+    });
+    const text = await response.text();
+    let payload: any;
     try {
-        const init: FetchInitWithTimeout = {
-            method: "GET",
-            signal: controller.signal,
-            headers: { accept: "application/json" },
-            timeout: timeoutMs,
-        };
-        const response = await fetch(url, init);
-        const text = await response.text();
-        let payload: any;
-        try {
-            payload = JSON.parse(text);
-        } catch {
-            throw new Error(`FOFA returned non-JSON response with HTTP ${response.status}`);
-        }
-        if (!response.ok) {
-            throw new Error(payload?.errmsg || `FOFA HTTP ${response.status}`);
-        }
-        return payload as FofaApiResponse;
-    } finally {
-        clearTimeout(timeoutId);
+        payload = JSON.parse(text);
+    } catch {
+        throw new Error(`FOFA returned non-JSON response with HTTP ${response.status}`);
     }
+    if (!response.ok) {
+        throw new Error(payload?.errmsg || `FOFA HTTP ${response.status}`);
+    }
+    return payload as FofaApiResponse;
 }
 
 async function searchFofa(
@@ -758,7 +738,6 @@ async function searchFofa(
     pageSize: number,
     maxPages: number,
     full: boolean,
-    timeoutMs: number,
 ): Promise<FofaQueryResult> {
     const assets = new Map<string, FofaAsset>();
     let totalReported = 0;
@@ -774,7 +753,7 @@ async function searchFofa(
         params.set("full", full ? "true" : "false");
         params.set("r_type", "json");
 
-        const payload = await fetchJson(`${baseUrl}/api/v1/search/all?${params.toString()}`, timeoutMs);
+        const payload = await fetchJson(`${baseUrl}/api/v1/search/all?${params.toString()}`);
         if (payload.error) {
             throw new Error(payload.errmsg || "FOFA API returned error=true");
         }
@@ -1015,7 +994,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const fields = normalizeFields(input.fields);
         const pageSize = clampInteger(input.pageSize, DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE);
         const maxPages = clampInteger(input.maxPages, DEFAULT_MAX_PAGES, 1, 100);
-        const timeoutMs = clampInteger(input.timeout, DEFAULT_TIMEOUT, 5000, 120000);
         const baseUrl = normalizeBaseUrl(input.fofaBaseUrl);
         const full = input.full === true;
         const includeRemovedAssets = input.includeRemovedAssets !== false;
@@ -1041,7 +1019,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             });
 
             try {
-                results.push(await searchFofa(plan, fofaKey, baseUrl, fields, pageSize, maxPages, full, timeoutMs));
+                results.push(await searchFofa(plan, fofaKey, baseUrl, fields, pageSize, maxPages, full));
             } catch (error) {
                 results.push({
                     id: plan.id,

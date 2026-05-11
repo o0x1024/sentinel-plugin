@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.2
+ * @version 2.2.3
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -18,7 +18,6 @@ interface ToolInput {
     targets?: string[] | string;
     target_objects?: Array<{ type?: string; value?: string }>;
     sources?: string[];
-    timeout?: number;
     removeDuplicates?: boolean;
     apiConfig?: ApiConfig;
     previousSnapshots?: Record<string, SubdomainSnapshot>;
@@ -92,7 +91,6 @@ type PluginGlobals = typeof globalThis & {
 const pluginGlobals = globalThis as PluginGlobals;
 
 type FetchWithTimeoutInit = RequestInit & {
-    timeout?: number;
 };
 
 // Available data sources
@@ -274,13 +272,6 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: `Data sources to query. Available: ${AVAILABLE_SOURCES.join(", ")}. Default: all sources`,
                 default: [...AVAILABLE_SOURCES]
-            },
-            timeout: {
-                type: "integer",
-                description: "Request timeout in milliseconds",
-                default: DEFAULT_TIMEOUT,
-                minimum: 5000,
-                maximum: 120000
             },
             removeDuplicates: {
                 type: "boolean",
@@ -473,37 +464,13 @@ function isRetryableError(error: any): boolean {
 
 async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
     const nativeFetch = globalThis.fetch.bind(globalThis);
-    const timeout = Math.max(1000, Math.min(Number(init.timeout || DEFAULT_TIMEOUT), 120000));
-    const runtimeQueueTimeout = Math.max(
-        timeout,
-        Math.min(MAX_RUNTIME_QUEUE_TIMEOUT, timeout * RUNTIME_QUEUE_TIMEOUT_MULTIPLIER)
-    );
     const method = String(init.method || "GET").toUpperCase();
     const maxAttempts = isRetryableMethod(method) ? 2 : 1;
     let lastError: any;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), runtimeQueueTimeout);
-        const upstreamSignal = init.signal;
-        const abortListener = () => controller.abort();
-
-        if (upstreamSignal) {
-            if (upstreamSignal.aborted) {
-                controller.abort();
-            } else {
-                upstreamSignal.addEventListener("abort", abortListener, { once: true });
-            }
-        }
-
         try {
-            const requestInit: RequestInit = {
-                ...init,
-                signal: controller.signal,
-            };
-            (requestInit as FetchWithTimeoutInit).timeout = runtimeQueueTimeout;
-
-            const response = await nativeFetch(input, requestInit);
+            const response = await nativeFetch(input, init);
             if (attempt < maxAttempts && RETRYABLE_STATUSES.has(response.status)) {
                 const retryDelay = parseRetryAfter(response.headers.get("retry-after")) ?? (300 * attempt);
                 try {
@@ -518,19 +485,10 @@ async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}):
             return response;
         } catch (error: any) {
             lastError = error;
-            const timedOut = controller.signal.aborted && !(upstreamSignal?.aborted);
-            if (attempt >= maxAttempts || !(timedOut || isRetryableError(error))) {
-                if (timedOut) {
-                    throw new Error(`Runtime queue timeout after ${runtimeQueueTimeout}ms`);
-                }
+            if (attempt >= maxAttempts || !isRetryableError(error)) {
                 throw error;
             }
             await sleep(300 * attempt);
-        } finally {
-            clearTimeout(timeoutId);
-            if (upstreamSignal) {
-                upstreamSignal.removeEventListener("abort", abortListener);
-            }
         }
     }
 
@@ -617,12 +575,11 @@ function extractSubdomains(text: string, domain: string): string[] {
 /**
  * Query crt.sh Certificate Transparency logs
  */
-async function queryCrtsh(domain: string, timeout: number): Promise<string[]> {
+async function queryCrtsh(domain: string ): Promise<string[]> {
     const url = `https://crt.sh/?q=%.${encodeURIComponent(domain)}&output=json`;
     const response = await fetch(url, { 
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout 
     });
     
     if (!response.ok) {
@@ -655,12 +612,11 @@ async function queryCrtsh(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query HackerTarget API
  */
-async function queryHackerTarget(domain: string, timeout: number): Promise<string[]> {
+async function queryHackerTarget(domain: string ): Promise<string[]> {
     const url = `https://api.hackertarget.com/hostsearch/?q=${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -679,12 +635,11 @@ async function queryHackerTarget(domain: string, timeout: number): Promise<strin
 /**
  * Query RapidDNS
  */
-async function queryRapidDNS(domain: string, timeout: number): Promise<string[]> {
+async function queryRapidDNS(domain: string ): Promise<string[]> {
     const url = `https://rapiddns.io/subdomain/${encodeURIComponent(domain)}?full=1`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -698,7 +653,7 @@ async function queryRapidDNS(domain: string, timeout: number): Promise<string[]>
 /**
  * Query AlienVault OTX
  */
-async function queryAlienVault(domain: string, timeout: number): Promise<string[]> {
+async function queryAlienVault(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     
     // Query passive DNS
@@ -707,7 +662,6 @@ async function queryAlienVault(domain: string, timeout: number): Promise<string[
         const dnsResponse = await fetch(dnsUrl, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         if (dnsResponse.ok) {
             const text = await dnsResponse.text();
@@ -721,7 +675,6 @@ async function queryAlienVault(domain: string, timeout: number): Promise<string[
         const urlResponse = await fetch(urlListUrl, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         if (urlResponse.ok) {
             const text = await urlResponse.text();
@@ -735,7 +688,7 @@ async function queryAlienVault(domain: string, timeout: number): Promise<string[
 /**
  * Query VirusTotal (public API, no key required)
  */
-async function queryVirusTotal(domain: string, timeout: number): Promise<string[]> {
+async function queryVirusTotal(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     let cursor = "";
     let iterations = 0;
@@ -749,7 +702,6 @@ async function queryVirusTotal(domain: string, timeout: number): Promise<string[
                 "Referer": "https://www.virustotal.com/"
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) {
@@ -782,12 +734,11 @@ async function queryVirusTotal(domain: string, timeout: number): Promise<string[
 /**
  * Query URLScan.io
  */
-async function queryURLScan(domain: string, timeout: number): Promise<string[]> {
+async function queryURLScan(domain: string ): Promise<string[]> {
     const url = `https://urlscan.io/api/v1/search/?q=domain:${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -801,12 +752,11 @@ async function queryURLScan(domain: string, timeout: number): Promise<string[]> 
 /**
  * Query Anubis DB
  */
-async function queryAnubis(domain: string, timeout: number): Promise<string[]> {
+async function queryAnubis(domain: string ): Promise<string[]> {
     const url = `https://jldc.me/anubis/subdomains/${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -828,7 +778,7 @@ async function queryAnubis(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query DNSDumpster
  */
-async function queryDNSDumpster(domain: string, timeout: number): Promise<string[]> {
+async function queryDNSDumpster(domain: string ): Promise<string[]> {
     const baseUrl = "https://dnsdumpster.com/";
     
     // Get CSRF token
@@ -838,7 +788,6 @@ async function queryDNSDumpster(domain: string, timeout: number): Promise<string
             "Referer": "https://dnsdumpster.com"
         },
         // @ts-ignore
-        timeout
     });
     
     if (!getResponse.ok) {
@@ -869,7 +818,6 @@ async function queryDNSDumpster(domain: string, timeout: number): Promise<string
         },
         body: formData.toString(),
         // @ts-ignore
-        timeout
     });
     
     if (!postResponse.ok) {
@@ -883,12 +831,11 @@ async function queryDNSDumpster(domain: string, timeout: number): Promise<string
 /**
  * Query Sublist3r API
  */
-async function querySublist3r(domain: string, timeout: number): Promise<string[]> {
+async function querySublist3r(domain: string ): Promise<string[]> {
     const url = `https://api.sublist3r.com/search.php?domain=${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -910,12 +857,11 @@ async function querySublist3r(domain: string, timeout: number): Promise<string[]
 /**
  * Query CertSpotter
  */
-async function queryCertSpotter(domain: string, timeout: number): Promise<string[]> {
+async function queryCertSpotter(domain: string ): Promise<string[]> {
     const url = `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(domain)}&include_subdomains=true&expand=dns_names`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -948,12 +894,11 @@ async function queryCertSpotter(domain: string, timeout: number): Promise<string
 /**
  * Query ThreatMiner
  */
-async function queryThreatMiner(domain: string, timeout: number): Promise<string[]> {
+async function queryThreatMiner(domain: string ): Promise<string[]> {
     const url = `https://api.threatminer.org/v2/domain.php?q=${encodeURIComponent(domain)}&rt=5`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -967,7 +912,7 @@ async function queryThreatMiner(domain: string, timeout: number): Promise<string
 /**
  * Query Netcraft
  */
-async function queryNetcraft(domain: string, timeout: number): Promise<string[]> {
+async function queryNetcraft(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     const baseUrl = "https://searchdns.netcraft.com/";
     let pageNum = 1;
@@ -978,7 +923,6 @@ async function queryNetcraft(domain: string, timeout: number): Promise<string[]>
         const response = await fetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1005,12 +949,11 @@ async function queryNetcraft(domain: string, timeout: number): Promise<string[]>
 /**
  * Query Riddler
  */
-async function queryRiddler(domain: string, timeout: number): Promise<string[]> {
+async function queryRiddler(domain: string ): Promise<string[]> {
     const url = `https://riddler.io/search?q=pld:${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1024,7 +967,7 @@ async function queryRiddler(domain: string, timeout: number): Promise<string[]> 
 /**
  * Query Robtex
  */
-async function queryRobtex(domain: string, timeout: number): Promise<string[]> {
+async function queryRobtex(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     const baseUrl = "https://freeapi.robtex.com/pdns";
     
@@ -1033,7 +976,6 @@ async function queryRobtex(domain: string, timeout: number): Promise<string[]> {
     const forwardResponse = await fetch(forwardUrl, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!forwardResponse.ok) {
@@ -1062,7 +1004,6 @@ async function queryRobtex(domain: string, timeout: number): Promise<string[]> {
             const reverseResponse = await fetch(reverseUrl, {
                 headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
                 // @ts-ignore
-                timeout
             });
             
             if (reverseResponse.ok) {
@@ -1078,12 +1019,11 @@ async function queryRobtex(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query SiteDossier
  */
-async function querySiteDossier(domain: string, timeout: number): Promise<string[]> {
+async function querySiteDossier(domain: string ): Promise<string[]> {
     const url = `http://www.sitedossier.com/parentdomain/${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1097,12 +1037,11 @@ async function querySiteDossier(domain: string, timeout: number): Promise<string
 /**
  * Query DNSGrep
  */
-async function queryDNSGrep(domain: string, timeout: number): Promise<string[]> {
+async function queryDNSGrep(domain: string ): Promise<string[]> {
     const url = `https://dns.bufferover.run/dns?q=.${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1146,7 +1085,7 @@ async function queryDNSGrep(domain: string, timeout: number): Promise<string[]> 
 /**
  * Query BeVigil API
  */
-async function queryBeVigil(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryBeVigil(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("BeVigil API token required");
     }
@@ -1158,7 +1097,6 @@ async function queryBeVigil(domain: string, timeout: number, apiToken?: string):
             "X-Access-Token": apiToken
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1182,7 +1120,7 @@ async function queryBeVigil(domain: string, timeout: number, apiToken?: string):
 /**
  * Query Censys API
  */
-async function queryCensys(domain: string, timeout: number, apiId?: string, apiSecret?: string): Promise<string[]> {
+async function queryCensys(domain: string , apiId?: string, apiSecret?: string): Promise<string[]> {
     if (!apiId || !apiSecret) {
         throw new Error("Censys API credentials required");
     }
@@ -1208,7 +1146,6 @@ async function queryCensys(domain: string, timeout: number, apiId?: string, apiS
                 "Authorization": `Basic ${auth}`
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) {
@@ -1233,7 +1170,7 @@ async function queryCensys(domain: string, timeout: number, apiId?: string, apiS
 /**
  * Query VirusTotal API
  */
-async function queryVirusTotalAPI(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryVirusTotalAPI(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("VirusTotal API token required");
     }
@@ -1249,7 +1186,6 @@ async function queryVirusTotalAPI(domain: string, timeout: number, apiToken?: st
                 "x-apikey": apiToken
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) {
@@ -1282,7 +1218,7 @@ async function queryVirusTotalAPI(domain: string, timeout: number, apiToken?: st
 /**
  * Query SecurityTrails API
  */
-async function querySecurityTrails(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function querySecurityTrails(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("SecurityTrails API token required");
     }
@@ -1294,7 +1230,6 @@ async function querySecurityTrails(domain: string, timeout: number, apiToken?: s
             "APIKEY": apiToken
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1323,7 +1258,7 @@ async function querySecurityTrails(domain: string, timeout: number, apiToken?: s
 /**
  * Query Shodan API
  */
-async function queryShodan(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryShodan(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("Shodan API token required");
     }
@@ -1332,7 +1267,6 @@ async function queryShodan(domain: string, timeout: number, apiToken?: string): 
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1355,7 +1289,7 @@ async function queryShodan(domain: string, timeout: number, apiToken?: string): 
 /**
  * Query GitHub API
  */
-async function queryGitHub(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryGitHub(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("GitHub API token required");
     }
@@ -1371,7 +1305,6 @@ async function queryGitHub(domain: string, timeout: number, apiToken?: string): 
                 "Authorization": `token ${apiToken}`
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1393,7 +1326,7 @@ async function queryGitHub(domain: string, timeout: number, apiToken?: string): 
 /**
  * Query BinaryEdge API
  */
-async function queryBinaryEdge(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryBinaryEdge(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("BinaryEdge API token required");
     }
@@ -1409,7 +1342,6 @@ async function queryBinaryEdge(domain: string, timeout: number, apiToken?: strin
                 "X-Key": apiToken
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1440,7 +1372,7 @@ async function queryBinaryEdge(domain: string, timeout: number, apiToken?: strin
 /**
  * Query FullHunt API
  */
-async function queryFullHunt(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryFullHunt(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("FullHunt API token required");
     }
@@ -1452,7 +1384,6 @@ async function queryFullHunt(domain: string, timeout: number, apiToken?: string)
             "X-API-KEY": apiToken
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1475,12 +1406,11 @@ async function queryFullHunt(domain: string, timeout: number, apiToken?: string)
 /**
  * Query Google Certificate Transparency
  */
-async function queryGoogleCT(domain: string, timeout: number): Promise<string[]> {
+async function queryGoogleCT(domain: string ): Promise<string[]> {
     const url = `https://transparencyreport.google.com/transparencyreport/api/v3/httpsreport/ct/certsearch?include_expired=true&include_subdomains=true&domain=${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1494,12 +1424,11 @@ async function queryGoogleCT(domain: string, timeout: number): Promise<string[]>
 /**
  * Query MySSL
  */
-async function queryMySSL(domain: string, timeout: number): Promise<string[]> {
+async function queryMySSL(domain: string ): Promise<string[]> {
     const url = `https://myssl.com/api/v1/discover_sub_domain?domain=${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1513,12 +1442,11 @@ async function queryMySSL(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query IP138
  */
-async function queryIP138(domain: string, timeout: number): Promise<string[]> {
+async function queryIP138(domain: string ): Promise<string[]> {
     const url = `https://site.ip138.com/${encodeURIComponent(domain)}/domain.htm`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1532,7 +1460,7 @@ async function queryIP138(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query RiskIQ API
  */
-async function queryRiskIQ(domain: string, timeout: number, username?: string, apiKey?: string): Promise<string[]> {
+async function queryRiskIQ(domain: string , username?: string, apiKey?: string): Promise<string[]> {
     if (!username || !apiKey) {
         throw new Error("RiskIQ API credentials required");
     }
@@ -1547,7 +1475,6 @@ async function queryRiskIQ(domain: string, timeout: number, username?: string, a
             "Authorization": `Basic ${auth}`
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1570,7 +1497,7 @@ async function queryRiskIQ(domain: string, timeout: number, username?: string, a
 /**
  * Query ThreatBook API
  */
-async function queryThreatBook(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryThreatBook(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("ThreatBook API key required");
     }
@@ -1579,7 +1506,6 @@ async function queryThreatBook(domain: string, timeout: number, apiKey?: string)
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1602,7 +1528,7 @@ async function queryThreatBook(domain: string, timeout: number, apiKey?: string)
 /**
  * Query FOFA API
  */
-async function queryFOFA(domain: string, timeout: number, email?: string, apiKey?: string): Promise<string[]> {
+async function queryFOFA(domain: string , email?: string, apiKey?: string): Promise<string[]> {
     if (!email || !apiKey) {
         throw new Error("FOFA API credentials required");
     }
@@ -1616,7 +1542,6 @@ async function queryFOFA(domain: string, timeout: number, email?: string, apiKey
         const response = await fetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1638,7 +1563,7 @@ async function queryFOFA(domain: string, timeout: number, email?: string, apiKey
 /**
  * Query Hunter API
  */
-async function queryHunter(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryHunter(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("Hunter API key required");
     }
@@ -1650,7 +1575,6 @@ async function queryHunter(domain: string, timeout: number, apiKey?: string): Pr
         const response = await fetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1672,7 +1596,7 @@ async function queryHunter(domain: string, timeout: number, apiKey?: string): Pr
 /**
  * Query Quake API
  */
-async function queryQuake(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryQuake(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("Quake API key required");
     }
@@ -1696,7 +1620,6 @@ async function queryQuake(domain: string, timeout: number, apiKey?: string): Pro
             },
             body,
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1718,7 +1641,7 @@ async function queryQuake(domain: string, timeout: number, apiKey?: string): Pro
 /**
  * Query ZoomEye API
  */
-async function queryZoomEye(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryZoomEye(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("ZoomEye API key required");
     }
@@ -1733,7 +1656,6 @@ async function queryZoomEye(domain: string, timeout: number, apiKey?: string): P
                 "API-KEY": apiKey
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1755,7 +1677,7 @@ async function queryZoomEye(domain: string, timeout: number, apiKey?: string): P
 /**
  * Query Spyse API
  */
-async function querySpyse(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function querySpyse(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("Spyse API token required");
     }
@@ -1767,7 +1689,6 @@ async function querySpyse(domain: string, timeout: number, apiToken?: string): P
             "Authorization": `Bearer ${apiToken}`
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1791,12 +1712,11 @@ async function querySpyse(domain: string, timeout: number, apiToken?: string): P
 /**
  * Query Chinaz
  */
-async function queryChinaz(domain: string, timeout: number): Promise<string[]> {
+async function queryChinaz(domain: string ): Promise<string[]> {
     const url = `https://alexa.chinaz.com/${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1810,12 +1730,11 @@ async function queryChinaz(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query CeBaidu
  */
-async function queryCeBaidu(domain: string, timeout: number): Promise<string[]> {
+async function queryCeBaidu(domain: string ): Promise<string[]> {
     const url = `https://ce.baidu.com/index/getRelatedSites?site_address=${encodeURIComponent(domain)}`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1829,7 +1748,7 @@ async function queryCeBaidu(domain: string, timeout: number): Promise<string[]> 
 /**
  * Query Qianxun
  */
-async function queryQianxun(domain: string, timeout: number): Promise<string[]> {
+async function queryQianxun(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     
     for (let page = 1; page <= 10; page++) {
@@ -1848,7 +1767,6 @@ async function queryQianxun(domain: string, timeout: number): Promise<string[]> 
                 keywords: domain
             }).toString(),
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1869,7 +1787,7 @@ async function queryQianxun(domain: string, timeout: number): Promise<string[]> 
 /**
  * Query Windvane
  */
-async function queryWindvane(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryWindvane(domain: string , apiKey?: string): Promise<string[]> {
     const subdomains = new Set<string>();
     const url = "https://windvane.lichoin.com/trpc.backendhub.public.WindvaneService/ListSubDomain";
     
@@ -1900,7 +1818,6 @@ async function queryWindvane(domain: string, timeout: number, apiKey?: string): 
             headers,
             body,
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -1929,7 +1846,7 @@ async function queryWindvane(domain: string, timeout: number, apiKey?: string): 
 /**
  * Query Racent
  */
-async function queryRacent(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryRacent(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("Racent API token required");
     }
@@ -1938,7 +1855,6 @@ async function queryRacent(domain: string, timeout: number, apiToken?: string): 
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1952,14 +1868,13 @@ async function queryRacent(domain: string, timeout: number, apiToken?: string): 
 /**
  * Query Common Crawl Index
  */
-async function queryCDX(domain: string, timeout: number): Promise<string[]> {
+async function queryCDX(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     const url = `https://index.commoncrawl.org/CC-MAIN-2024-10-index?url=*.${encodeURIComponent(domain)}&output=json`;
     
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -1984,12 +1899,11 @@ async function queryCDX(domain: string, timeout: number): Promise<string[]> {
 /**
  * Query Archive.org Wayback Machine
  */
-async function queryArchive(domain: string, timeout: number): Promise<string[]> {
+async function queryArchive(domain: string ): Promise<string[]> {
     const url = `https://web.archive.org/cdx/search/cdx?url=*.${encodeURIComponent(domain)}/*&output=json&fl=original&collapse=urlkey`;
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -2003,7 +1917,7 @@ async function queryArchive(domain: string, timeout: number): Promise<string[]> 
 /**
  * Query Chinaz API
  */
-async function queryChinazAPI(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryChinazAPI(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("Chinaz API key required");
     }
@@ -2012,7 +1926,6 @@ async function queryChinazAPI(domain: string, timeout: number, apiKey?: string):
     const response = await fetch(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -2026,7 +1939,7 @@ async function queryChinazAPI(domain: string, timeout: number, apiKey?: string):
 /**
  * Query CIRCL PassiveDNS API
  */
-async function queryCIRCL(domain: string, timeout: number, username?: string, password?: string): Promise<string[]> {
+async function queryCIRCL(domain: string , username?: string, password?: string): Promise<string[]> {
     if (!username || !password) {
         throw new Error("CIRCL API credentials required");
     }
@@ -2040,7 +1953,6 @@ async function queryCIRCL(domain: string, timeout: number, username?: string, pa
             "Authorization": `Basic ${auth}`
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -2054,7 +1966,7 @@ async function queryCIRCL(domain: string, timeout: number, username?: string, pa
 /**
  * Query Cloudflare API
  */
-async function queryCloudflare(domain: string, timeout: number, apiToken?: string): Promise<string[]> {
+async function queryCloudflare(domain: string , apiToken?: string): Promise<string[]> {
     if (!apiToken) {
         throw new Error("Cloudflare API token required");
     }
@@ -2070,7 +1982,6 @@ async function queryCloudflare(domain: string, timeout: number, apiToken?: strin
     const accountResponse = await fetch("https://api.cloudflare.com/client/v4/accounts", {
         headers,
         // @ts-ignore
-        timeout
     });
     
     if (!accountResponse.ok) {
@@ -2088,7 +1999,6 @@ async function queryCloudflare(domain: string, timeout: number, apiToken?: strin
     const zonesResponse = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(domain)}`, {
         headers,
         // @ts-ignore
-        timeout
     });
     
     if (!zonesResponse.ok) {
@@ -2108,7 +2018,6 @@ async function queryCloudflare(domain: string, timeout: number, apiToken?: strin
         const dnsResponse = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?page=${page}&per_page=100`, {
             headers,
             // @ts-ignore
-            timeout
         });
         
         if (!dnsResponse.ok) break;
@@ -2133,7 +2042,7 @@ async function queryCloudflare(domain: string, timeout: number, apiToken?: strin
 /**
  * Query DNSDB API
  */
-async function queryDNSDB(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryDNSDB(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("DNSDB API key required");
     }
@@ -2145,7 +2054,6 @@ async function queryDNSDB(domain: string, timeout: number, apiKey?: string): Pro
             "X-API-Key": apiKey
         },
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -2159,7 +2067,7 @@ async function queryDNSDB(domain: string, timeout: number, apiKey?: string): Pro
 /**
  * Query IPv4Info API
  */
-async function queryIPv4Info(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryIPv4Info(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("IPv4Info API key required");
     }
@@ -2171,7 +2079,6 @@ async function queryIPv4Info(domain: string, timeout: number, apiKey?: string): 
         const response = await fetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -2198,7 +2105,7 @@ async function queryIPv4Info(domain: string, timeout: number, apiKey?: string): 
 /**
  * Query PassiveDNS API
  */
-async function queryPassiveDNS(domain: string, timeout: number, apiToken?: string, apiAddr?: string): Promise<string[]> {
+async function queryPassiveDNS(domain: string , apiToken?: string, apiAddr?: string): Promise<string[]> {
     const baseUrl = apiAddr || "http://api.passivedns.cn";
     
     const headers: Record<string, string> = {
@@ -2213,7 +2120,6 @@ async function queryPassiveDNS(domain: string, timeout: number, apiToken?: strin
     const response = await fetch(url, {
         headers,
         // @ts-ignore
-        timeout
     });
     
     if (!response.ok) {
@@ -2227,7 +2133,7 @@ async function queryPassiveDNS(domain: string, timeout: number, apiToken?: strin
 /**
  * Query Bing API
  */
-async function queryBingAPI(domain: string, timeout: number, apiKey?: string): Promise<string[]> {
+async function queryBingAPI(domain: string , apiKey?: string): Promise<string[]> {
     if (!apiKey) {
         throw new Error("Bing API key required");
     }
@@ -2246,7 +2152,6 @@ async function queryBingAPI(domain: string, timeout: number, apiKey?: string): P
                 "Ocp-Apim-Subscription-Key": apiKey
             },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -2266,7 +2171,7 @@ async function queryBingAPI(domain: string, timeout: number, apiKey?: string): P
 /**
  * Query Google Custom Search API
  */
-async function queryGoogleAPI(domain: string, timeout: number, apiKey?: string, searchEngineId?: string): Promise<string[]> {
+async function queryGoogleAPI(domain: string , apiKey?: string, searchEngineId?: string): Promise<string[]> {
     if (!apiKey || !searchEngineId) {
         throw new Error("Google API key and search engine ID required");
     }
@@ -2280,7 +2185,6 @@ async function queryGoogleAPI(domain: string, timeout: number, apiKey?: string, 
         const response = await fetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -2298,7 +2202,7 @@ async function queryGoogleAPI(domain: string, timeout: number, apiKey?: string, 
 /**
  * Query Gitee code search
  */
-async function queryGitee(domain: string, timeout: number): Promise<string[]> {
+async function queryGitee(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     
     for (let page = 1; page <= 100; page++) {
@@ -2306,7 +2210,6 @@ async function queryGitee(domain: string, timeout: number): Promise<string[]> {
         const response = await fetch(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
-            timeout
         });
         
         if (!response.ok) break;
@@ -2330,8 +2233,7 @@ async function queryGitee(domain: string, timeout: number): Promise<string[]> {
  */
 async function querySource(
     source: DataSource,
-    domain: string,
-    timeout: number,
+    domain: string ,
     apiConfig?: ApiConfig
 ): Promise<SourceResult> {
     const startTime = performance.now();
@@ -2342,164 +2244,164 @@ async function querySource(
         switch (source) {
             // Certificate sources
             case "crtsh":
-                subdomains = await queryCrtsh(domain, timeout);
+                subdomains = await queryCrtsh(domain );
                 break;
             case "certspotter":
-                subdomains = await queryCertSpotter(domain, timeout);
+                subdomains = await queryCertSpotter(domain );
                 break;
             case "censys":
-                subdomains = await queryCensys(domain, timeout, apiConfig?.censys_id, apiConfig?.censys_secret);
+                subdomains = await queryCensys(domain , apiConfig?.censys_id, apiConfig?.censys_secret);
                 break;
             case "google_ct":
-                subdomains = await queryGoogleCT(domain, timeout);
+                subdomains = await queryGoogleCT(domain );
                 break;
             case "myssl":
-                subdomains = await queryMySSL(domain, timeout);
+                subdomains = await queryMySSL(domain );
                 break;
             case "racent":
-                subdomains = await queryRacent(domain, timeout, apiConfig?.racent_token);
+                subdomains = await queryRacent(domain , apiConfig?.racent_token);
                 break;
             
             // Dataset sources
             case "hackertarget":
-                subdomains = await queryHackerTarget(domain, timeout);
+                subdomains = await queryHackerTarget(domain );
                 break;
             case "rapiddns":
-                subdomains = await queryRapidDNS(domain, timeout);
+                subdomains = await queryRapidDNS(domain );
                 break;
             case "anubis":
-                subdomains = await queryAnubis(domain, timeout);
+                subdomains = await queryAnubis(domain );
                 break;
             case "dnsdumpster":
-                subdomains = await queryDNSDumpster(domain, timeout);
+                subdomains = await queryDNSDumpster(domain );
                 break;
             case "sublist3r":
-                subdomains = await querySublist3r(domain, timeout);
+                subdomains = await querySublist3r(domain );
                 break;
             case "bevigil":
-                subdomains = await queryBeVigil(domain, timeout, apiConfig?.bevigil_token);
+                subdomains = await queryBeVigil(domain , apiConfig?.bevigil_token);
                 break;
             case "binaryedge":
-                subdomains = await queryBinaryEdge(domain, timeout, apiConfig?.binaryedge_token);
+                subdomains = await queryBinaryEdge(domain , apiConfig?.binaryedge_token);
                 break;
             case "dnsgrep":
-                subdomains = await queryDNSGrep(domain, timeout);
+                subdomains = await queryDNSGrep(domain );
                 break;
             case "fullhunt":
-                subdomains = await queryFullHunt(domain, timeout, apiConfig?.fullhunt_token);
+                subdomains = await queryFullHunt(domain , apiConfig?.fullhunt_token);
                 break;
             case "netcraft":
-                subdomains = await queryNetcraft(domain, timeout);
+                subdomains = await queryNetcraft(domain );
                 break;
             case "riddler":
-                subdomains = await queryRiddler(domain, timeout);
+                subdomains = await queryRiddler(domain );
                 break;
             case "robtex":
-                subdomains = await queryRobtex(domain, timeout);
+                subdomains = await queryRobtex(domain );
                 break;
             case "securitytrails":
-                subdomains = await querySecurityTrails(domain, timeout, apiConfig?.securitytrails_token);
+                subdomains = await querySecurityTrails(domain , apiConfig?.securitytrails_token);
                 break;
             case "sitedossier":
-                subdomains = await querySiteDossier(domain, timeout);
+                subdomains = await querySiteDossier(domain );
                 break;
             case "spyse":
-                subdomains = await querySpyse(domain, timeout, apiConfig?.spyse_token);
+                subdomains = await querySpyse(domain , apiConfig?.spyse_token);
                 break;
             case "ip138":
-                subdomains = await queryIP138(domain, timeout);
+                subdomains = await queryIP138(domain );
                 break;
             case "chinaz":
-                subdomains = await queryChinaz(domain, timeout);
+                subdomains = await queryChinaz(domain );
                 break;
             case "chinaz_api":
-                subdomains = await queryChinazAPI(domain, timeout, apiConfig?.chinaz_token);
+                subdomains = await queryChinazAPI(domain , apiConfig?.chinaz_token);
                 break;
             case "cebaidu":
-                subdomains = await queryCeBaidu(domain, timeout);
+                subdomains = await queryCeBaidu(domain );
                 break;
             case "circl":
-                subdomains = await queryCIRCL(domain, timeout, apiConfig?.circl_user, apiConfig?.circl_pass);
+                subdomains = await queryCIRCL(domain , apiConfig?.circl_user, apiConfig?.circl_pass);
                 break;
             case "cloudflare":
-                subdomains = await queryCloudflare(domain, timeout, apiConfig?.cloudflare_token);
+                subdomains = await queryCloudflare(domain , apiConfig?.cloudflare_token);
                 break;
             case "dnsdb":
-                subdomains = await queryDNSDB(domain, timeout, apiConfig?.dnsdb_token);
+                subdomains = await queryDNSDB(domain , apiConfig?.dnsdb_token);
                 break;
             case "ipv4info":
-                subdomains = await queryIPv4Info(domain, timeout, apiConfig?.ipv4info_token);
+                subdomains = await queryIPv4Info(domain , apiConfig?.ipv4info_token);
                 break;
             case "passivedns":
-                subdomains = await queryPassiveDNS(domain, timeout, apiConfig?.passivedns_token, apiConfig?.passivedns_addr);
+                subdomains = await queryPassiveDNS(domain , apiConfig?.passivedns_token, apiConfig?.passivedns_addr);
                 break;
             case "qianxun":
-                subdomains = await queryQianxun(domain, timeout);
+                subdomains = await queryQianxun(domain );
                 break;
             case "windvane":
-                subdomains = await queryWindvane(domain, timeout, apiConfig?.windvane_token);
+                subdomains = await queryWindvane(domain , apiConfig?.windvane_token);
                 break;
             
             // Intelligence sources
             case "alienvault":
-                subdomains = await queryAlienVault(domain, timeout);
+                subdomains = await queryAlienVault(domain );
                 break;
             case "virustotal":
-                subdomains = await queryVirusTotal(domain, timeout);
+                subdomains = await queryVirusTotal(domain );
                 break;
             case "virustotal_api":
-                subdomains = await queryVirusTotalAPI(domain, timeout, apiConfig?.virustotal_token);
+                subdomains = await queryVirusTotalAPI(domain , apiConfig?.virustotal_token);
                 break;
             case "threatminer":
-                subdomains = await queryThreatMiner(domain, timeout);
+                subdomains = await queryThreatMiner(domain );
                 break;
             case "riskiq":
-                subdomains = await queryRiskIQ(domain, timeout, apiConfig?.riskiq_user, apiConfig?.riskiq_key);
+                subdomains = await queryRiskIQ(domain , apiConfig?.riskiq_user, apiConfig?.riskiq_key);
                 break;
             case "threatbook":
-                subdomains = await queryThreatBook(domain, timeout, apiConfig?.threatbook_token);
+                subdomains = await queryThreatBook(domain , apiConfig?.threatbook_token);
                 break;
             
             // Search engines
             case "urlscan":
-                subdomains = await queryURLScan(domain, timeout);
+                subdomains = await queryURLScan(domain );
                 break;
             case "bing_api":
-                subdomains = await queryBingAPI(domain, timeout, apiConfig?.bing_token);
+                subdomains = await queryBingAPI(domain , apiConfig?.bing_token);
                 break;
             case "gitee":
-                subdomains = await queryGitee(domain, timeout);
+                subdomains = await queryGitee(domain );
                 break;
             case "github":
-                subdomains = await queryGitHub(domain, timeout, apiConfig?.github_token);
+                subdomains = await queryGitHub(domain , apiConfig?.github_token);
                 break;
             case "google_api":
-                subdomains = await queryGoogleAPI(domain, timeout, apiConfig?.google_key, apiConfig?.google_cx);
+                subdomains = await queryGoogleAPI(domain , apiConfig?.google_key, apiConfig?.google_cx);
                 break;
             case "shodan":
-                subdomains = await queryShodan(domain, timeout, apiConfig?.shodan_token);
+                subdomains = await queryShodan(domain , apiConfig?.shodan_token);
                 break;
             case "fofa":
-                subdomains = await queryFOFA(domain, timeout, apiConfig?.fofa_email, apiConfig?.fofa_key);
+                subdomains = await queryFOFA(domain , apiConfig?.fofa_email, apiConfig?.fofa_key);
                 break;
             case "hunter":
-                subdomains = await queryHunter(domain, timeout, apiConfig?.hunter_token);
+                subdomains = await queryHunter(domain , apiConfig?.hunter_token);
                 break;
             case "quake":
-                subdomains = await queryQuake(domain, timeout, apiConfig?.quake_token);
+                subdomains = await queryQuake(domain , apiConfig?.quake_token);
                 break;
             case "zoomeye":
-                subdomains = await queryZoomEye(domain, timeout, apiConfig?.zoomeye_token);
+                subdomains = await queryZoomEye(domain , apiConfig?.zoomeye_token);
                 break;
             
             // Check methods
             case "cdx":
-                subdomains = await queryCDX(domain, timeout);
+                subdomains = await queryCDX(domain );
                 break;
             
             // Crawl methods
             case "archive":
-                subdomains = await queryArchive(domain, timeout);
+                subdomains = await queryArchive(domain );
                 break;
             
             default:
@@ -2558,7 +2460,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
         
-        const timeout = Math.max(5000, Math.min(input.timeout || DEFAULT_TIMEOUT, 120000));
         const removeDuplicates = input.removeDuplicates !== false;
         const requestedSourceList = Array.isArray(input.sources) ? input.sources : [];
         const requestedSources = requestedSourceList.length > 0;
@@ -2594,12 +2495,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         try {
             (globalThis as any).Sentinel?.log?.(
                 "info",
-                `[subdomain_enumerator] start domain=${domain} sources=${sources.length} timeout_ms=${timeout}`
+                `[subdomain_enumerator] start domain=${domain} sources=${sources.length}`
             );
         } catch {
             // Ignore logging failures.
         }
-        const tasks = sources.map(source => () => querySource(source, domain, timeout, input.apiConfig));
+        const tasks = sources.map(source => () => querySource(source, domain, input.apiConfig));
         const sourceResults = await runThroughRuntimeQueue(tasks);
         
         const allSubdomains: string[] = [];
