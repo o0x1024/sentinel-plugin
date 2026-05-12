@@ -1,15 +1,15 @@
 {
-  "version": "2.3.23",
+  "version": "2.3.24",
   "updated_at": "2026-05-12",
   "plugins": [
     {
       "id": "sql_injection_detector",
       "name": "SQL Injection Detector",
-      "version": "2.2.1",
+      "version": "2.3.1",
       "author": "Sentinel Team",
       "main_category": "traffic",
       "category": "sqli",
-      "description": "Replays every safe parameter with a simple single-quote probe under bounded active verification controls",
+      "description": "Replays safe parameters with multi-signal SQL probes under bounded active verification controls",
       "default_severity": "high",
       "tags": [
         "sql",

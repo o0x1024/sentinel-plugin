@@ -3,7 +3,7 @@
  *
  * @plugin sql_injection_detector
  * @name SQL Injection Detector
- * @version 2.3.0
+ * @version 2.3.1
  * @author Sentinel Team
  * @category sqli
  * @default_severity high
@@ -461,6 +461,7 @@ const UTF8_ENCODER = new TextEncoder();
 const CRLF_BYTES = new Uint8Array([13, 10]);
 const HEADER_SEPARATOR_BYTES = new Uint8Array([13, 10, 13, 10]);
 const pluginGlobals = globalThis as PluginGlobals;
+type SerializedHeaderEntry = { name: string; value: string };
 
 function bytesToString(bytes: number[]): string {
   try {
@@ -475,6 +476,10 @@ function truncate(value: string, maxLength = 220): string {
     return value;
   }
   return `${value.slice(0, maxLength)}...`;
+}
+
+function byteLength(value: string): number {
+  return UTF8_ENCODER.encode(value).length;
 }
 
 function decodeMaybe(value: string): string {
@@ -1003,6 +1008,11 @@ function buildReplayHeaders(request: RequestContext, probeLabel: string): Record
     headers[name] = value;
   }
 
+  const contentType = getRequestContentType(request);
+  if (contentType && !getHeaderValue(headers, "content-type")) {
+    headers["content-type"] = contentType;
+  }
+
   headers["x-sentinel-active-probe"] = probeLabel;
   return headers;
 }
@@ -1026,13 +1036,19 @@ function buildReplayRequest(
     try {
       const url = new URL(request.url);
       url.searchParams.set(target.name, probeValue);
+      const init: RequestInit = {
+        method,
+        headers,
+        activeProbe: activeProbeMetadata,
+      };
+
+      if (hasRequestBody(method) && request.body.length > 0) {
+        init.body = toArrayBuffer(new Uint8Array(request.body));
+      }
+
       return {
         url: url.toString(),
-        init: {
-          method,
-          headers,
-          activeProbe: activeProbeMetadata,
-        },
+        init,
         probeValue,
       };
     } catch {
@@ -1135,6 +1151,86 @@ function serializeHeaderMap(headers: Record<string, string>): string {
       value,
     })),
   );
+}
+
+function parseRawHeaderEntries(headers: string): SerializedHeaderEntry[] {
+  return headers.split(/\r?\n/)
+    .map((line) => {
+      const separatorIndex = line.indexOf(":");
+      if (separatorIndex <= 0) {
+        return null;
+      }
+
+      return {
+        name: line.slice(0, separatorIndex).trim(),
+        value: line.slice(separatorIndex + 1).trim(),
+      };
+    })
+    .filter((entry): entry is SerializedHeaderEntry => Boolean(entry?.name));
+}
+
+function parseSerializedHeaderEntries(headers: string): SerializedHeaderEntry[] {
+  const trimmedHeaders = headers.trim();
+  if (!trimmedHeaders) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(trimmedHeaders) as Array<{ name?: unknown; value?: unknown }>;
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map(({ name, value }) => ({
+          name: String(name || "").trim(),
+          value: String(value || ""),
+        }))
+        .filter(({ name }) => Boolean(name));
+    }
+  } catch {
+    return parseRawHeaderEntries(trimmedHeaders);
+  }
+
+  return parseRawHeaderEntries(trimmedHeaders);
+}
+
+function hasSerializedHeader(entries: SerializedHeaderEntry[], name: string): boolean {
+  const normalizedName = name.toLowerCase();
+  return entries.some(entry => entry.name.toLowerCase() === normalizedName);
+}
+
+function serializeHeaderEntries(entries: SerializedHeaderEntry[]): string {
+  return JSON.stringify(entries.map(({ name, value }) => ({ name, value })));
+}
+
+function inferEvidenceContentType(target: MutationTarget): string {
+  if (target.bodyKind === "json") {
+    return "application/json";
+  }
+  if (target.bodyKind === "form") {
+    return "application/x-www-form-urlencoded";
+  }
+  return "";
+}
+
+function buildEvidenceRequestHeaders(replayArtifact: ReplayArtifact, target: MutationTarget): string {
+  const entries = parseSerializedHeaderEntries(replayArtifact.request.headers);
+  const requestBody = replayArtifact.request.body;
+
+  if (requestBody && !hasSerializedHeader(entries, "content-type")) {
+    const inferredContentType = inferEvidenceContentType(target);
+    if (inferredContentType) {
+      entries.push({ name: "Content-Type", value: inferredContentType });
+    }
+  }
+
+  if (requestBody && !hasSerializedHeader(entries, "content-length")) {
+    entries.push({ name: "Content-Length", value: String(byteLength(requestBody)) });
+  }
+
+  if (!hasSerializedHeader(entries, "x-sentinel-active-probe")) {
+    entries.push({ name: "X-Sentinel-Active-Probe", value: "sql_injection_detector" });
+  }
+
+  return serializeHeaderEntries(entries);
 }
 
 function serializeResponseHeaders(headers: Headers): string {
@@ -1606,38 +1702,41 @@ function buildFinding(
   normalizedReplay: NormalizedResponse,
   reference: NormalizedResponse,
 ): any {
+  const requestHeaders = buildEvidenceRequestHeaders(replayArtifact, target);
+  const evidenceSnippet = [
+    `location=${target.location}`,
+    `target_path=${formatMutationTargetPath(target)}`,
+    `target_original=${truncate(target.originalValue, 120)}`,
+    `technique=${technique}`,
+    `reference_status=${reference.status}`,
+    `probe_status=${normalizedReplay.status}`,
+    `probe_response_class=${normalizedReplay.responseClass}`,
+    `probe_sql_signal_score=${normalizedReplay.sqlSignalScore}`,
+    `probe_elapsed_ms=${replayArtifact.response.elapsedMs}`,
+    `probe=${truncate(probeValue, 180)}`,
+    `probe_value=${truncate(probeValue, 180)}`,
+    normalizedReplay.sqlError ? `sql_error=${truncate(normalizedReplay.sqlError, 180)}` : "",
+    evidence,
+  ].filter(Boolean).join(" | ");
+
   return {
     title,
-    description,
+    description: `${description} Target "${formatMutationTargetIdentifier(target)}" was replayed with probe "${truncate(probeValue, 120)}".`,
     severity,
     vuln_type: "sqli",
     confidence,
     url: replayArtifact.request.url,
     method: replayArtifact.request.method,
     param_name: formatMutationTargetIdentifier(target),
-    param_value: truncate(target.originalValue, 120),
-    evidence: truncate(
-      [
-        `location=${target.location}`,
-        `target_path=${formatMutationTargetPath(target)}`,
-        `technique=${technique}`,
-        `reference_status=${reference.status}`,
-        `probe_status=${normalizedReplay.status}`,
-        `probe_response_class=${normalizedReplay.responseClass}`,
-        `probe_sql_signal_score=${normalizedReplay.sqlSignalScore}`,
-        `probe_elapsed_ms=${replayArtifact.response.elapsedMs}`,
-        `probe=${truncate(probeValue, 120)}`,
-        evidence,
-      ].filter(Boolean).join(" | "),
-      420,
-    ),
+    param_value: truncate(probeValue, 120),
+    evidence: truncate(evidenceSnippet, 1200),
     cwe: "CWE-89",
     owasp: "A03:2021",
     remediation: "Use parameterized queries or prepared statements and avoid returning database error details to clients.",
     request: {
       method: replayArtifact.request.method,
       url: replayArtifact.request.url,
-      headers: replayArtifact.request.headers,
+      headers: requestHeaders,
       body: replayArtifact.request.body,
     },
     response: {
