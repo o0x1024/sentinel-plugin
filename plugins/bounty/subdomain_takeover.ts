@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.1.2
+ * @version 1.1.3
  * @author Sentinel Team
  * @main_category bounty
  * @category vuln

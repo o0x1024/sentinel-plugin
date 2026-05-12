@@ -3,7 +3,7 @@
  * 
  * @plugin ssrf_detector
  * @name SSRF Detector
- * @version 1.3.1
+ * @version 1.3.2
  * @author Sentinel Team
  * @main_category agent
  * @category vuln

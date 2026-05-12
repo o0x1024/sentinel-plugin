@@ -3,7 +3,7 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.4
+ * @version 1.3.5
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor

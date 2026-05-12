@@ -3,7 +3,7 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.3
+ * @version 1.0.4
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor

@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.3
+ * @version 2.2.4
  * @author Sentinel Team
  * @main_category bounty
  * @category recon

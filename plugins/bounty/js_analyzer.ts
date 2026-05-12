@@ -3,7 +3,7 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.2
+ * @version 3.1.3
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery

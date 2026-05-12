@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.2.2
+ * @version 2.2.3
  * @author Sentinel Team
  * @main_category bounty
  * @category recon

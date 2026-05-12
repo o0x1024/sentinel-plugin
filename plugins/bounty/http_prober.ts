@@ -3,7 +3,7 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.3
+ * @version 1.4.4
  * @author Sentinel Team
  * @main_category bounty
  * @category recon

@@ -3,7 +3,7 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.1.1
+ * @version 1.1.2
  * @author Sentinel Team
  * @main_category bounty
  * @category recon

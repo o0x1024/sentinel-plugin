@@ -3,7 +3,7 @@
  * 
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.2
+ * @version 1.2.3
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
