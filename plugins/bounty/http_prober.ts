@@ -146,14 +146,14 @@ async function reportMonitorProgress(
 }
 
 const DEFAULT_TIMEOUT = 3000;
-const DEFAULT_CONCURRENCY = 80;
-const MAX_CONCURRENCY = 100;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
 const DEFAULT_MAX_REDIRECTS = 2;
 const DEFAULT_PORTS = [80, 443, 8080, 8443];
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 const HTTP_PRIMARY_PORTS = new Set([80, 8080]);
 const HTTPS_PRIMARY_PORTS = new Set([443, 8443]);
-const RESPONSE_PREVIEW_BYTES = 16 * 1024;
+const RESPONSE_PREVIEW_BYTES = 32 * 1024;
 
 function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
@@ -778,14 +778,28 @@ async function probeUrl(
 }
 
 /**
- * Run tasks sequentially through runtime scheduling
+ * Run tasks with limited concurrency through runtime scheduling
  */
 async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+    if (tasks.length === 0) {
+        return [];
     }
+
+    const results = new Array<T>(tasks.length);
+    const concurrency = Math.max(1, Math.min(MAX_CONCURRENCY, tasks.length));
+    let nextIndex = 0;
+
+    const runNext = async (): Promise<void> => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex;
+            nextIndex += 1;
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    };
+
+    const workers = Array.from({ length: concurrency }, () => runNext());
+    await Promise.all(workers);
+
     return results;
 }
 

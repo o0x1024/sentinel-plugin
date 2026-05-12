@@ -55,8 +55,8 @@ type PluginGlobals = typeof globalThis & {
 
 const pluginGlobals = globalThis as PluginGlobals;
 
-const DEFAULT_CONCURRENCY = 8;
-const MAX_CONCURRENCY = 20;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
 
 // Service fingerprints for subdomain takeover detection
 interface ServiceFingerprint {
@@ -798,12 +798,24 @@ async function runWithConcurrency<T>(
     tasks: (() => Promise<T>)[],
     concurrency: number
 ): Promise<T[]> {
-    void concurrency;
-    // Rust controls fetch concurrency and pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+    if (tasks.length === 0) {
+        return [];
     }
+
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length));
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (true) {
+            const currentIndex = nextIndex++;
+            if (currentIndex >= tasks.length) {
+                return;
+            }
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    }));
+
     return results;
 }
 

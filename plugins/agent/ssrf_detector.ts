@@ -192,8 +192,8 @@ const SSRF_INDICATORS = [
     /Network is unreachable/i,
 ];
 
-const DEFAULT_CONCURRENCY = 6;
-const MAX_CONCURRENCY = 16;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
 
 async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
     // Rust controls request pacing; plugins only submit work to the runtime queue.

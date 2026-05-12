@@ -514,6 +514,19 @@ function generateId(): string {
     });
 }
 
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex++;
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
 function encodeBase64Utf8(value: string): string {
     const bytes = new TextEncoder().encode(value);
     let binary = "";
@@ -1007,11 +1020,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             message: `Querying FOFA for ${plans.length} target set(s)`,
         });
 
-        const results: FofaQueryResult[] = [];
-        for (let index = 0; index < plans.length; index++) {
-            const plan = plans[index];
+        let completedPlans = 0;
+        const results = await runWithConcurrency(plans.map((plan) => async (): Promise<FofaQueryResult> => {
             await reportMonitorProgress(input.__monitorExecution, {
-                current: index,
+                current: completedPlans,
                 total: plans.length,
                 currentTarget: plan.target,
                 phase: "query",
@@ -1019,9 +1031,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             });
 
             try {
-                results.push(await searchFofa(plan, fofaKey, baseUrl, fields, pageSize, maxPages, full));
+                return await searchFofa(plan, fofaKey, baseUrl, fields, pageSize, maxPages, full);
             } catch (error) {
-                results.push({
+                return {
                     id: plan.id,
                     query: plan.query,
                     source: plan.source,
@@ -1031,9 +1043,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     pagesFetched: 0,
                     assets: [],
                     error: error instanceof Error ? error.message : String(error),
-                });
+                };
+            } finally {
+                completedPlans += 1;
             }
-        }
+        }));
 
         await reportMonitorProgress(input.__monitorExecution, {
             current: plans.length,

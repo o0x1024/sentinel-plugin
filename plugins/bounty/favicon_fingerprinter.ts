@@ -89,7 +89,7 @@ type PluginGlobals = typeof globalThis & {
 const pluginGlobals = globalThis as PluginGlobals;
 const DEFAULT_CONCURRENCY = 32;
 const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 64;
+const MAX_CONCURRENCY = 32;
 
 async function reportMonitorProgress(
     monitorExecution: MonitorExecutionContext | undefined,

@@ -88,12 +88,12 @@ type PluginGlobals = typeof globalThis & {
 
 const pluginGlobals = globalThis as PluginGlobals;
 
-const DEFAULT_CONCURRENCY = 12;
+const DEFAULT_CONCURRENCY = 32;
 const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 40;
-const DEFAULT_TIMEOUT_MS = 5000;
-const MIN_TIMEOUT_MS = 1000;
-const MAX_TIMEOUT_MS = 30000;
+const MAX_CONCURRENCY = 32;
+const DEFAULT_TIMEOUT_MS = 3000;
+const MIN_TIMEOUT_MS = 3000;
+const MAX_TIMEOUT_MS = 3000;
 
 async function reportMonitorProgress(
     monitorExecution: MonitorExecutionContext | undefined,

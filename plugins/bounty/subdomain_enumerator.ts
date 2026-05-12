@@ -158,9 +158,9 @@ const AVAILABLE_SOURCES = [
 
 type DataSource = typeof AVAILABLE_SOURCES[number];
 
-const DEFAULT_TIMEOUT = 20000;
-const RUNTIME_QUEUE_TIMEOUT_MULTIPLIER = 6;
-const MAX_RUNTIME_QUEUE_TIMEOUT = 120000;
+const DEFAULT_TIMEOUT = 3000;
+const RUNTIME_QUEUE_TIMEOUT_MULTIPLIER = 1;
+const MAX_RUNTIME_QUEUE_TIMEOUT = 3000;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 const SOURCE_PRIORITY: Partial<Record<DataSource, number>> = {
@@ -2432,11 +2432,18 @@ async function querySource(
  * Submit source work together so Rust can own request pacing and concurrency.
  */
 async function runThroughRuntimeQueue(tasks: Array<() => Promise<SourceResult>>): Promise<SourceResult[]> {
-    return Promise.all(tasks.map(async (task) => {
-        const result = await task();
-        logSourceResult(result);
-        return result;
-    }));
+    const results = new Array<SourceResult>(tasks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex++;
+            const result = await tasks[currentIndex]();
+            logSourceResult(result);
+            results[currentIndex] = result;
+        }
+    });
+    await Promise.all(workers);
+    return results;
 }
 
 /**

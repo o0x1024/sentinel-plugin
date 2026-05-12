@@ -16,6 +16,7 @@ interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
     checkExpiry?: boolean;
     expiryWarningDays?: number;  // Warn if expiring within N days
+    concurrency?: number;
     previousSnapshots?: Record<string, CertSnapshot>;  // Previous state for comparison
     __monitorExecution?: MonitorExecutionContext;
 }
@@ -37,6 +38,10 @@ interface TlsProbeResponse {
     cert?: Partial<CertInfo>;
     error?: string;
 }
+
+const CERT_MONITOR_TLS_TIMEOUT_MS = 3000;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
 
 interface CertSnapshot {
     domain: string;
@@ -209,6 +214,13 @@ export function get_input_schema() {
                 minimum: 1,
                 maximum: 365
             },
+            concurrency: {
+                type: "integer",
+                description: "Number of concurrent TLS certificate checks",
+                default: DEFAULT_CONCURRENCY,
+                minimum: 1,
+                maximum: MAX_CONCURRENCY
+            },
             previousSnapshots: {
                 type: "object",
                 description: "Previous certificate snapshots for comparison",
@@ -301,6 +313,7 @@ async function getCertificateInfo(domain: string): Promise<CertInfo | null> {
         if (tlsApi?.getCertificate) {
             const tlsResult: TlsProbeResponse = await tlsApi.getCertificate(domain, {
                 port: 443,
+                timeout: CERT_MONITOR_TLS_TIMEOUT_MS,
             });
 
             if (tlsResult?.success && tlsResult.cert) {
@@ -320,40 +333,35 @@ async function getCertificateInfo(domain: string): Promise<CertInfo | null> {
             }
         }
 
-        const response = await fetch(
-            `https://${domain}/`,
-            {
-                method: "HEAD",
-                redirect: "manual",
-            },
-        );
-
-        const now = new Date();
-
-        // Use deterministic probe features for pseudo fingerprint to avoid date-based churn
-        const server = response.headers.get("server") || "unknown";
-        const altSvc = response.headers.get("alt-svc") || "none";
-        const certData = `${domain}:${response.status}:${server}:${altSvc}`;
-        const encoder = new TextEncoder();
-        const data = encoder.encode(certData);
-        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const fingerprint = hashArray.map(b => b.toString(16).padStart(2, '0')).join(':').toUpperCase().substring(0, 59);
-        
-        return {
-            subject: `CN=${domain}`,
-            issuer: "Unknown",
-            validFrom: now.toISOString(),
-            validTo: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-            fingerprint: fingerprint,
-            serialNumber: generateId().replace(/-/g, "").toUpperCase().substring(0, 32),
-            altNames: [domain, `*.${domain.split('.').slice(-2).join('.')}`],
-            protocol: "TLS",
-            cipher: "Unknown",
-        };
+        return null;
     } catch {
         return null;
     }
+}
+
+async function runWithConcurrency<T>(
+    tasks: (() => Promise<T>)[],
+    concurrency: number,
+): Promise<T[]> {
+    if (tasks.length === 0) {
+        return [];
+    }
+
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length));
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+        while (true) {
+            const currentIndex = nextIndex++;
+            if (currentIndex >= tasks.length) {
+                return;
+            }
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    }));
+
+    return results;
 }
 
 /**
@@ -389,14 +397,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     .filter((domain) => domain.length > 0),
             ),
         );
-        const probeUnitsPerDomain = 3;
-        const totalProgressUnits = normalizedDomains.length * probeUnitsPerDomain + 2;
+        const totalProgressUnits = normalizedDomains.length;
         let completedProgressUnits = 0;
 
-        const advanceProgress = async (update: MonitorProgressUpdate, increment = 0) => {
+        const advanceProgress = async (update: MonitorProgressUpdate, current = completedProgressUnits) => {
             completedProgressUnits = Math.min(
                 totalProgressUnits,
-                completedProgressUnits + Math.max(0, increment),
+                Math.max(0, current),
             );
             await reportMonitorProgress(monitorExecution, {
                 total: totalProgressUnits,
@@ -440,7 +447,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     phase: "probe",
                     phaseLabel: "Connecting",
                     message: `Connecting to ${domain}`,
-                }, 1);
+                });
 
                 const certInfo = await getCertificateInfo(domain);
 
@@ -451,7 +458,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     message: certInfo
                         ? `Retrieved certificate for ${domain}`
                         : `Unable to retrieve certificate for ${domain}`,
-                }, 1);
+                });
 
                 if (certInfo) {
                     result.success = true;
@@ -599,19 +606,23 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 message: result.success
                     ? `Finished certificate check for ${domain}`
                     : `Certificate check failed for ${domain}`,
-            }, 1);
+            }, completedDomains);
         }
 
-        // Rust controls request pacing; plugins only submit work to the runtime queue.
-        for (let targetIndex = 0; targetIndex < normalizedDomains.length; targetIndex++) {
-            await processDomain(normalizedDomains[targetIndex], targetIndex);
-        }
+        const concurrency = Math.max(
+            1,
+            Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY, normalizedDomains.length),
+        );
+        await runWithConcurrency(
+            normalizedDomains.map((domain, targetIndex) => () => processDomain(domain, targetIndex)),
+            concurrency,
+        );
 
         await advanceProgress({
             phase: "compare",
             message: "Comparing certificate snapshots",
             phaseLabel: "Comparing snapshots",
-        }, 1);
+        });
 
         const certificates = results
             .filter((result) => result.success && result.certInfo)
@@ -639,7 +650,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             phase: "build",
             message: "Building certificate artifacts",
             phaseLabel: "Building artifacts",
-        }, 1);
+        });
 
         return {
             success: true,

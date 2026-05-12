@@ -123,9 +123,9 @@ const pluginGlobals = globalThis as PluginGlobals;
 
 const DEFAULT_RECORD_TYPES: RecordType[] = ["A", "AAAA", "CNAME", "MX", "NS", "TXT"];
 const SUPPORTED_RECORD_TYPES = new Set<RecordType>(DEFAULT_RECORD_TYPES);
-const DEFAULT_CONCURRENCY = 64;
+const DEFAULT_CONCURRENCY = 32;
 const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 128;
+const MAX_CONCURRENCY = 32;
 
 type DenoDnsApi = {
     resolveDns?: (name: string, recordType: string) => Promise<unknown[]>;

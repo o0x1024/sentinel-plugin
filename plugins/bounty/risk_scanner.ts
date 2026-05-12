@@ -125,8 +125,8 @@ const pluginGlobals = globalThis as PluginGlobals;
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
 
-const DEFAULT_CONCURRENCY = 100;
-const MAX_CONCURRENCY = 500;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
 
 export function get_input_schema() {
     return {
@@ -292,11 +292,15 @@ pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
 
 async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
-    }
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex++;
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    });
+    await Promise.all(workers);
     return results;
 }
 

@@ -185,8 +185,8 @@ const HIGH_RISK_PORTS = new Set([
     21, 22, 23, 25, 135, 139, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 27017
 ]);
 
-const DEFAULT_CONCURRENCY = 500;
-const MAX_CONCURRENCY = 1000;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
 
 // Generate UUID
 function generateId(): string {

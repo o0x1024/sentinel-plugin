@@ -124,9 +124,9 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
-const DEFAULT_TIMEOUT_MS = 10000;
+const DEFAULT_TIMEOUT_MS = 3000;
 const MIN_TIMEOUT_MS = 3000;
-const MAX_TIMEOUT_MS = 30000;
+const MAX_TIMEOUT_MS = 3000;
 const MIN_CONCURRENCY = 1;
 
 async function reportMonitorProgress(
@@ -257,9 +257,9 @@ const SKIP_DOMAINS = new Set([
     "w3.org", "schema.org", "mozilla.org", "npmjs.com", "github.com",
 ]);
 
-const DEFAULT_CONCURRENCY = 20;
-const MAX_CONCURRENCY = 50;
-const MAX_FILE_ANALYSIS_CONCURRENCY = 8;
+const DEFAULT_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 32;
+const MAX_FILE_ANALYSIS_CONCURRENCY = 32;
 
 /**
  * Export input schema

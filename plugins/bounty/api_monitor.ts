@@ -257,18 +257,22 @@ function generateId(): string {
 }
 
 async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
-    }
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex++;
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    });
+    await Promise.all(workers);
     return results;
 }
 
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
     let index = 0;
-    const workerCount = Math.max(1, Math.min(concurrency, tasks.length || 1));
+    const workerCount = Math.max(1, Math.min(concurrency, 16, tasks.length || 1));
     const workers = Array.from({ length: workerCount }, async () => {
         while (index < tasks.length) {
             const current = index++;

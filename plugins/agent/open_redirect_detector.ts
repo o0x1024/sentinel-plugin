@@ -170,7 +170,7 @@ const REDIRECT_PARAM_NAMES = [
     "u", "r", "l", "q",
 ];
 
-const DEFAULT_CONCURRENCY = 6;
+const DEFAULT_CONCURRENCY = 32;
 const MAX_CONCURRENCY = 20;
 
 async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
