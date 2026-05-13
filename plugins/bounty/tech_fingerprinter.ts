@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.2.3
+ * @version 2.2.4
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -31,7 +31,6 @@ interface ToolInput {
     dictionaryEntries?: RuleEntry[];
     concurrency?: number;
     userAgent?: string;
-    maxTargets?: number;
     previousSnapshots?: Record<string, TechnologySnapshot>;
     __monitorExecution?: MonitorExecutionContext;
 }
@@ -175,7 +174,6 @@ export function get_input_schema() {
                 maximum: MAX_CONCURRENCY,
             },
             userAgent: { type: "string", default: "Sentinel-Tech-Fingerprinter/2.0" },
-            maxTargets: { type: "integer", default: 20, minimum: 1, maximum: 200 },
             previousSnapshots: { type: "object", description: "Previous technology snapshots keyed by target URL" },
         },
     };
@@ -455,7 +453,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             normalizeTarget(input.url),
             normalizeTarget(input.base_url),
             ...(Array.isArray(input.targets) ? input.targets.map(normalizeTarget) : []),
-        ].filter((value): value is string => Boolean(value)))).slice(0, Number(input.maxTargets || 20));
+        ].filter((value): value is string => Boolean(value))));
 
         if (targets.length === 0) {
             return { success: false, error: "At least one target URL is required" };
