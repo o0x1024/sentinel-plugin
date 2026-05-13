@@ -309,7 +309,7 @@
     {
       "id": "fofa_asset_monitor",
       "name": "FOFA Asset Monitor",
-      "version": "1.2.3",
+      "version": "1.2.4",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",

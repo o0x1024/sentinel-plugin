@@ -3,7 +3,7 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.3
+ * @version 1.2.4
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -83,14 +83,6 @@ interface FofaAsset {
     protocol: string;
     title: string;
     domain: string;
-    countryName: string;
-    region: string;
-    city: string;
-    server: string;
-    product: string;
-    productCategory: string;
-    version: string;
-    cname: string;
     lastUpdateTime: string;
     url: string | null;
     hostname: string;
@@ -188,14 +180,6 @@ const DEFAULT_FIELDS = [
     "title",
     "domain",
     "lastupdatetime",
-    "country_name",
-    "region",
-    "city",
-    "server",
-    "product",
-    "product_category",
-    "version",
-    "cname",
 ];
 
 export function get_input_schema() {
@@ -813,9 +797,6 @@ function readRowValue(row: string[] | Record<string, unknown>, field: string, in
         host: ["url", "link"],
         domain: ["hostname"],
         protocol: ["base_protocol", "scheme"],
-        country_name: ["country"],
-        region: ["province"],
-        product_category: ["category"],
     };
 
     for (const alias of aliases[field] || []) {
@@ -859,14 +840,6 @@ function parseFofaRow(row: string[] | Record<string, unknown>, fields: string[])
         protocol,
         title: raw.title || "",
         domain,
-        countryName: raw.country_name || raw.country || "",
-        region: raw.region || raw.province || "",
-        city: raw.city || "",
-        server: raw.server || "",
-        product: raw.product || "",
-        productCategory: raw.product_category || raw.category || "",
-        version: raw.version || "",
-        cname: raw.cname || "",
         lastUpdateTime: raw.lastupdatetime || "",
         url,
         hostname,
