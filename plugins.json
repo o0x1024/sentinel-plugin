@@ -1,6 +1,6 @@
 {
-  "version": "2.3.24",
-  "updated_at": "2026-05-12",
+  "version": "2.3.25",
+  "updated_at": "2026-05-21",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -431,6 +431,25 @@
         "ast"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/js_analyzer.ts"
+    },
+    {
+      "id": "webpack_source_downloader",
+      "name": "Webpack Source Downloader",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "bounty",
+      "category": "discovery",
+      "monitor_type": "web",
+      "description": "Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with UTF-8 and Base64 file payloads.",
+      "default_severity": "info",
+      "tags": [
+        "webpack",
+        "sourcemap",
+        "source",
+        "frontend",
+        "download"
+      ],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/webpack_source_downloader.ts"
     },
     {
       "id": "ssrf_detector",
