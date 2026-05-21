@@ -1,5 +1,5 @@
 {
-  "version": "2.3.25",
+  "version": "2.3.26",
   "updated_at": "2026-05-21",
   "plugins": [
     {
@@ -435,7 +435,7 @@
     {
       "id": "webpack_source_downloader",
       "name": "Webpack Source Downloader",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",

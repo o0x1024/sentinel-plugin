@@ -3,7 +3,7 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.0
+ * @version 1.0.1
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -152,6 +152,7 @@ const DEFAULT_MAX_SOURCE_MAPS = 50;
 const DEFAULT_MAX_SOURCE_FILES = 500;
 const DEFAULT_MAX_SOURCE_FILE_SIZE = 750_000;
 const MAX_REMOTE_TEXT_BYTES = 20_000_000;
+const DEFAULT_EXCLUDE_PATTERNS = ["node_modules/", "(webpack)/"];
 
 async function reportMonitorProgress(
     monitorExecution: MonitorExecutionContext | undefined,
@@ -268,10 +269,10 @@ function looksLikeHtml(text: string, contentType: string): boolean {
 function extractScriptUrls(html: string, baseUrl: string): string[] {
     const urls: string[] = [];
     const seen = new Set<string>();
-    const scriptRegex = /<script\b[^>]*\bsrc\s*=\s*(["'])(.*?)\1/gi;
+    const scriptRegex = /<script\b[^>]*\bsrc\s*=\s*(?:(["'])(.*?)\1|([^"'\s>]+))/gi;
     let match: RegExpExecArray | null;
     while ((match = scriptRegex.exec(html)) !== null) {
-        const resolved = resolveUrl(baseUrl, match[2]);
+        const resolved = resolveUrl(baseUrl, match[2] || match[3] || "");
         if (resolved && !seen.has(resolved)) {
             seen.add(resolved);
             urls.push(resolved);
@@ -783,6 +784,7 @@ export function get_input_schema() {
                 type: "array",
                 items: { type: "string" },
                 description: "Optional source path substrings to exclude, for example node_modules",
+                default: DEFAULT_EXCLUDE_PATTERNS,
             },
             includeNonWebpackSources: {
                 type: "boolean",
@@ -854,7 +856,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             maxSourceFiles: clampInteger(input.maxSourceFiles, DEFAULT_MAX_SOURCE_FILES, 1, 5000),
             maxSourceFileSize: clampInteger(input.maxSourceFileSize, DEFAULT_MAX_SOURCE_FILE_SIZE, 1024, 5_000_000),
             includePatterns: Array.isArray(input.includePatterns) ? input.includePatterns.map(String).filter(Boolean) : [],
-            excludePatterns: Array.isArray(input.excludePatterns) ? input.excludePatterns.map(String).filter(Boolean) : [],
+            excludePatterns: Array.isArray(input.excludePatterns)
+                ? input.excludePatterns.map(String).filter(Boolean)
+                : DEFAULT_EXCLUDE_PATTERNS,
             includeNonWebpackSources: input.includeNonWebpackSources === true,
             probeSiblingSourceMaps: input.probeSiblingSourceMaps === true,
         };
