@@ -1,5 +1,5 @@
 {
-  "version": "2.3.26",
+  "version": "2.3.27",
   "updated_at": "2026-05-21",
   "plugins": [
     {
@@ -435,11 +435,10 @@
     {
       "id": "webpack_source_downloader",
       "name": "Webpack Source Downloader",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Sentinel Team",
-      "main_category": "bounty",
-      "category": "discovery",
-      "monitor_type": "web",
+      "main_category": "agent",
+      "category": "utility",
       "description": "Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with UTF-8 and Base64 file payloads.",
       "default_severity": "info",
       "tags": [
@@ -449,7 +448,7 @@
         "frontend",
         "download"
       ],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/webpack_source_downloader.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/webpack_source_downloader.ts"
     },
     {
       "id": "ssrf_detector",

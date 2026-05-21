@@ -3,10 +3,10 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.1
+ * @version 1.0.2
  * @author Sentinel Team
- * @main_category bounty
- * @category discovery
+ * @main_category agent
+ * @category utility
  * @default_severity info
  * @tags webpack, sourcemap, source, frontend, download
  * @description Download original frontend source files exposed through webpack:// and webpack-internal:// source maps.
