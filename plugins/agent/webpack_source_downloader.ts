@@ -3,14 +3,14 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.4
+ * @version 1.0.5
  * @author Sentinel Team
  * @main_category agent
  * @category utility
  * @monitor_type web
  * @default_severity info
  * @tags webpack, sourcemap, source, frontend, download
- * @description Download original frontend source files exposed through webpack:// and webpack-internal:// source maps.
+ * @description Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with optional workspace directory saving and content-free result manifests.
  */
 
 declare const Sentinel: {
@@ -87,6 +87,21 @@ interface DownloadableSourceFile {
     sha256: string;
 }
 
+interface SourceFileSummary {
+    target: string;
+    sourceMapUrl: string;
+    sourcePath: string;
+    downloadPath: string;
+    archivePath: string;
+    filename: string;
+    mimeType: string;
+    encoding: "utf-8";
+    savedPath?: string;
+    saveStatus: "saved" | "not_saved";
+    size: number;
+    sha256: string;
+}
+
 interface SourceMapRecord {
     url: string;
     source: string;
@@ -105,16 +120,20 @@ interface TargetResult {
     skippedSourcesWithoutContent: number;
     skippedSourcesByFilter: number;
     skippedSourcesTooLarge: number;
-    files: DownloadableSourceFile[];
+    files: SourceFileSummary[];
     sourceMaps: SourceMapRecord[];
     errors: string[];
+}
+
+interface InternalTargetResult extends Omit<TargetResult, "files"> {
+    files: DownloadableSourceFile[];
 }
 
 interface ToolOutput {
     success: boolean;
     data?: {
         results: TargetResult[];
-        files: DownloadableSourceFile[];
+        files: SourceFileSummary[];
         summary: {
             totalTargets: number;
             successfulTargets: number;
@@ -129,6 +148,7 @@ interface ToolOutput {
         download_manifest: Array<{
             archivePath: string;
             savedPath?: string;
+            saveStatus: "saved" | "not_saved";
             sourcePath: string;
             sourceMapUrl: string;
             size: number;
@@ -138,6 +158,7 @@ interface ToolOutput {
         saved_files: Array<{
             archivePath: string;
             savedPath: string;
+            saveStatus: "saved";
             sourcePath: string;
             sourceMapUrl: string;
             size: number;
@@ -149,6 +170,7 @@ interface ToolOutput {
             frontend_source_files: Array<{
                 archivePath: string;
                 savedPath?: string;
+                saveStatus: "saved" | "not_saved";
                 sourcePath: string;
                 sourceMapUrl: string;
                 size: number;
@@ -496,6 +518,23 @@ async function saveExtractedFiles(saveDirectory: string | undefined, files: Down
     }
 }
 
+function summarizeSourceFile(file: DownloadableSourceFile): SourceFileSummary {
+    return {
+        target: file.target,
+        sourceMapUrl: file.sourceMapUrl,
+        sourcePath: file.sourcePath,
+        downloadPath: file.downloadPath,
+        archivePath: file.archivePath,
+        filename: file.filename,
+        mimeType: file.mimeType,
+        encoding: file.encoding,
+        savedPath: file.savedPath,
+        saveStatus: file.savedPath ? "saved" : "not_saved",
+        size: file.size,
+        sha256: file.sha256,
+    };
+}
+
 async function extractFilesFromSourceMap(
     target: string,
     sourceMapUrl: string,
@@ -608,7 +647,7 @@ async function processSourceMapUrl(
     target: string,
     sourceMapUrl: string,
     userAgent: string,
-    result: TargetResult,
+    result: InternalTargetResult,
     options: {
         includeNonWebpackSources: boolean;
         includePatterns: string[];
@@ -698,8 +737,8 @@ async function processTarget(
         includeNonWebpackSources: boolean;
         probeSiblingSourceMaps: boolean;
     },
-): Promise<TargetResult> {
-    const result: TargetResult = {
+): Promise<InternalTargetResult> {
+    const result: InternalTargetResult = {
         target,
         success: false,
         fetchedJsFiles: 0,
@@ -878,7 +917,7 @@ export function get_output_schema() {
                     results: { type: "array" },
                     files: {
                         type: "array",
-                        description: "Extracted downloadable source files with UTF-8 content and Base64 content",
+                        description: "Extracted source file metadata. File contents are not included in tool output.",
                     },
                     summary: { type: "object" },
                     download_manifest: {
@@ -941,7 +980,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             message: "Preparing webpack source download",
         });
 
-        const results: TargetResult[] = [];
+        const internalResults: InternalTargetResult[] = [];
         for (let index = 0; index < targets.length; index += 1) {
             const target = targets[index];
             await reportMonitorProgress(input.__monitorExecution, {
@@ -951,11 +990,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 currentTarget: target,
                 message: `Extracting webpack sources from ${target}`,
             });
-            results.push(await processTarget(target, userAgent, options));
+            internalResults.push(await processTarget(target, userAgent, options));
         }
 
-        const files = results.flatMap(result => result.files);
-        await saveExtractedFiles(saveDirectory, files);
+        const internalFiles = internalResults.flatMap(result => result.files);
+        await saveExtractedFiles(saveDirectory, internalFiles);
+        const files = internalFiles.map(summarizeSourceFile);
+        const results = internalResults.map(result => ({
+            ...result,
+            files: result.files.map(summarizeSourceFile),
+        }));
 
         const successfulTargets = results.filter(result => result.success).length;
         const summary = {
@@ -964,7 +1008,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             failedTargets: targets.length - successfulTargets,
             fetchedJsFiles: results.reduce((sum, result) => sum + result.fetchedJsFiles, 0),
             fetchedSourceMaps: results.reduce((sum, result) => sum + result.fetchedSourceMaps, 0),
-            extractedFiles: files.length,
+            extractedFiles: internalFiles.length,
             skippedSourcesWithoutContent: results.reduce((sum, result) => sum + result.skippedSourcesWithoutContent, 0),
             skippedSourcesByFilter: results.reduce((sum, result) => sum + result.skippedSourcesByFilter, 0),
             skippedSourcesTooLarge: results.reduce((sum, result) => sum + result.skippedSourcesTooLarge, 0),
@@ -973,14 +1017,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const downloadManifest = files.map(file => ({
             archivePath: file.archivePath,
             savedPath: file.savedPath,
+            saveStatus: file.saveStatus,
             sourcePath: file.sourcePath,
             sourceMapUrl: file.sourceMapUrl,
             size: file.size,
             sha256: file.sha256,
             mimeType: file.mimeType,
         }));
-        const savedFiles = downloadManifest.filter((file): file is typeof file & { savedPath: string } => (
-            typeof file.savedPath === "string" && file.savedPath.length > 0
+        const savedFiles = downloadManifest.filter((file): file is typeof file & { savedPath: string; saveStatus: "saved" } => (
+            file.saveStatus === "saved" && typeof file.savedPath === "string" && file.savedPath.length > 0
         ));
 
         await reportMonitorProgress(input.__monitorExecution, {
