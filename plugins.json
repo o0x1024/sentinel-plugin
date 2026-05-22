@@ -1,6 +1,6 @@
 {
-  "version": "2.3.28",
-  "updated_at": "2026-05-21",
+  "version": "2.3.29",
+  "updated_at": "2026-05-22",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -435,12 +435,12 @@
     {
       "id": "webpack_source_downloader",
       "name": "Webpack Source Downloader",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "utility",
       "monitor_type": "web",
-      "description": "Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with UTF-8 and Base64 file payloads.",
+      "description": "Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with optional workspace directory saving.",
       "default_severity": "info",
       "tags": [
         "webpack",

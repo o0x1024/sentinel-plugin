@@ -3,7 +3,7 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.3
+ * @version 1.0.4
  * @author Sentinel Team
  * @main_category agent
  * @category utility
@@ -19,9 +19,15 @@ declare const Sentinel: {
     };
 };
 
+declare const Deno: {
+    mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+    writeTextFile(path: string, data: string): Promise<void>;
+};
+
 interface ToolInput {
     targets: string[];
     userAgent?: string;
+    saveDirectory?: string;
     maxJsFiles?: number;
     maxSourceMaps?: number;
     maxSourceFiles?: number;
@@ -76,6 +82,7 @@ interface DownloadableSourceFile {
     encoding: "utf-8";
     content: string;
     contentBase64: string;
+    savedPath?: string;
     size: number;
     sha256: string;
 }
@@ -121,15 +128,27 @@ interface ToolOutput {
         };
         download_manifest: Array<{
             archivePath: string;
+            savedPath?: string;
             sourcePath: string;
             sourceMapUrl: string;
             size: number;
             sha256: string;
             mimeType: string;
         }>;
+        saved_files: Array<{
+            archivePath: string;
+            savedPath: string;
+            sourcePath: string;
+            sourceMapUrl: string;
+            size: number;
+            sha256: string;
+            mimeType: string;
+        }>;
+        saveDirectory?: string;
         surface_artifacts: {
             frontend_source_files: Array<{
                 archivePath: string;
+                savedPath?: string;
                 sourcePath: string;
                 sourceMapUrl: string;
                 size: number;
@@ -433,6 +452,47 @@ function archiveRootForTarget(target: string): string {
         return `${url.hostname}${url.pathname.replace(/[^a-zA-Z0-9._/-]+/g, "_")}`.replace(/\/+$/g, "") || url.hostname;
     } catch {
         return "target";
+    }
+}
+
+function normalizeSaveDirectory(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.includes("\0")) {
+        throw new Error("saveDirectory must not contain NUL bytes");
+    }
+    return trimmed.replace(/[\\/]+$/g, "");
+}
+
+function safeRelativeFilePath(value: string): string {
+    const parts = value
+        .replace(/\\/g, "/")
+        .split("/")
+        .filter(part => part && part !== "." && part !== "..");
+    if (parts.length === 0) {
+        throw new Error(`Invalid archive path: ${value}`);
+    }
+    return parts.join("/");
+}
+
+function joinSavePath(baseDirectory: string, relativePath: string): string {
+    return `${baseDirectory}/${safeRelativeFilePath(relativePath)}`;
+}
+
+function parentDirectory(path: string): string {
+    const index = path.lastIndexOf("/");
+    return index > 0 ? path.slice(0, index) : ".";
+}
+
+async function saveExtractedFiles(saveDirectory: string | undefined, files: DownloadableSourceFile[]): Promise<void> {
+    if (!saveDirectory || files.length === 0) return;
+    await Deno.mkdir(saveDirectory, { recursive: true });
+    for (const file of files) {
+        const savedPath = joinSavePath(saveDirectory, file.archivePath);
+        await Deno.mkdir(parentDirectory(savedPath), { recursive: true });
+        await Deno.writeTextFile(savedPath, file.content);
+        file.savedPath = savedPath;
     }
 }
 
@@ -748,6 +808,10 @@ export function get_input_schema() {
                 description: "User-Agent header for fetching pages, bundles, and source maps",
                 default: DEFAULT_USER_AGENT,
             },
+            saveDirectory: {
+                type: "string",
+                description: "Optional directory where extracted source files are written. Pass the AI assistant working directory or a subdirectory inside it to make results available as workspace files.",
+            },
             maxJsFiles: {
                 type: "integer",
                 description: "Maximum JavaScript bundle URLs fetched per target",
@@ -821,6 +885,11 @@ export function get_output_schema() {
                         type: "array",
                         description: "Lightweight file manifest for building an archive or download list",
                     },
+                    saved_files: {
+                        type: "array",
+                        description: "Files written to saveDirectory with absolute or provided saved paths",
+                    },
+                    saveDirectory: { type: "string" },
                     surface_artifacts: { type: "object" },
                 },
             },
@@ -851,6 +920,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const userAgent = input.userAgent || DEFAULT_USER_AGENT;
+        const saveDirectory = normalizeSaveDirectory(input.saveDirectory);
         const options = {
             maxJsFiles: clampInteger(input.maxJsFiles, DEFAULT_MAX_JS_FILES, 1, 300),
             maxSourceMaps: clampInteger(input.maxSourceMaps, DEFAULT_MAX_SOURCE_MAPS, 1, 300),
@@ -885,6 +955,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const files = results.flatMap(result => result.files);
+        await saveExtractedFiles(saveDirectory, files);
+
         const successfulTargets = results.filter(result => result.success).length;
         const summary = {
             totalTargets: targets.length,
@@ -900,12 +972,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const downloadManifest = files.map(file => ({
             archivePath: file.archivePath,
+            savedPath: file.savedPath,
             sourcePath: file.sourcePath,
             sourceMapUrl: file.sourceMapUrl,
             size: file.size,
             sha256: file.sha256,
             mimeType: file.mimeType,
         }));
+        const savedFiles = downloadManifest.filter((file): file is typeof file & { savedPath: string } => (
+            typeof file.savedPath === "string" && file.savedPath.length > 0
+        ));
 
         await reportMonitorProgress(input.__monitorExecution, {
             current: targets.length,
@@ -921,6 +997,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 files,
                 summary,
                 download_manifest: downloadManifest,
+                saved_files: savedFiles,
+                saveDirectory,
                 surface_artifacts: {
                     frontend_source_files: downloadManifest,
                 },
