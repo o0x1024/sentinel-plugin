@@ -209,7 +209,7 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "2.2.4",
+      "version": "2.2.5",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -229,7 +229,7 @@
     {
       "id": "sensitive_file_scanner",
       "name": "Sensitive File Scanner",
-      "version": "1.3.4",
+      "version": "1.3.5",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
@@ -248,7 +248,7 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.2.3",
+      "version": "2.2.4",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
@@ -267,7 +267,7 @@
     {
       "id": "favicon_fingerprinter",
       "name": "Favicon Fingerprinter",
-      "version": "1.3.2",
+      "version": "1.3.3",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -288,7 +288,7 @@
     {
       "id": "service_monitor",
       "name": "Service Monitor",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -373,7 +373,7 @@
     {
       "id": "service_probe",
       "name": "Service Probe",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -396,7 +396,7 @@
     {
       "id": "directory_bruteforcer",
       "name": "Directory Bruteforcer",
-      "version": "1.2.4",
+      "version": "1.2.5",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",
@@ -529,7 +529,7 @@
     {
       "id": "xss_scanner",
       "name": "XSS Scanner",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
@@ -549,7 +549,7 @@
     {
       "id": "sql_injection_scanner",
       "name": "SQL Injection Scanner",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "author": "Sentinel Team",
       "main_category": "agent",
       "category": "vuln",
