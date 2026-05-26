@@ -246,7 +246,7 @@ function generateId(): string {
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
     const results: T[] = [];
     let index = 0;
-    const workerCount = Math.max(1, Math.min(concurrency, 16, tasks.length || 1));
+    const workerCount = Math.max(1, Math.min(concurrency, 128, tasks.length || 1));
     const workers = Array.from({ length: workerCount }, async () => {
         while (index < tasks.length) {
             const current = index++;
@@ -257,11 +257,11 @@ async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency
     return results;
 }
 
-const DEFAULT_MAX_JS_FILES = 20;
-const DEFAULT_PAGE_CRAWL_LIMIT = 20;
-const DEFAULT_MAX_PAGES = 20;
-const PAGE_FETCH_CONCURRENCY_LIMIT = 20;
-const JS_FETCH_CONCURRENCY_LIMIT = 20;
+const DEFAULT_MAX_JS_FILES = 50;
+const DEFAULT_PAGE_CRAWL_LIMIT = 50;
+const DEFAULT_MAX_PAGES = 50;
+const PAGE_FETCH_CONCURRENCY_LIMIT = 50;
+const JS_FETCH_CONCURRENCY_LIMIT = 100;
 const MAX_JS_DISCOVERY_DEPTH = 1;
 const MAX_STRING_SCAN_MATCHES = 5000;
 const MAX_PATH_CANDIDATE_LENGTH = 2048;
@@ -1580,8 +1580,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const crawlDepth = input.crawlDepth ?? 1;
-        const maxPages = Math.max(1, Math.min(input.maxPages || DEFAULT_MAX_PAGES, 50));
-        const maxJsFiles = Math.max(10, Math.min(input.maxJsFiles || DEFAULT_MAX_JS_FILES, 300));
+        const maxPages = Math.max(1, Math.min(input.maxPages || DEFAULT_MAX_PAGES, 200));
+        const maxJsFiles = Math.max(10, Math.min(input.maxJsFiles || DEFAULT_MAX_JS_FILES, 500));
         const includeSameOriginOnly = input.includeSameOriginOnly === true;
         const followSourceMaps = input.followSourceMaps === true;
         const probeSpaManifests = input.probeSpaManifests === true;
@@ -1968,7 +1968,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             });
         });
 
-        await runWithConcurrency(targetTasks, Math.min(10, validTargets.length || 1));
+        await runWithConcurrency(targetTasks, Math.min(50, validTargets.length || 1));
 
         await reportMonitorProgress(monitorExecution, {
             current: validTargets.length + 1,
