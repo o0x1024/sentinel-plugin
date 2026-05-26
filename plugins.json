@@ -649,6 +649,26 @@
         "native"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/port_monitor.ts"
+    },
+    {
+      "id": "actuator_scanner",
+      "name": "Actuator Path Scanner",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "bounty",
+      "category": "risk",
+      "monitor_type": "risk",
+      "description": "Scan for exposed Spring Boot Actuator endpoints by backtracking through API path segments. Detects sensitive actuator endpoints like /env, /heapdump, /mappings that may leak configuration, secrets, or enable remote code execution.",
+      "default_severity": "high",
+      "tags": [
+        "actuator",
+        "spring",
+        "exposure",
+        "misconfiguration",
+        "java",
+        "web"
+      ],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/actuator_scanner.ts"
     }
   ]
 }
