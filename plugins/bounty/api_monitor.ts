@@ -3,7 +3,7 @@
  * 
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.3.3
+ * @version 1.3.4
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -11,21 +11,11 @@
  * @tags api, endpoint, monitor, change-detection, rest, javascript, spa
  * @description Monitor API endpoints and HTML routes by discovering JavaScript assets from pages and bundles, extracting API-like and route-like path literals, and comparing snapshot changes over time
  */
-
-// Declare Sentinel API for JS analysis
 declare const Sentinel: {
-    AST: {
-        parse: (code: string, filename?: string) => {
-            success: boolean;
-            literals: Array<{ value: string; line: number; column: number; type: string }>;
-            errors: string[];
-        };
-    };
     Monitor?: {
         reportProgress?: (payload: Record<string, unknown>) => Promise<boolean>;
     };
 };
-
 interface MonitorExecutionContext {
     task_id: string;
     task_name: string;
@@ -38,7 +28,6 @@ interface MonitorExecutionContext {
     total_steps: number;
     imported_assets?: number;
 }
-
 async function reportMonitorProgress(
     monitorExecution: MonitorExecutionContext | undefined,
     update: Record<string, unknown>,
@@ -64,7 +53,6 @@ async function reportMonitorProgress(
         return false;
     }
 }
-
 interface ToolInput {
     targets: string[];  // Base URLs or JS files to analyze
     userAgent?: string;
@@ -247,26 +235,12 @@ type PluginGlobals = typeof globalThis & {
 
 const pluginGlobals = globalThis as PluginGlobals;
 
-// Generate UUID
 function generateId(): string {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
         const r = Math.random() * 16 | 0;
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
     });
-}
-
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
-        while (nextIndex < tasks.length) {
-            const currentIndex = nextIndex++;
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    });
-    await Promise.all(workers);
-    return results;
 }
 
 async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
@@ -283,11 +257,13 @@ async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency
     return results;
 }
 
-const DEFAULT_MAX_JS_FILES = 100;
+const DEFAULT_MAX_JS_FILES = 20;
 const DEFAULT_PAGE_CRAWL_LIMIT = 20;
 const DEFAULT_MAX_PAGES = 20;
-const PAGE_FETCH_CONCURRENCY_LIMIT = 6;
-const MAX_LITERAL_SCAN_MATCHES = 5000;
+const PAGE_FETCH_CONCURRENCY_LIMIT = 20;
+const JS_FETCH_CONCURRENCY_LIMIT = 20;
+const MAX_JS_DISCOVERY_DEPTH = 1;
+const MAX_STRING_SCAN_MATCHES = 5000;
 const MAX_PATH_CANDIDATE_LENGTH = 2048;
 const EXCLUDED_STATIC_PREFIXES = [
     "/_next/",
@@ -305,6 +281,12 @@ const EXCLUDED_STATIC_PREFIXES = [
     "/chunks/",
     "/webpack/",
     "/runtime/",
+    "/node_modules/",
+    "/public/",
+    "/media/",
+    "/vendor/",
+    "/lib/",
+    "/bundle/",
 ];
 const EXCLUDED_EXACT_PATHS = new Set([
     "/",
@@ -351,30 +333,34 @@ const EXCLUDED_STATIC_EXTENSIONS = new Set([
     "woff2",
     "ttf",
     "eot",
+    "json",
+    "xml",
+    "yaml",
+    "yml",
+    "html",
+    "htm",
+    "wasm",
+    "swf",
+    "txt",
+    "md",
 ]);
-const API_ROUTE_PREFIXES = [
-    "/api/",
-    "/rest/",
-    "/graphql",
-    "/graphiql",
-    "/content/",
-    "/channel/",
-    "/service/",
-    "/services/",
-    "/gateway/",
-    "/open/",
-    "/rpc/",
-    "/v1/",
-    "/v2/",
-    "/v3/",
-    "/v4/",
-    "/v5/",
+const EXCLUDED_HTML_TAG_PATHS = new Set([
+    "script", "style", "div", "span", "svg", "path", "link",
+    "meta", "title", "body", "head", "html", "form", "input",
+    "button", "table", "iframe", "canvas", "video", "audio",
+    "img", "source", "object", "embed", "select", "option",
+    "textarea", "label", "section", "article", "nav", "header",
+    "footer", "main", "aside", "figure", "details", "summary",
+]);
+const VENDOR_JS_FILENAME_PATTERNS = [
+    /^(?:vue|vue-router|vuex|vue-i18n)(?:[-.][a-z0-9]+)*\.js$/i,
+    /^(?:element-plus|echarts|vant|moment|axios|nprogress|vuedraggable|xe-utils)(?:[-.][a-z0-9]+)*\.js$/i,
+    /^(?:vendor|vendors|chunk-vendors)(?:[-.][a-z0-9]+)*\.js$/i,
 ];
-const API_ROUTE_EXACT_PATHS = new Set([
-    "/api",
-    "/rest",
-    "/graphql",
-    "/graphiql",
+const VENDOR_JS_PATH_SEGMENTS = new Set([
+    "node_modules",
+    "vendor",
+    "vendors",
 ]);
 
 function normalizeCommonPathCandidate(value: string, allowRoot: boolean): string | null {
@@ -401,15 +387,23 @@ function normalizeCommonPathCandidate(value: string, allowRoot: boolean): string
         return null;
     }
 
-    return normalizedPath;
-}
+    if (normalizedPath.length <= 2) return null;                    // /a, /b
+    if (/^\/\d+$/.test(normalizedPath)) return null;                // /1, /123
+    if (/^\/[A-Z]$/.test(normalizedPath)) return null;              // /M, /L (SVG commands)
+    if (/^\/\./.test(normalizedPath)) return null;                  // /.env, /.git
+    if (/[^\x20-\x7E]/.test(normalizedPath)) return null;          // non-ASCII garbled paths
+    if (/[(),;={}[\]'"<>!@#$%^&*|~`]/.test(normalizedPath)) return null; // code fragments
+    if (/^\/(?:19|20)\d{2}\//.test(normalizedPath)) return null;   // W3C namespace paths (/1999/xlink, /2000/svg)
 
-function looksLikeApiPath(path: string): boolean {
-    if (API_ROUTE_EXACT_PATHS.has(path)) {
-        return true;
+    const segments = normalizedPath.split("/").filter(Boolean);
+    if (segments.length <= 3 && segments.every(s => s.length <= 2)) return null; // all-short segments like /a/b
+
+    if (/^\/([a-z]+)$/i.test(normalizedPath)) {
+        const tag = normalizedPath.slice(1).toLowerCase();
+        if (EXCLUDED_HTML_TAG_PATHS.has(tag)) return null;
     }
 
-    return API_ROUTE_PREFIXES.some(prefix => path.startsWith(prefix));
+    return normalizedPath;
 }
 
 function extractPathCandidate(value: string): string | null {
@@ -442,21 +436,11 @@ function isStaticAssetPath(path: string): boolean {
 }
 
 function normalizeEndpointPath(value: string): string | null {
-    const normalizedPath = normalizeCommonPathCandidate(value, false);
-    if (!normalizedPath) return null;
-    if (!looksLikeApiPath(normalizedPath)) {
-        return null;
-    }
-    return normalizedPath;
+    return normalizeCommonPathCandidate(value, false);
 }
 
 function normalizeHtmlRoutePath(value: string): string | null {
-    const normalizedPath = normalizeCommonPathCandidate(value, true);
-    if (!normalizedPath) return null;
-    if (looksLikeApiPath(normalizedPath)) {
-        return null;
-    }
-    return normalizedPath;
+    return normalizeCommonPathCandidate(value, true);
 }
 
 function pushApiEndpoint(
@@ -493,27 +477,156 @@ function pushHtmlRoute(
     });
 }
 
+function maybePushStringCandidate(candidates: string[], value: string): boolean {
+    const candidate = value.trim();
+    if (!candidate || (!candidate.includes("/") && !/^https?:/i.test(candidate))) {
+        return false;
+    }
+    candidates.push(candidate);
+    return candidates.length >= MAX_STRING_SCAN_MATCHES;
+}
+
+function readEscapedJsChar(content: string, index: number): { value: string; nextIndex: number } {
+    const escaped = content[index + 1] || "";
+    if (escaped === "x") {
+        const hex = content.slice(index + 2, index + 4);
+        if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+            return { value: String.fromCharCode(parseInt(hex, 16)), nextIndex: index + 4 };
+        }
+    }
+    if (escaped === "u") {
+        if (content[index + 2] === "{") {
+            const end = content.indexOf("}", index + 3);
+            const hex = end > index + 3 ? content.slice(index + 3, end) : "";
+            if (/^[0-9a-fA-F]{1,6}$/.test(hex)) {
+                return { value: String.fromCodePoint(parseInt(hex, 16)), nextIndex: end + 1 };
+            }
+        }
+        const hex = content.slice(index + 2, index + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+            return { value: String.fromCharCode(parseInt(hex, 16)), nextIndex: index + 6 };
+        }
+    }
+    return { value: escaped, nextIndex: index + 2 };
+}
+
+function skipJsComment(content: string, index: number): number | null {
+    if (content[index] !== "/") return null;
+    if (content[index + 1] === "/") {
+        const nextLine = content.indexOf("\n", index + 2);
+        return nextLine === -1 ? content.length : nextLine + 1;
+    }
+    if (content[index + 1] === "*") {
+        const end = content.indexOf("*/", index + 2);
+        return end === -1 ? content.length : end + 2;
+    }
+    return null;
+}
+
+function skipQuotedJsValue(content: string, index: number): number {
+    const quote = content[index];
+    let current = index + 1;
+    while (current < content.length) {
+        if (content[current] === "\\") {
+            current += 2;
+            continue;
+        }
+        if (content[current] === quote) {
+            return current + 1;
+        }
+        current += 1;
+    }
+    return content.length;
+}
+
+function skipTemplateExpression(content: string, index: number): number {
+    let current = index;
+    let depth = 1;
+    while (current < content.length && depth > 0) {
+        const commentEnd = skipJsComment(content, current);
+        if (commentEnd !== null) {
+            current = commentEnd;
+            continue;
+        }
+        const char = content[current];
+        if (char === "\"" || char === "'" || char === "`") {
+            current = skipQuotedJsValue(content, current);
+            continue;
+        }
+        if (char === "{") depth += 1;
+        if (char === "}") depth -= 1;
+        current += 1;
+    }
+    return current;
+}
+
+function extractStringPathCandidates(content: string): string[] {
+    const candidates: string[] = [];
+    let index = 0;
+    while (index < content.length && candidates.length < MAX_STRING_SCAN_MATCHES) {
+        const commentEnd = skipJsComment(content, index);
+        if (commentEnd !== null) {
+            index = commentEnd;
+            continue;
+        }
+        const quote = content[index];
+        if (quote !== "\"" && quote !== "'" && quote !== "`") {
+            index += 1;
+            continue;
+        }
+        const isTemplate = quote === "`";
+        let value = "";
+        let tooLong = false;
+        index += 1;
+        while (index < content.length) {
+            const char = content[index];
+            if (char === "\\") {
+                const escaped = readEscapedJsChar(content, index);
+                if (!tooLong) {
+                    value += escaped.value;
+                    tooLong = value.length > MAX_PATH_CANDIDATE_LENGTH;
+                }
+                index = escaped.nextIndex;
+                continue;
+            }
+            if (char === quote) {
+                index += 1;
+                break;
+            }
+            if (isTemplate && char === "$" && content[index + 1] === "{") {
+                if (!tooLong && maybePushStringCandidate(candidates, value)) return candidates;
+                value = "";
+                tooLong = false;
+                index = skipTemplateExpression(content, index + 2);
+                continue;
+            }
+            if (!tooLong) {
+                value += char;
+                tooLong = value.length > MAX_PATH_CANDIDATE_LENGTH;
+            }
+            index += 1;
+        }
+        if (!tooLong && maybePushStringCandidate(candidates, value)) {
+            return candidates;
+        }
+    }
+    return candidates;
+}
+
 function extractPathsFromJs(content: string, source: string): {
     htmlRoutes: HtmlRoute[];
     apiEndpoints: ApiEndpoint[];
 } {
-    const htmlRoutes: HtmlRoute[] = [];
     const apiEndpoints: ApiEndpoint[] = [];
-    const seenHtmlRoutes = new Set<string>();
     const seenApiEndpoints = new Set<string>();
-    const result = Sentinel.AST.parse(content, source);
-    for (const literal of result.literals.slice(0, MAX_LITERAL_SCAN_MATCHES)) {
-        const candidate = literal.value.trim();
+    for (const candidate of extractStringPathCandidates(content)) {
         pushApiEndpoint(apiEndpoints, seenApiEndpoints, candidate, source);
-        pushHtmlRoute(htmlRoutes, seenHtmlRoutes, candidate, source);
     }
-
     return {
-        htmlRoutes,
+        htmlRoutes: [],
         apiEndpoints,
     };
 }
-
 function simpleHash(str: string): string {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
@@ -555,6 +668,17 @@ function looksLikeJs(path: string): boolean {
     if (/\.[a-f0-9]{6,10}\.js$/i.test(clean)) return true;
     if (/(?:chunk|bundle|vendor|app|main|index)\.[a-f0-9]+/i.test(clean)) return true;
     return false;
+}
+
+function shouldSkipVendorJs(url: string): boolean {
+    const pathname = new URL(url).pathname;
+    const pathSegments = pathname.split("/").filter(Boolean).map(segment => segment.toLowerCase());
+    if (pathSegments.some(segment => VENDOR_JS_PATH_SEGMENTS.has(segment))) {
+        return true;
+    }
+
+    const filename = pathSegments[pathSegments.length - 1] || "";
+    return VENDOR_JS_FILENAME_PATTERNS.some(pattern => pattern.test(filename));
 }
 
 async function fetchDocument(
@@ -960,12 +1084,14 @@ function pushJsLink(
     includeSameOriginOnly: boolean,
     baseUrl: string,
 ) {
-    if (collectedLinks.length >= maxJsFiles) return;
-    if (!link.url || seenUrls.has(link.url)) return;
-    if (includeSameOriginOnly && !isSameOrigin(baseUrl, link.url)) return;
+    if (collectedLinks.length >= maxJsFiles) return false;
+    if (!link.url || seenUrls.has(link.url)) return false;
+    if (includeSameOriginOnly && !isSameOrigin(baseUrl, link.url)) return false;
+    if (link.type !== "sourcemap" && shouldSkipVendorJs(link.url)) return false;
 
     seenUrls.add(link.url);
     collectedLinks.push(link);
+    return true;
 }
 
 async function discoverJavascriptAssets(
@@ -1106,9 +1232,9 @@ async function discoverJavascriptAssets(
         discoveryMetrics.manifestRequests = manifestUrls.length;
         const manifestProbeStartedAt = Date.now();
         const manifestResults = await runWithConcurrency(manifestUrls.map(manifestUrl => async () => ({
-                manifestUrl,
-                result: await fetchDocument(manifestUrl, userAgent, "application/json,*/*"),
-            })), 3);
+            manifestUrl,
+            result: await fetchDocument(manifestUrl, userAgent, "application/json,*/*"),
+        })), manifestUrls.length);
         discoveryTimings.manifestProbeMs += Date.now() - manifestProbeStartedAt;
 
         for (const { manifestUrl, result } of manifestResults) {
@@ -1122,26 +1248,29 @@ async function discoverJavascriptAssets(
     }
 
     if (crawlDepth > 0 && jsLinks.length > 0) {
-        const jsFetchQueue = jsLinks
+        const jsFetchConcurrency = JS_FETCH_CONCURRENCY_LIMIT;
+        const jsFetchQueue: Array<{ link: JsLink; depth: number }> = jsLinks
             .filter(link => followSourceMaps || link.type !== "sourcemap")
-            .slice(0, maxJsFiles);
+            .slice(0, maxJsFiles)
+            .map(link => ({ link, depth: 0 }));
         const visitedScriptUrls = new Set<string>();
 
         while (jsFetchQueue.length > 0 && scriptContents.length < maxJsFiles * 2) {
-            const batch = jsFetchQueue.splice(0, pageFetchConcurrency);
-            const batchResults = await runWithConcurrency(batch.map(link => async () => ({
-                    fetchStartedAt: Date.now(),
-                    link,
-                    result: await fetchDocument(
-                        link.url,
-                        userAgent,
-                        link.type === "sourcemap"
-                            ? "application/json,text/plain,*/*"
-                            : "application/javascript,text/javascript,text/plain,*/*",
-                    ),
-                })), Math.min(pageFetchConcurrency, batch.length || 1));
+            const batch = jsFetchQueue.splice(0, jsFetchConcurrency);
+            const batchResults = await runWithConcurrency(batch.map(({ link, depth }) => async () => ({
+                fetchStartedAt: Date.now(),
+                link,
+                depth,
+                result: await fetchDocument(
+                    link.url,
+                    userAgent,
+                    link.type === "sourcemap"
+                        ? "application/json,text/plain,*/*"
+                        : "application/javascript,text/javascript,text/plain,*/*",
+                ),
+            })), Math.min(jsFetchConcurrency, batch.length || 1));
 
-            for (const { link, result, fetchStartedAt } of batchResults) {
+            for (const { link, result, fetchStartedAt, depth } of batchResults) {
                 const fetchDurationMs = Date.now() - fetchStartedAt;
                 discoveryMetrics.jsFetchCount += 1;
                 discoveryTimings.jsFetchMs += fetchDurationMs;
@@ -1179,26 +1308,28 @@ async function discoverJavascriptAssets(
                     content: result.text,
                 });
 
-                const nestedDiscoveryStartedAt = Date.now();
-                for (const nestedLink of extractJsFromContent(result.text, link.url)) {
-                    if (nestedLink.type === "sourcemap" && !followSourceMaps) {
-                        continue;
-                    }
-                    if (!seenJsUrls.has(nestedLink.url)) {
-                        pushJsLink(
-                            jsLinks,
-                            seenJsUrls,
-                            nestedLink,
-                            maxJsFiles,
-                            includeSameOriginOnly,
-                            baseUrl,
-                        );
-                        if (!visitedScriptUrls.has(nestedLink.url) && nestedLink.type !== "inline") {
-                            jsFetchQueue.push(nestedLink);
+                if (depth < MAX_JS_DISCOVERY_DEPTH) {
+                    const nestedDiscoveryStartedAt = Date.now();
+                    for (const nestedLink of extractJsFromContent(result.text, link.url)) {
+                        if (nestedLink.type === "sourcemap" && !followSourceMaps) {
+                            continue;
+                        }
+                        if (!seenJsUrls.has(nestedLink.url)) {
+                            const linkAdded = pushJsLink(
+                                jsLinks,
+                                seenJsUrls,
+                                nestedLink,
+                                maxJsFiles,
+                                includeSameOriginOnly,
+                                baseUrl,
+                            );
+                            if (linkAdded && !visitedScriptUrls.has(nestedLink.url) && nestedLink.type !== "inline") {
+                                jsFetchQueue.push({ link: nestedLink, depth: depth + 1 });
+                            }
                         }
                     }
+                    discoveryTimings.nestedJsDiscoveryMs += Date.now() - nestedDiscoveryStartedAt;
                 }
-                discoveryTimings.nestedJsDiscoveryMs += Date.now() - nestedDiscoveryStartedAt;
             }
         }
     }
@@ -1215,17 +1346,16 @@ async function discoverJavascriptAssets(
     };
 }
 
-// Calculate risk score
 function calculateRiskScore(severity: string, eventType: string, count: number): number {
     let score = 0;
-    
+
     switch (severity) {
         case "critical": score += 40; break;
         case "high": score += 30; break;
         case "medium": score += 20; break;
         case "low": score += 10; break;
     }
-    
+
     switch (eventType) {
         case "html_routes_added": score += 10; break;
         case "html_routes_removed": score += 8; break;
@@ -1233,10 +1363,9 @@ function calculateRiskScore(severity: string, eventType: string, count: number):
         case "api_endpoints_removed": score += 15; break;
         case "api_change": score += 15; break;
     }
-    
-    // Bonus for multiple changes
+
     score += Math.min(count * 2, 20);
-    
+
     return Math.min(score, 100);
 }
 
@@ -1274,14 +1403,14 @@ export function get_input_schema() {
             maxJsFiles: {
                 type: "integer",
                 description: "Maximum JavaScript files to analyze per target",
-                default: 100,
+                default: 20,
                 minimum: 10,
                 maximum: 300
             },
             includeSameOriginOnly: {
                 type: "boolean",
                 description: "Only analyze JavaScript assets from the same origin",
-                default: false
+                default: true
             },
             followSourceMaps: {
                 type: "boolean",
@@ -1291,7 +1420,7 @@ export function get_input_schema() {
             probeSpaManifests: {
                 type: "boolean",
                 description: "Probe common SPA manifest endpoints to discover bundled JS",
-                default: true
+                default: false
             },
             previousSnapshots: {
                 type: "object",
@@ -1440,8 +1569,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 error: "Invalid input: targets array is required"
             };
         }
-        
-        // Filter out empty strings
+
         const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
         if (validTargets.length === 0) {
             return {
@@ -1449,14 +1577,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 error: "Invalid input: targets array must contain at least one non-empty string"
             };
         }
-        
+
         const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
         const crawlDepth = input.crawlDepth ?? 1;
         const maxPages = Math.max(1, Math.min(input.maxPages || DEFAULT_MAX_PAGES, 50));
         const maxJsFiles = Math.max(10, Math.min(input.maxJsFiles || DEFAULT_MAX_JS_FILES, 300));
         const includeSameOriginOnly = input.includeSameOriginOnly === true;
         const followSourceMaps = input.followSourceMaps === true;
-        const probeSpaManifests = input.probeSpaManifests !== false;
+        const probeSpaManifests = input.probeSpaManifests === true;
         const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
         const totalProgressUnits = validTargets.length + 2;
@@ -1467,11 +1595,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             phase: "prepare",
             message: "Preparing API discovery",
         });
-        
+
         const results: ApiResult[] = [];
         const changeEvents: ChangeEvent[] = [];
         const newSnapshots: Record<string, ApiSnapshot> = {};
-        
+
         let successfulChecks = 0;
         let failedChecks = 0;
         let totalHtmlRoutes = 0;
@@ -1484,18 +1612,18 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let routeChanges = 0;
         let apiChanges = 0;
         let completedTargets = 0;
-        
+
         const targetTasks = validTargets.map((target) => async () => {
             let baseUrl = target;
             if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
                 baseUrl = `https://${baseUrl}`;
             }
-            
+
             const result: ApiResult = {
                 baseUrl,
                 success: false,
             };
-            
+
             try {
                 const targetStartedAt = Date.now();
                 const allHtmlRoutes: HtmlRoute[] = [];
@@ -1520,7 +1648,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 let sourceMapFetchCount = 0;
                 let jsLinksDiscovered = 0;
                 let inlineScriptCount = 0;
-                
+
                 const targetFetchStartedAt = Date.now();
                 const pageResult = await fetchDocument(
                     baseUrl,
@@ -1535,7 +1663,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     results.push(result);
                     return;
                 }
-                
+
                 successfulChecks++;
 
                 const pageContent = canAnalyzePageResponse(pageResult) ? pageResult.text : "";
@@ -1597,7 +1725,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     }
                 }
                 astExtractionMs = Date.now() - astExtractionStartedAt;
-                
+
                 const uniqueHtmlRoutes: HtmlRoute[] = [];
                 const seenHtmlRoutes = new Set<string>();
                 for (const route of allHtmlRoutes) {
@@ -1617,14 +1745,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 totalHtmlRoutes += uniqueHtmlRoutes.length;
                 totalApiEndpoints += uniqueApiEndpoints.length;
                 htmlRoutesDiscovered = uniqueHtmlRoutes.length;
-                
+
                 const snapshot: ApiSnapshot = {
                     baseUrl,
                     htmlRoutes: uniqueHtmlRoutes,
                     apiEndpoints: uniqueApiEndpoints,
                     lastChecked: new Date().toISOString(),
                 };
-                
+
                 result.success = true;
                 result.snapshot = snapshot;
                 newSnapshots[baseUrl] = snapshot;
@@ -1636,7 +1764,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     currentTarget: baseUrl,
                     message: `Analyzed ${jsFilesAnalyzed} JS files and discovered ${uniqueHtmlRoutes.length} HTML routes and ${uniqueApiEndpoints.length} API endpoints`,
                 });
-                
+
                 const compareStartedAt = Date.now();
                 const prevSnapshot = previousSnapshots[baseUrl];
                 if (prevSnapshot) {
@@ -1707,7 +1835,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     if (addedApiEndpoints.length > 0) {
                         apiChanges++;
                         addedApiEndpointsCount += addedApiEndpoints.length;
-                        
+
                         const event: ChangeEvent = {
                             id: generateId(),
                             assetId: baseUrl,
@@ -1728,11 +1856,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, addedApiEndpoints.length);
                         changeEvents.push(event);
                     }
-                    
+
                     if (removedApiEndpoints.length > 0) {
                         apiChanges++;
                         removedApiEndpointsCount += removedApiEndpoints.length;
-                        
+
                         const event: ChangeEvent = {
                             id: generateId(),
                             assetId: baseUrl,
@@ -1823,12 +1951,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     jsLinksDiscovered,
                     inlineScriptCount,
                 };
-                
+
             } catch (error: any) {
                 result.error = error.message || String(error);
                 failedChecks++;
             }
-            
+
             results.push(result);
             completedTargets += 1;
             await reportMonitorProgress(monitorExecution, {
@@ -1840,7 +1968,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             });
         });
 
-        await runSequentially(targetTasks);
+        await runWithConcurrency(targetTasks, Math.min(10, validTargets.length || 1));
 
         await reportMonitorProgress(monitorExecution, {
             current: validTargets.length + 1,
@@ -1855,7 +1983,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             phase: "build",
             message: "Building API results",
         });
-        
+
         return {
             success: true,
             data: {
@@ -1878,7 +2006,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 },
             },
         };
-        
+
     } catch (error: any) {
         return {
             success: false,

@@ -609,7 +609,7 @@
     {
       "id": "api_monitor",
       "name": "API Monitor",
-      "version": "1.3.3",
+      "version": "1.3.4",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
