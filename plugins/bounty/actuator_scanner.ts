@@ -8,6 +8,7 @@
  * @main_category bounty
  * @category risk
  * @monitor_type risk
+ * @target_asset_types web, api
  * @default_severity high
  * @tags actuator, spring, exposure, misconfiguration, java, web
  * @description Scan for exposed Spring Boot Actuator endpoints by backtracking through API path segments. Detects sensitive actuator endpoints like /env, /heapdump, /mappings that may leak configuration, secrets, or enable remote code execution.
