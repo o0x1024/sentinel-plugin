@@ -1,6 +1,6 @@
 {
-  "version": "2.3.30",
-  "updated_at": "2026-05-22",
+  "version": "2.3.31",
+  "updated_at": "2026-05-26",
   "plugins": [
     {
       "id": "sql_injection_detector",

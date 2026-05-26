@@ -631,6 +631,8 @@ export function get_input_schema() {
             },
             dictionaryId: {
                 type: "string",
+                "x-control": "dictionary-picker",
+                "x-dictionary-type": "fingerprint_rule",
                 description: "Structured fingerprint dictionary ID or name",
             },
             dictionaryEntries: {

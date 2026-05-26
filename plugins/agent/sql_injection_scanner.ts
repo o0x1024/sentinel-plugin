@@ -351,6 +351,8 @@ export function get_input_schema() {
             },
             dictionaryId: {
                 type: "string",
+                "x-control": "dictionary-picker",
+                "x-dictionary-type": "sql_injection_payload",
                 description: "Dictionary ID or name for SQLi payloads"
             },
             timeThreshold: {

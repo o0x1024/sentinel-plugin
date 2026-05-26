@@ -220,6 +220,8 @@ export function get_input_schema() {
             },
             dictionaryId: {
                 type: "string",
+                "x-control": "dictionary-picker",
+                "x-dictionary-type": "xss_payload",
                 description: "Dictionary ID or name for XSS payloads"
             }
         }

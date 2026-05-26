@@ -176,6 +176,8 @@ export function get_input_schema() {
             },
             dictionaryId: {
                 type: "string",
+                "x-control": "dictionary-picker",
+                "x-dictionary-type": "sensitive_file",
                 description: "Structured dictionary ID or name used to resolve sensitive file rules"
             },
             dictionaryEntries: {

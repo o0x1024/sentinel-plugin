@@ -165,7 +165,7 @@ export function get_input_schema() {
             url: { type: "string", description: "Target URL" },
             base_url: { type: "string", description: "Base URL alias" },
             targets: { type: "array", items: { type: "string" }, description: "Multiple target URLs" },
-            dictionaryId: { type: "string", description: "Structured fingerprint dictionary ID or name" },
+            dictionaryId: { type: "string", "x-control": "dictionary-picker", "x-dictionary-type": "fingerprint_rule", description: "Structured fingerprint dictionary ID or name" },
             dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
             concurrency: {
                 type: "integer",

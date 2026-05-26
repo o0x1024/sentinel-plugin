@@ -214,6 +214,8 @@ export function get_input_schema() {
             },
             dictionaryId: {
                 type: "string",
+                "x-control": "dictionary-picker",
+                "x-dictionary-type": "path",
                 description: "Dictionary ID or name from Sentinel dictionary module (overrides wordlist)"
             },
             extensions: {
