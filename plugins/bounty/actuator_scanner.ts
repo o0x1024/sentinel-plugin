@@ -3,7 +3,7 @@
  *
  * @plugin actuator_scanner
  * @name Actuator Path Scanner
- * @version 1.0.0
+ * @version 1.1.0
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -116,27 +116,6 @@ interface Soft404Baseline {
 const ACTUATOR_ENDPOINTS: ActuatorEndpointDef[] = [
     { name: "env", severity: "critical", keys: ["propertySources", "activeProfiles", "systemProperties", "systemEnvironment"], description: "Environment properties exposure - may contain secrets, database credentials, API keys" },
     { name: "info", severity: "low", keys: ["app", "build", "git"], description: "Application info - may reveal version and build details" },
-    // { name: "heapdump", severity: "critical", keys: [], description: "JVM heap dump - contains in-memory secrets, session tokens, and sensitive data" },
-    // { name: "shutdown", severity: "critical", keys: ["message"], description: "Remote shutdown endpoint - allows denial of service" },
-    // { name: "restart", severity: "critical", keys: ["message"], description: "Remote restart endpoint - allows denial of service" },
-    // { name: "jolokia", severity: "critical", keys: ["request", "value", "agent", "config"], description: "JMX over HTTP - may allow remote code execution" },
-    // { name: "mappings", severity: "high", keys: ["contexts", "dispatcherServlets", "servletFilters", "handler"], description: "URL mapping exposure - reveals all API endpoints and internal routes" },
-    // { name: "beans", severity: "high", keys: ["contexts", "beans", "scope", "dependencies"], description: "Spring beans exposure - reveals application architecture and dependencies" },
-    // { name: "configprops", severity: "high", keys: ["contexts", "beans", "prefix", "properties"], description: "Configuration properties - may expose sensitive configuration values" },
-    // { name: "conditions", severity: "high", keys: ["contexts", "positiveMatches", "negativeMatches", "unconditionalClasses"], description: "Auto-configuration conditions report" },
-    // { name: "loggers", severity: "high", keys: ["levels", "loggers", "effectiveLevel", "configuredLevel"], description: "Logger configuration - can be modified to enable debug logging" },
-    // { name: "threaddump", severity: "high", keys: ["threads", "threadName", "threadState", "stackTrace"], description: "Thread dump - reveals internal execution state and stack traces" },
-    // { name: "metrics", severity: "medium", keys: ["names", "measurements", "availableTags"], description: "Application metrics exposure" },
-    // { name: "httptrace", severity: "high", keys: ["traces", "timestamp", "principal", "request", "response"], description: "HTTP trace - may contain authentication tokens and session data" },
-    // { name: "trace", severity: "high", keys: ["traces", "timestamp", "info"], description: "Legacy trace endpoint (Spring Boot 1.x)" },
-    // { name: "auditevents", severity: "medium", keys: ["events", "timestamp", "principal", "type"], description: "Audit events - reveals authentication attempts and user activity" },
-    // { name: "scheduledtasks", severity: "medium", keys: ["cron", "fixedDelay", "fixedRate"], description: "Scheduled tasks exposure - reveals internal job scheduling" },
-    // { name: "flyway", severity: "medium", keys: ["contexts", "flywayBeans", "migrations"], description: "Flyway migration info - reveals database schema history" },
-    // { name: "liquibase", severity: "medium", keys: ["contexts", "liquibaseBeans", "changeSets"], description: "Liquibase migration info - reveals database schema history" },
-    // { name: "health", severity: "medium", keys: ["status", "components", "details", "diskSpace"], description: "Health check with component details" },
-    // { name: "gateway/routes", severity: "high", keys: ["route_id", "predicates", "filters", "uri"], description: "Spring Cloud Gateway routes - reveals internal routing and backend services" },
-    // { name: "caches", severity: "medium", keys: ["cacheManagers", "caches"], description: "Cache manager exposure" },
-    // { name: "sessions", severity: "high", keys: ["sessions", "sessionId", "principalName"], description: "Active sessions - may allow session hijacking" },
 ];
 
 const pluginGlobals = globalThis as typeof globalThis & {
@@ -178,16 +157,16 @@ export function get_input_schema() {
             concurrency: {
                 type: "integer",
                 description: "Maximum concurrent requests",
-                default: 16,
+                default: 100,
                 minimum: 1,
-                maximum: 64,
+                maximum: 200,
             },
             timeout: {
                 type: "integer",
                 description: "Per-request timeout in milliseconds",
-                default: 5000,
+                default: 3000,
                 minimum: 1000,
-                maximum: 30000,
+                maximum: 10000,
             },
         },
     };
@@ -283,12 +262,15 @@ function getPathSegments(url: string): string[] {
     }
 }
 
+const MAX_BACKTRACK_DEPTH = 3;
+
 function generateBacktrackPaths(apiPath: string, endpointNames: string[], includeActuatorPrefix: boolean): string[] {
     const origin = extractOrigin(apiPath);
     const segments = getPathSegments(apiPath);
     const probeUrls: string[] = [];
+    const maxDepth = Math.min(segments.length, MAX_BACKTRACK_DEPTH);
 
-    for (let depth = segments.length; depth >= 0; depth--) {
+    for (let depth = maxDepth; depth >= 0; depth--) {
         const basePath = depth === 0 ? "" : "/" + segments.slice(0, depth).join("/");
         for (const endpoint of endpointNames) {
             probeUrls.push(`${origin}${basePath}/${endpoint}`);
@@ -319,14 +301,16 @@ function randomProbePath(): string {
     return `sentinel-actuator-baseline-${seed}`;
 }
 
-async function buildSoft404Baseline(origin: string, userAgent: string): Promise<Soft404Baseline | null> {
+async function buildSoft404Baseline(origin: string, userAgent: string, timeout: number): Promise<Soft404Baseline | null> {
     const baselineUrl = `${origin}/${randomProbePath()}`;
     try {
         const response = await fetch(baselineUrl, {
             method: "GET",
             headers: { "User-Agent": userAgent, "Accept": "application/json, text/html, */*" },
             redirect: "follow",
-        });
+            signal: AbortSignal.timeout(timeout),
+            maxBodyBytes: 32768,
+        } as any);
         const body = await response.text();
         return {
             status: response.status,
@@ -447,21 +431,32 @@ async function probeActuatorUrl(
     endpointDef: ActuatorEndpointDef,
     userAgent: string,
     baseline: Soft404Baseline | null,
+    timeout: number,
 ): Promise<ProbeResult> {
     try {
+        const isHeapdump = endpointDef.name === "heapdump";
         const response = await fetch(url, {
-            method: "GET",
+            method: isHeapdump ? "HEAD" : "GET",
             headers: {
                 "User-Agent": userAgent,
                 "Accept": "application/json, application/vnd.spring-boot.actuator.v3+json, */*",
             },
             redirect: "follow",
-        });
+            signal: AbortSignal.timeout(timeout),
+            maxBodyBytes: 32768,
+        } as any);
 
         const status = response.status;
 
         if (status === 404 || status === 403 || status === 401 || status === 405 || status >= 500) {
             return { url, endpoint: endpointDef.name, confirmed: false, status };
+        }
+
+        if (isHeapdump) {
+            const contentType = (response.headers?.get?.("content-type") || "").toLowerCase();
+            const confirmed = contentType.includes("application/octet-stream") ||
+                contentType.includes("application/x-heap-dump");
+            return { url, endpoint: endpointDef.name, confirmed, status, evidence: confirmed ? `Content-Type: ${contentType}` : undefined };
         }
 
         const body = await response.text();
@@ -496,7 +491,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
 
         const userAgent = input.userAgent || "Sentinel-Actuator-Scanner/1.0";
-        const concurrency = Math.max(1, Math.min(64, Number(input.concurrency) || 16));
+        const concurrency = Math.max(1, Math.min(64, Number(input.concurrency) || 50));
+        const timeout = Math.max(1000, Math.min(30000, Number(input.timeout) || 5000));
         const includeActuatorPrefix = input.include_actuator_prefix !== false;
         const monitorExecution = input.__monitorExecution;
 
@@ -561,7 +557,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const baselineMap = new Map<string, Soft404Baseline | null>();
         await runWithConcurrency(
             origins.map(origin => async () => {
-                const baseline = await buildSoft404Baseline(origin, userAgent);
+                const baseline = await buildSoft404Baseline(origin, userAgent, timeout);
                 baselineMap.set(origin, baseline);
             }),
             Math.min(concurrency, origins.length),
@@ -581,6 +577,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let completed = 0;
 
         const confirmedPrefixes = new Set<string>();
+        const deadOrigins = new Set<string>();
+        const originErrorCount = new Map<string, number>();
+        const ORIGIN_ERROR_THRESHOLD = 5;
 
         const probeTasks = deduplicatedUrls.map(url => async () => {
             const endpointDef = getEndpointDef(url);
@@ -590,13 +589,24 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
 
             const origin = extractOrigin(url);
+
+            if (deadOrigins.has(origin)) {
+                completed++;
+                return;
+            }
+
             const baseline = baselineMap.get(origin) || null;
 
-            const result = await probeActuatorUrl(url, endpointDef, userAgent, baseline);
+            const result = await probeActuatorUrl(url, endpointDef, userAgent, baseline, timeout);
             requestsMade++;
 
             if (result.error) {
                 errors++;
+                const count = (originErrorCount.get(origin) || 0) + 1;
+                originErrorCount.set(origin, count);
+                if (count >= ORIGIN_ERROR_THRESHOLD) {
+                    deadOrigins.add(origin);
+                }
             }
 
             if (result.confirmed) {
