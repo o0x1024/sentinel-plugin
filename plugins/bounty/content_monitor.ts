@@ -3,7 +3,7 @@
  * 
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.3
+ * @version 1.1.4
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -94,6 +94,8 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
+
+const PAGE_FETCH_TIMEOUT_MS = 12000;
 
 async function reportMonitorProgress(
     monitorExecution: MonitorExecutionContext | undefined,
@@ -368,7 +370,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         "User-Agent": userAgent,
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     },
-                    timeout: 15000,
+                    timeout: PAGE_FETCH_TIMEOUT_MS,
                 });
                 
                 const content = await response.text();

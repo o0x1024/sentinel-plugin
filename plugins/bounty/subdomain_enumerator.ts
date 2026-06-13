@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.4
+ * @version 2.2.5
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -154,7 +154,7 @@ const AVAILABLE_SOURCES = [
 
 type DataSource = typeof AVAILABLE_SOURCES[number];
 
-const DEFAULT_FETCH_TIMEOUT_MS = 10000;
+const DEFAULT_FETCH_TIMEOUT_MS = 15000;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 const SOURCE_PRIORITY: Partial<Record<DataSource, number>> = {

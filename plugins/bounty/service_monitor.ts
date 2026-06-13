@@ -3,7 +3,7 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.4
+ * @version 1.0.6
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -497,6 +497,8 @@ function extractProductInfo(banner?: string, serverHeader?: string): {
     };
 }
 
+const SERVICE_FETCH_TIMEOUT_MS = 3000;
+
 async function fingerprintHttp(
     host: string,
     port: number,
@@ -509,7 +511,7 @@ async function fingerprintHttp(
         {
             method: "GET",
             redirect: followRedirects ? "follow" : "manual",
-            timeout: 10000,
+            timeout: SERVICE_FETCH_TIMEOUT_MS,
         },
     );
 

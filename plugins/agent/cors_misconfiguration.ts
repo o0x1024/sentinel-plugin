@@ -3,7 +3,7 @@
  * 
  * @plugin cors_misconfiguration
  * @name CORS Misconfiguration Detector
- * @version 1.1.2
+ * @version 1.1.3
  * @author Sentinel Team
  * @main_category agent
  * @category vuln

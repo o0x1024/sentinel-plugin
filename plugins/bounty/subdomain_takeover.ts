@@ -3,7 +3,7 @@
  * 
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.1.3
+ * @version 1.1.4
  * @author Sentinel Team
  * @main_category bounty
  * @category vuln
@@ -564,6 +564,9 @@ export function get_output_schema() {
 
 pluginGlobals.get_output_schema = get_output_schema;
 
+const DNS_FETCH_TIMEOUT_MS = 5000;
+const HTTP_FETCH_TIMEOUT_MS = 8000;
+
 /**
  * Resolve CNAME for a subdomain using DNS-over-HTTPS
  */
@@ -576,7 +579,7 @@ async function resolveCname(subdomain: string): Promise<string | null> {
                 headers: {
                     "Accept": "application/dns-json",
                 },
-                timeout: 10000,
+                timeout: DNS_FETCH_TIMEOUT_MS,
             }
         );
         
@@ -612,7 +615,7 @@ async function checkResolution(subdomain: string): Promise<boolean> {
                 headers: {
                     "Accept": "application/dns-json",
                 },
-                timeout: 10000,
+                timeout: DNS_FETCH_TIMEOUT_MS,
             }
         );
         
@@ -672,7 +675,7 @@ async function fetchHttpEvidence(
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
                 redirect: "follow",
-                timeout: 10000,
+                timeout: HTTP_FETCH_TIMEOUT_MS,
             });
             
             const body = await response.text();

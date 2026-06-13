@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.2.4
+ * @version 2.2.6
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -119,7 +119,7 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
-const DEFAULT_TIMEOUT_MS = 3000;
+const DEFAULT_TIMEOUT_MS = 5000;
 const MIN_TIMEOUT_MS = 3000;
 const MAX_TIMEOUT_MS = 3000;
 const DEFAULT_CONCURRENCY = 32;
@@ -307,7 +307,7 @@ async function fetchPage(url: string, userAgent: string): Promise<Response> {
             "User-Agent": userAgent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
-        timeout: 10000,
+        timeout: DEFAULT_TIMEOUT_MS,
     });
 }
 

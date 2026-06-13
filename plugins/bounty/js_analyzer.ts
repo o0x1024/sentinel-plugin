@@ -3,7 +3,7 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.3
+ * @version 3.1.4
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -124,7 +124,8 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
-const DEFAULT_TIMEOUT_MS = 3000;
+const PAGE_FETCH_TIMEOUT_MS = 8000;
+const JS_FETCH_TIMEOUT_MS = 12000;
 const MIN_TIMEOUT_MS = 3000;
 const MAX_TIMEOUT_MS = 3000;
 const MIN_CONCURRENCY = 1;
@@ -682,7 +683,7 @@ async function analyzeJsFile(
                 "User-Agent": options.userAgent,
                 "Accept": "*/*",
             },
-            timeout: 10000,
+            timeout: JS_FETCH_TIMEOUT_MS,
         });
 
         if (!response.ok) {
@@ -765,7 +766,7 @@ async function processSingleUrl(
                     "User-Agent": options.userAgent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
-                timeout: 10000,
+                timeout: PAGE_FETCH_TIMEOUT_MS,
             });
 
             if (response.ok) {

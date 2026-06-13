@@ -3,7 +3,7 @@
  *
  * @plugin nextjs_rce_scanner
  * @name Next.js RCE Scanner
- * @version 1.0.3
+ * @version 1.0.4
  * @author Sentinel Team
  * @main_category agent
  * @category exploit

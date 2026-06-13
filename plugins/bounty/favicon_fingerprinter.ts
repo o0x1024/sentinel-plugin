@@ -3,7 +3,7 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.3.2
+ * @version 1.3.4
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -87,6 +87,8 @@ type PluginGlobals = typeof globalThis & {
 };
 
 const pluginGlobals = globalThis as PluginGlobals;
+const PAGE_FETCH_TIMEOUT_MS = 5000;
+const ICON_FETCH_TIMEOUT_MS = 3000;
 const DEFAULT_CONCURRENCY = 32;
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 32;
@@ -518,7 +520,7 @@ async function fingerprintTarget(
                 {
                     method: "GET",
                     redirect: followRedirects ? "follow" : "manual",
-                    timeout: 10000,
+                    timeout: PAGE_FETCH_TIMEOUT_MS,
                 },
             );
             const responseUrl = new URL(pageResponse.url || requestedUrl.toString());
@@ -564,7 +566,7 @@ async function fingerprintTarget(
                         {
                             method: "GET",
                             redirect: followRedirects ? "follow" : "manual",
-                            timeout: 10000,
+                            timeout: ICON_FETCH_TIMEOUT_MS,
                         },
                     );
                     if (!iconResponse.ok) continue;

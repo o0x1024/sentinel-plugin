@@ -3,7 +3,7 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.4
+ * @version 1.4.5
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -375,12 +375,10 @@ type ProbeFetchInit = RequestInit & {
     timeout?: number;
 };
 
-const DEFAULT_FETCH_TIMEOUT_MS = 10000;
-
 async function fetchProbe(url: string, init: ProbeFetchInit): Promise<any> {
     return await fetch(url, {
         ...init,
-        timeout: init.timeout ?? DEFAULT_FETCH_TIMEOUT_MS,
+        timeout: init.timeout ?? DEFAULT_TIMEOUT,
     });
 }
 

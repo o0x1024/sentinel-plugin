@@ -3,7 +3,7 @@
  * 
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.4
+ * @version 1.2.6
  * @author Sentinel Team
  * @main_category bounty
  * @category discovery
@@ -353,7 +353,7 @@ async function probePath(
                 "Accept": "*/*",
             },
             redirect: options.followRedirects ? "follow" : "manual",
-            timeout: 10000,
+            timeout: DEFAULT_TIMEOUT_MS,
         });
         
         const responseTime = Math.round(performance.now() - startTime);

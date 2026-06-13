@@ -3,7 +3,7 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.3.4
+ * @version 1.3.6
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -350,12 +350,14 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
     return [];
 }
 
+const FETCH_TIMEOUT_MS = 5000;
+
 async function fetchResponse(url: string, userAgent: string, method: "GET" | "HEAD" = "GET"): Promise<Response> {
     return await fetch(url, {
         method,
         redirect: "manual",
         headers: { "User-Agent": userAgent },
-        timeout: 10000,
+        timeout: FETCH_TIMEOUT_MS,
     });
 }
 

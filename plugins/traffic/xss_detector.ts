@@ -3,7 +3,7 @@
  * 
  * @plugin xss_detector
  * @name XSS Detector
- * @version 2.0.1
+ * @version 2.0.2
  * @author Sentinel Team
  * @category xss
  * @default_severity high

@@ -3,7 +3,7 @@
  * 
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.4.0
+ * @version 1.4.1
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -681,7 +681,7 @@ function shouldSkipVendorJs(url: string): boolean {
     return VENDOR_JS_FILENAME_PATTERNS.some(pattern => pattern.test(filename));
 }
 
-const FETCH_TIMEOUT_MS = 10000;
+const PAGE_FETCH_TIMEOUT_MS = 12000;
 
 async function fetchDocument(
     url: string,
@@ -696,7 +696,7 @@ async function fetchDocument(
                 "Accept-Language": "en-US,en;q=0.5",
             },
             redirect: "follow",
-            timeout: FETCH_TIMEOUT_MS,
+            timeout: PAGE_FETCH_TIMEOUT_MS,
             maxBodyBytes: 1048576,
         });
 

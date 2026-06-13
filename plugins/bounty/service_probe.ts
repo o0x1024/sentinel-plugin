@@ -3,7 +3,7 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.4
+ * @version 1.2.6
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -443,6 +443,8 @@ function extractProductInfo(banner?: string, serverHeader?: string): {
     };
 }
 
+const SERVICE_FETCH_TIMEOUT_MS = 3000;
+
 async function fingerprintHttp(
     host: string,
     port: number,
@@ -455,7 +457,7 @@ async function fingerprintHttp(
         {
             method: "HEAD",
             redirect: followHttpRedirects ? "follow" : "manual",
-            timeout: 10000,
+            timeout: SERVICE_FETCH_TIMEOUT_MS,
         },
     );
 

@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.3
+ * @version 2.2.5
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -300,6 +300,8 @@ export function get_output_schema() {
 
 pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
+
+const RULE_FETCH_TIMEOUT_MS = 10000;
 
 async function runSequentially<T>(
   tasks: Array<() => Promise<T>>,
@@ -778,7 +780,7 @@ async function executeRule(
           ...headers,
         },
         body: body == null ? undefined : String(body),
-        timeout: 15000,
+        timeout: RULE_FETCH_TIMEOUT_MS,
       });
 
       const responseBody = await response.text();

@@ -3,7 +3,7 @@
  * 
  * @plugin sql_injection_scanner
  * @name SQL Injection Scanner
- * @version 1.1.1
+ * @version 1.1.3
  * @author Sentinel Team
  * @main_category agent
  * @category vuln

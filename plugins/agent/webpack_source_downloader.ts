@@ -3,7 +3,7 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.5
+ * @version 1.0.6
  * @author Sentinel Team
  * @main_category agent
  * @category utility

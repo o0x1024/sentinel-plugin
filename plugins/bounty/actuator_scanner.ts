@@ -3,7 +3,7 @@
  *
  * @plugin actuator_scanner
  * @name Actuator Path Scanner
- * @version 1.1.0
+ * @version 1.1.1
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
