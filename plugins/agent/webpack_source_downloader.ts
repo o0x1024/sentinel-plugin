@@ -252,6 +252,8 @@ async function fetchText(url: string, userAgent: string): Promise<FetchTextResul
                 "Accept": "text/html,application/javascript,text/javascript,application/json,*/*",
                 "User-Agent": userAgent,
             },
+            timeout: 30000,
+            maxBodyBytes: 5 * 1024 * 1024,
         });
         const contentType = response.headers.get("content-type") || "";
         const contentLength = Number(response.headers.get("content-length") || "0");

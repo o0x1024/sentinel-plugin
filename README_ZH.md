@@ -42,7 +42,7 @@ Sentinel 插件运行在基于 Deno 的 JavaScript/TypeScript 运行时中，完
 |-----|------|
 | `Sentinel.emitFinding(finding)` | 上报安全漏洞发现 |
 | `Sentinel.log(level, message)` | 日志输出 (level: "debug", "info", "warn", "error") |
-| `fetch(url, options)` | HTTP 客户端，支持超时设置，也支持流量插件的受限主动验证 |
+| `fetch(url, options)` | HTTP 客户端。普通插件请求走直连 fetch，由插件 `timeout`（500ms–300s）和宿主 `directFetchMaxConcurrent` 控制；流量主动验证须使用 `activeProbe`。 |
 
 #### Web 标准 API
 
@@ -118,6 +118,18 @@ import axios from "https://unpkg.com/axios/dist/axios.min.js";
 ```
 
 **注意:** 远程模块会被本地缓存以提高性能。
+
+### Fetch 选项
+
+| 选项 | 适用范围 | 说明 |
+|------|----------|------|
+| `timeout` | bounty / agent / monitor 插件 | 真实 HTTP 超时（毫秒，500–300000）。未设置时宿主默认 8 秒。 |
+| `activeProbe` | 仅 traffic 插件 | 重放请求走宿主 active-probe 队列并受速率控制。 |
+| `maxBodyBytes`, `maxRedirects` | 所有插件 | 响应大小与重定向限制。 |
+
+请使用 `fetch(url, { timeout: 10000 })`，不要用 `AbortSignal.timeout()` — QuickJS 运行时会转发 `timeout`，不会处理 `signal`。
+
+宿主配置 `directFetchMaxConcurrent`（默认 200）控制直连 fetch 的全局并发；插件侧 worker 池应控制在该上限内。
 
 ---
 

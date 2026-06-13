@@ -308,7 +308,7 @@ async function buildSoft404Baseline(origin: string, userAgent: string, timeout: 
             method: "GET",
             headers: { "User-Agent": userAgent, "Accept": "application/json, text/html, */*" },
             redirect: "follow",
-            signal: AbortSignal.timeout(timeout),
+            timeout,
             maxBodyBytes: 32768,
         } as any);
         const body = await response.text();
@@ -442,7 +442,7 @@ async function probeActuatorUrl(
                 "Accept": "application/json, application/vnd.spring-boot.actuator.v3+json, */*",
             },
             redirect: "follow",
-            signal: AbortSignal.timeout(timeout),
+            timeout,
             maxBodyBytes: 32768,
         } as any);
 

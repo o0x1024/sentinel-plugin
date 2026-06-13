@@ -307,6 +307,7 @@ async function fetchPage(url: string, userAgent: string): Promise<Response> {
             "User-Agent": userAgent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
+        timeout: 10000,
     });
 }
 

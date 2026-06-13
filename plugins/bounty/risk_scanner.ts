@@ -778,6 +778,7 @@ async function executeRule(
           ...headers,
         },
         body: body == null ? undefined : String(body),
+        timeout: 15000,
       });
 
       const responseBody = await response.text();

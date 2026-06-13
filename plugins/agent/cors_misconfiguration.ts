@@ -77,12 +77,28 @@ const TEST_TYPES = {
     credentials_with_reflected: "Credentials allowed with reflected origin",
 };
 
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+const DEFAULT_CONCURRENCY = 8;
+
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    if (tasks.length === 0) {
+        return [];
     }
+
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+
+    const workers = Array.from({ length: limit }, async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= tasks.length) {
+                return;
+            }
+            results[index] = await tasks[index]();
+        }
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -333,6 +349,7 @@ async function testCors(
                 ...options.headers,
                 "Origin": origin,
             },
+            timeout: 10000,
         });
         
         // Extract CORS headers
@@ -447,6 +464,7 @@ async function testPreflight(
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Headers": "X-Custom-Header",
             },
+            timeout: 10000,
         });
         
         const acao = response.headers.get("access-control-allow-origin");
@@ -547,6 +565,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const baselineResponse = await fetch(url, {
                 method,
                 headers,
+                timeout: 10000,
             });
             
             const baselineAcao = baselineResponse.headers.get("access-control-allow-origin");
@@ -569,12 +588,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         
         // Test each origin
-        tests.push(...await runSequentially(testOrigins.map(({ origin, testType }) => async () => {
+        tests.push(...await runWithConcurrency(testOrigins.map(({ origin, testType }) => async () => {
                 return await testCors(url, origin, testType, {
                     method,
                     headers,
                 });
-            })));
+            }), DEFAULT_CONCURRENCY));
         
         // Test preflight
         const preflightResult = await testPreflight(url, "https://evil.com", {

@@ -353,6 +353,7 @@ async function probePath(
                 "Accept": "*/*",
             },
             redirect: options.followRedirects ? "follow" : "manual",
+            timeout: 10000,
         });
         
         const responseTime = Math.round(performance.now() - startTime);

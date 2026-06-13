@@ -368,6 +368,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         "User-Agent": userAgent,
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     },
+                    timeout: 15000,
                 });
                 
                 const content = await response.text();

@@ -568,15 +568,36 @@ function compareResponses(baseline: string, test: string): number {
 }
 
 /**
- * Run tasks sequentially through runtime scheduling
+ * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
  */
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    if (tasks.length === 0) {
+        return [];
     }
+
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+
+    const workers = Array.from({ length: limit }, async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= tasks.length) {
+                return;
+            }
+            results[index] = await tasks[index]();
+        }
+    });
+
+    await Promise.all(workers);
     return results;
+}
+
+function fetchTimeoutForTechnique(technique: string, timeThreshold: number): number {
+    if (technique === "time-based") {
+        return Math.max(timeThreshold + 2000, 8000);
+    }
+    return 10000;
 }
 
 /**
@@ -705,7 +726,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         // Get baseline response for each parameter
         const baselines = new Map<string, { body: string; time: number }>();
 
-        await runSequentially(Array.from(params.entries()).map(([paramName, { value, location }]) => async () => {
+        await runWithConcurrency(Array.from(params.entries()).map(([paramName, { value, location }]) => async () => {
                 try {
                     let testUrl = baseUrl;
                     let testBody = input.body;
@@ -729,6 +750,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         method,
                         headers,
                         body: method !== "GET" ? testBody : undefined,
+                        timeout: 10000,
                     });
                     const baselineTime = Math.round(performance.now() - startReq);
                     const body = await response.text();
@@ -738,7 +760,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     // Ignore baseline errors
                 }
                 return null;
-            }));
+            }), DEFAULT_CONCURRENCY);
         
         // Create test tasks
         const tasks: (() => Promise<SqliTest | null>)[] = [];
@@ -781,6 +803,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             method,
                             headers,
                             body: method !== "GET" ? testBody : undefined,
+                            timeout: fetchTimeoutForTechnique(technique, timeThreshold),
                         });
                         
                         const responseTime = Math.round(performance.now() - testStart);
@@ -848,8 +871,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         }
         
-        // Execute tests through runtime scheduling
-        const results = await runSequentially(tasks);
+        // Execute tests with bounded plugin concurrency
+        const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY);
         
         // Collect results
         for (const result of results) {

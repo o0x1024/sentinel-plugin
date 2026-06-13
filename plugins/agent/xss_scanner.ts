@@ -476,14 +476,28 @@ function checkSecurityHeaders(headers: Record<string, string>): string[] {
 }
 
 /**
- * Run tasks sequentially through runtime scheduling
+ * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
  */
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    if (tasks.length === 0) {
+        return [];
     }
+
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+
+    const workers = Array.from({ length: limit }, async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= tasks.length) {
+                return;
+            }
+            results[index] = await tasks[index]();
+        }
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -639,6 +653,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             headers,
                             body: method !== "GET" ? testBody : undefined,
                             redirect: "follow",
+                            timeout: 10000,
                         });
                         
                         const responseTime = Math.round(performance.now() - testStart);
@@ -685,8 +700,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         }
         
-        // Execute tests through runtime scheduling
-        const results = await runSequentially(tasks);
+        // Execute tests with bounded plugin concurrency
+        const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY);
         
         // Collect results
         for (const result of results) {

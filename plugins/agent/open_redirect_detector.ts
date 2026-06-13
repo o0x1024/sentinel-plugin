@@ -173,12 +173,26 @@ const REDIRECT_PARAM_NAMES = [
 const DEFAULT_CONCURRENCY = 32;
 const MAX_CONCURRENCY = 20;
 
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    const results: T[] = [];
-    for (const task of tasks) {
-        results.push(await task());
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
+    if (tasks.length === 0) {
+        return [];
     }
+
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+
+    const workers = Array.from({ length: limit }, async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= tasks.length) {
+                return;
+            }
+            results[index] = await tasks[index]();
+        }
+    });
+
+    await Promise.all(workers);
     return results;
 }
 
@@ -474,6 +488,7 @@ async function testPayload(
             method: options.method,
             headers: options.headers,
             redirect: options.followRedirects ? "follow" : "manual",
+            timeout: 10000,
         });
         
         result.responseCode = response.status;
@@ -607,7 +622,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 });
             }
         }
-        const tests = (await runSequentially(payloadTasks))
+        const tests = (await runWithConcurrency(payloadTasks, DEFAULT_CONCURRENCY))
             .filter((test): test is RedirectTest => Boolean(test));
         
         // Build summary

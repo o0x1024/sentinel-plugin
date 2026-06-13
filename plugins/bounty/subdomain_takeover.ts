@@ -576,6 +576,7 @@ async function resolveCname(subdomain: string): Promise<string | null> {
                 headers: {
                     "Accept": "application/dns-json",
                 },
+                timeout: 10000,
             }
         );
         
@@ -611,6 +612,7 @@ async function checkResolution(subdomain: string): Promise<boolean> {
                 headers: {
                     "Accept": "application/dns-json",
                 },
+                timeout: 10000,
             }
         );
         
@@ -670,6 +672,7 @@ async function fetchHttpEvidence(
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
                 redirect: "follow",
+                timeout: 10000,
             });
             
             const body = await response.text();

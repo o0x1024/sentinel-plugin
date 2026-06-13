@@ -682,6 +682,7 @@ async function analyzeJsFile(
                 "User-Agent": options.userAgent,
                 "Accept": "*/*",
             },
+            timeout: 10000,
         });
 
         if (!response.ok) {
@@ -764,6 +765,7 @@ async function processSingleUrl(
                     "User-Agent": options.userAgent,
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 },
+                timeout: 10000,
             });
 
             if (response.ok) {
@@ -799,7 +801,7 @@ async function processSingleUrl(
     // Limit number of files
     const urlsToAnalyze = [...new Set(jsUrls)].slice(0, options.maxFiles - files.length);
 
-    // Analyze JS files through runtime scheduling
+    // Analyze JS files with bounded plugin concurrency
     const jsFileResults = await executeConcurrently(urlsToAnalyze, async (url) => {
             return await analyzeJsFile(url, {
                 userAgent: options.userAgent,

@@ -42,7 +42,7 @@ Sentinel plugins run in a Deno-based JavaScript/TypeScript runtime with full Web
 |-----|-------------|
 | `Sentinel.emitFinding(finding)` | Report a security vulnerability finding |
 | `Sentinel.log(level, message)` | Log messages (level: "debug", "info", "warn", "error") |
-| `fetch(url, options)` | HTTP client with timeout support, including bounded active verification for traffic plugins |
+| `fetch(url, options)` | HTTP client. Normal plugin requests use direct fetch with plugin `timeout` (500ms–300s) and host `directFetchMaxConcurrent`. Traffic active verification must use `activeProbe`. |
 
 #### Web Standard APIs
 
@@ -117,6 +117,18 @@ import axios from "https://unpkg.com/axios/dist/axios.min.js";
 ```
 
 **Note:** Remote modules are cached locally for performance.
+
+### Fetch options
+
+| Option | Scope | Notes |
+|--------|-------|-------|
+| `timeout` | bounty / agent / monitor plugins | Real HTTP timeout in milliseconds (500–300000). Default host timeout is 8s when omitted. |
+| `activeProbe` | traffic plugins only | Routes replay requests through the host active-probe queue with rate control. |
+| `maxBodyBytes`, `maxRedirects` | all plugins | Response size and redirect limits. |
+
+Use `fetch(url, { timeout: 10000 })` instead of `AbortSignal.timeout()` — the QuickJS runtime forwards `timeout` to the host, not `signal`.
+
+Host settings expose `directFetchMaxConcurrent` (default 200) for global direct-fetch concurrency. Plugin-side worker pools should stay within that budget.
 
 ---
 

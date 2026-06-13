@@ -119,7 +119,7 @@
       "category": "recon",
       "monitor_type": "dns",
       "input_mode": "seed",
-      "description": "Comprehensive subdomain enumeration using 50 data sources with batch-submitted runtime scheduling, source-level timing, lightweight retry handling for transient failures, and automatic skipping of unconfigured premium sources in default mode.",
+      "description": "Comprehensive subdomain enumeration using 50 data sources with bounded plugin concurrency, source-level timing, lightweight retry handling for transient failures, and automatic skipping of unconfigured premium sources in default mode.",
       "default_severity": "info",
       "tags": [
         "subdomain",
@@ -234,7 +234,7 @@
       "main_category": "bounty",
       "category": "risk",
       "monitor_type": "risk",
-      "description": "Scan web targets for exposed sensitive files using explicit dictionary matchers, negative matchers, and runtime-scheduled request pacing.",
+      "description": "Scan web targets for exposed sensitive files using explicit dictionary matchers, negative matchers, and bounded plugin concurrency and explicit fetch timeouts.",
       "default_severity": "medium",
       "tags": [
         "risk",
@@ -401,7 +401,7 @@
       "main_category": "bounty",
       "category": "discovery",
       "monitor_type": "web",
-      "description": "Discover hidden directories, files, and endpoints on web servers with deduplicated word/path queues, normalized extension handling, and runtime-scheduled request pacing",
+      "description": "Discover hidden directories, files, and endpoints on web servers with deduplicated word/path queues, normalized extension handling, and bounded plugin concurrency and explicit fetch timeouts",
       "default_severity": "info",
       "tags": [
         "directory",
@@ -420,7 +420,7 @@
       "main_category": "bounty",
       "category": "discovery",
       "monitor_type": "api",
-      "description": "Analyze JavaScript files using AST parsing to extract literals, API endpoints, secrets, and domains with deduplicated target queues and runtime-scheduled request pacing",
+      "description": "Analyze JavaScript files using AST parsing to extract literals, API endpoints, secrets, and domains with deduplicated target queues and bounded plugin concurrency and explicit fetch timeouts",
       "default_severity": "info",
       "tags": [
         "javascript",
@@ -459,7 +459,7 @@
       "main_category": "agent",
       "category": "vuln",
       "monitor_type": "risk",
-      "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, runtime-scheduled request pacing, and strong-signal parameter early stop",
+      "description": "Detect SSRF by testing URL-like parameters with deduplicated payloads, bounded plugin concurrency and explicit fetch timeouts, and strong-signal parameter early stop",
       "default_severity": "high",
       "tags": [
         "ssrf",
@@ -496,7 +496,7 @@
       "main_category": "agent",
       "category": "vuln",
       "monitor_type": "risk",
-      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with runtime-scheduled origin testing",
+      "description": "Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access with bounded origin-test concurrency",
       "default_severity": "medium",
       "tags": [
         "cors",
@@ -515,7 +515,7 @@
       "main_category": "agent",
       "category": "vuln",
       "monitor_type": "risk",
-      "description": "Detect open redirects with deduplicated payloads, runtime-scheduled request pacing, and parameter-level early stop after confirmed redirect findings",
+      "description": "Detect open redirects with deduplicated payloads, bounded plugin concurrency and explicit fetch timeouts, and parameter-level early stop after confirmed redirect findings",
       "default_severity": "medium",
       "tags": [
         "redirect",
@@ -534,7 +534,7 @@
       "main_category": "agent",
       "category": "vuln",
       "monitor_type": "risk",
-      "description": "Active XSS vulnerability scanner with deduplicated payload sets, runtime-scheduled request pacing, and parameter-level early stop after a reflected hit to cut redundant requests",
+      "description": "Active XSS vulnerability scanner with deduplicated payload sets, bounded plugin concurrency and explicit fetch timeouts, and parameter-level early stop after a reflected hit to cut redundant requests",
       "default_severity": "high",
       "tags": [
         "xss",
@@ -554,7 +554,7 @@
       "main_category": "agent",
       "category": "vuln",
       "monitor_type": "risk",
-      "description": "Active SQL injection scanner with sequential baseline collection, deduplicated payload sets, runtime-scheduled request pacing, and parameter-level early stop after a confirmed signal",
+      "description": "Active SQL injection scanner with bounded baseline collection, deduplicated payload sets, bounded plugin concurrency and explicit fetch timeouts, and parameter-level early stop after a confirmed signal",
       "default_severity": "critical",
       "tags": [
         "sqli",
@@ -595,7 +595,7 @@
       "main_category": "bounty",
       "category": "monitor",
       "monitor_type": "content",
-      "description": "Monitor web pages for content changes using hash fingerprinting and runtime-scheduled request pacing, generating ChangeEvents for workflow automation",
+      "description": "Monitor web pages for content changes using hash fingerprinting and bounded plugin concurrency and explicit fetch timeouts, generating ChangeEvents for workflow automation",
       "default_severity": "low",
       "tags": [
         "content",

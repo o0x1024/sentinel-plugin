@@ -256,6 +256,7 @@ async function sendExploitRequest(
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
             body: payload,
+            timeout: 15000,
         });
 
         const responseTime = Date.now() - startTime;
@@ -295,17 +296,27 @@ function normalizeTargetUrls(target: string): string[] {
 }
 
 /**
- * Simple sequential runtime-scheduled executor
+ * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
  */
-async function runSequentially<T>(tasks: (() => Promise<T>)[]): Promise<void> {
-    // Rust controls request pacing; plugins only submit work to the runtime queue.
-    for (const task of tasks) {
-        try {
-            await task();
-        } catch {
-            // Individual probes are best-effort; keep the existing behavior of swallowing failures.
+async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<void> {
+    const limit = Math.max(1, Math.min(concurrency, tasks.length));
+    let nextIndex = 0;
+
+    const workers = Array.from({ length: limit }, async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= tasks.length) {
+                return;
+            }
+            try {
+                await tasks[index]();
+            } catch {
+                // Individual probes are best-effort; keep swallowing failures.
+            }
         }
-    }
+    });
+
+    await Promise.all(workers);
 }
 
 /**
@@ -401,7 +412,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const tasks = targets.map(target => () => scanTarget(target));
 
         // Execute in batches
-        await runSequentially(tasks);
+        await runWithConcurrency(tasks, 3);
 
         // Generate summary
         const summary = {

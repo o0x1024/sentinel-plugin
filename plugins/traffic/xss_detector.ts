@@ -54,7 +54,7 @@ declare global {
       target_location?: string;
       probe_value?: string;
       technique?: string;
-      probeLabel?: string;
+      probe_label?: string;
     };
   }
 }
@@ -151,7 +151,7 @@ function buildActiveProbeMetadata(paramName: string, payload: string, context: s
     target_location: 'query',
     probe_value: payload,
     technique: `xss-${context}`,
-    probeLabel: `xss_detector:${context}`,
+    probe_label: `xss_detector:${context}`,
   };
 }
 

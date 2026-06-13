@@ -518,6 +518,7 @@ async function fingerprintTarget(
                 {
                     method: "GET",
                     redirect: followRedirects ? "follow" : "manual",
+                    timeout: 10000,
                 },
             );
             const responseUrl = new URL(pageResponse.url || requestedUrl.toString());
@@ -563,6 +564,7 @@ async function fingerprintTarget(
                         {
                             method: "GET",
                             redirect: followRedirects ? "follow" : "manual",
+                            timeout: 10000,
                         },
                     );
                     if (!iconResponse.ok) continue;

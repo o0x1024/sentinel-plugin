@@ -455,6 +455,7 @@ async function fingerprintHttp(
         {
             method: "HEAD",
             redirect: followHttpRedirects ? "follow" : "manual",
+            timeout: 10000,
         },
     );
 

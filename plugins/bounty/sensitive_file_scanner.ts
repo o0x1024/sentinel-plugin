@@ -355,6 +355,7 @@ async function fetchResponse(url: string, userAgent: string, method: "GET" | "HE
         method,
         redirect: "manual",
         headers: { "User-Agent": userAgent },
+        timeout: 10000,
     });
 }
 

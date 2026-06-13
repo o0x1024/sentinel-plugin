@@ -159,6 +159,17 @@ function isIpLiteral(value: string): boolean {
     return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
 }
 
+function dedupeStrings(values: string[]): string[] {
+    const deduped: string[] = [];
+    const seen: Record<string, boolean> = {};
+    for (const value of values) {
+        if (!value || seen[value]) continue;
+        seen[value] = true;
+        deduped.push(value);
+    }
+    return deduped;
+}
+
 const TECH_SIGNATURES: Record<string, { header?: string; pattern: RegExp }[]> = {
     "nginx": [
         { header: "server", pattern: /nginx/i },
@@ -361,10 +372,16 @@ function buildContentSummary(text: string): string {
 type ProbeFetchInit = RequestInit & {
     maxRedirects: number;
     maxBodyBytes?: number;
+    timeout?: number;
 };
 
+const DEFAULT_FETCH_TIMEOUT_MS = 10000;
+
 async function fetchProbe(url: string, init: ProbeFetchInit): Promise<any> {
-    return await fetch(url, init);
+    return await fetch(url, {
+        ...init,
+        timeout: init.timeout ?? DEFAULT_FETCH_TIMEOUT_MS,
+    });
 }
 
 /**
@@ -778,7 +795,7 @@ async function probeUrl(
 }
 
 /**
- * Run tasks with limited concurrency through runtime scheduling
+ * Run tasks with bounded plugin concurrency. Host enforces global direct-fetch limit.
  */
 async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
     if (tasks.length === 0) {
@@ -975,7 +992,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }),
         );
         
-        const uniqueUrls = [...new Set([...urls, ...serviceUrls])];
+        const uniqueUrls = dedupeStrings([...urls, ...serviceUrls]);
         const totalProgressUnits = uniqueUrls.length + 2;
 
         await reportMonitorProgress(monitorExecution, {

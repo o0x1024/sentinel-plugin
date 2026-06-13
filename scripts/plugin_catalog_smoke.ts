@@ -137,7 +137,13 @@ function readBodyText(body: BodyInit | null | undefined): string {
 function activeProbeMetadata(init?: RequestInit): Record<string, unknown> | null {
     const probe = (init as RequestInit & { activeProbe?: unknown })?.activeProbe;
     if (!probe || probe === true) return {};
-    if (typeof probe === "object") return probe as Record<string, unknown>;
+    if (typeof probe === "object") {
+        const metadata = probe as Record<string, unknown>;
+        if (metadata.probeLabel != null && metadata.probe_label == null) {
+            return { ...metadata, probe_label: metadata.probeLabel };
+        }
+        return metadata;
+    }
     return {};
 }
 
@@ -571,7 +577,7 @@ function buildInputForPlugin(plugin: ManifestPlugin): Record<string, unknown> {
         case "content_monitor":
             return { targets: ["https://example.com"], includeHeaders: true };
         case "api_monitor":
-            return { targets: ["https://example.com"], crawlDepth: 1, maxJsFiles: 4, probeManifestEndpoints: true };
+            return { targets: ["https://example.com"], crawlDepth: 1, maxJsFiles: 4, probeSpaManifests: false };
         case "port_monitor":
             return {
                 service_targets: [{ host: "example.com", port: 443, protocol: "https" }],

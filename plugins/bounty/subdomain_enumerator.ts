@@ -82,15 +82,11 @@ interface ToolOutput {
     error?: string;
 }
 
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
+// @ts-ignore — One Engine exposes globals via bare assignment, not globalThis
+const _nativeFetch: typeof fetch = fetch;
 
 type FetchWithTimeoutInit = RequestInit & {
+    timeout?: number;
 };
 
 // Available data sources
@@ -158,9 +154,7 @@ const AVAILABLE_SOURCES = [
 
 type DataSource = typeof AVAILABLE_SOURCES[number];
 
-const DEFAULT_TIMEOUT = 3000;
-const RUNTIME_QUEUE_TIMEOUT_MULTIPLIER = 1;
-const MAX_RUNTIME_QUEUE_TIMEOUT = 3000;
+const DEFAULT_FETCH_TIMEOUT_MS = 10000;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 const SOURCE_PRIORITY: Partial<Record<DataSource, number>> = {
@@ -330,7 +324,6 @@ export function get_input_schema() {
     };
 }
 
-pluginGlobals.get_input_schema = get_input_schema;
 
 function normalizeStringList(value: unknown): string[] {
     if (Array.isArray(value)) {
@@ -427,10 +420,10 @@ export function get_output_schema() {
     };
 }
 
-pluginGlobals.get_output_schema = get_output_schema;
 
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(_ms: number): Promise<void> {
+    // QuickJS has no timers; retries proceed immediately without backoff.
+    return Promise.resolve();
 }
 
 function parseRetryAfter(value: string | null): number | null {
@@ -462,15 +455,18 @@ function isRetryableError(error: any): boolean {
         || message.includes("connection");
 }
 
-async function fetch(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
-    const nativeFetch = globalThis.fetch.bind(globalThis);
+async function fetchWithRetry(input: RequestInfo | URL, init: FetchWithTimeoutInit = {}): Promise<Response> {
     const method = String(init.method || "GET").toUpperCase();
     const maxAttempts = isRetryableMethod(method) ? 2 : 1;
+    const fetchInit: FetchWithTimeoutInit = {
+        ...init,
+        timeout: init.timeout ?? DEFAULT_FETCH_TIMEOUT_MS,
+    };
     let lastError: any;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            const response = await nativeFetch(input, init);
+            const response = await _nativeFetch(input, fetchInit);
             if (attempt < maxAttempts && RETRYABLE_STATUSES.has(response.status)) {
                 const retryDelay = parseRetryAfter(response.headers.get("retry-after")) ?? (300 * attempt);
                 try {
@@ -522,7 +518,7 @@ function logSourceResult(result: SourceResult): void {
     const status = result.error ? "failed" : "completed";
     const suffix = result.error ? ` error=${String(result.error).slice(0, 160)}` : "";
     try {
-        (globalThis as any).Sentinel?.log?.(
+        Sentinel?.log?.(
             "info",
             `[subdomain_enumerator] source=${result.source} ${status} count=${result.count} duration_ms=${result.responseTime}${suffix}`
         );
@@ -577,7 +573,7 @@ function extractSubdomains(text: string, domain: string): string[] {
  */
 async function queryCrtsh(domain: string ): Promise<string[]> {
     const url = `https://crt.sh/?q=%.${encodeURIComponent(domain)}&output=json`;
-    const response = await fetch(url, { 
+    const response = await fetchWithRetry(url, { 
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -614,7 +610,7 @@ async function queryCrtsh(domain: string ): Promise<string[]> {
  */
 async function queryHackerTarget(domain: string ): Promise<string[]> {
     const url = `https://api.hackertarget.com/hostsearch/?q=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -637,7 +633,7 @@ async function queryHackerTarget(domain: string ): Promise<string[]> {
  */
 async function queryRapidDNS(domain: string ): Promise<string[]> {
     const url = `https://rapiddns.io/subdomain/${encodeURIComponent(domain)}?full=1`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -659,7 +655,7 @@ async function queryAlienVault(domain: string ): Promise<string[]> {
     // Query passive DNS
     const dnsUrl = `https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/passive_dns`;
     try {
-        const dnsResponse = await fetch(dnsUrl, {
+        const dnsResponse = await fetchWithRetry(dnsUrl, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -672,7 +668,7 @@ async function queryAlienVault(domain: string ): Promise<string[]> {
     // Query URL list
     const urlListUrl = `https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/url_list`;
     try {
-        const urlResponse = await fetch(urlListUrl, {
+        const urlResponse = await fetchWithRetry(urlListUrl, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -696,7 +692,7 @@ async function queryVirusTotal(domain: string ): Promise<string[]> {
     
     while (iterations < maxIterations) {
         const url = `https://www.virustotal.com/ui/domains/${encodeURIComponent(domain)}/subdomains?limit=40&cursor=${cursor}`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Referer": "https://www.virustotal.com/"
@@ -736,7 +732,7 @@ async function queryVirusTotal(domain: string ): Promise<string[]> {
  */
 async function queryURLScan(domain: string ): Promise<string[]> {
     const url = `https://urlscan.io/api/v1/search/?q=domain:${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -754,7 +750,7 @@ async function queryURLScan(domain: string ): Promise<string[]> {
  */
 async function queryAnubis(domain: string ): Promise<string[]> {
     const url = `https://jldc.me/anubis/subdomains/${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -782,7 +778,7 @@ async function queryDNSDumpster(domain: string ): Promise<string[]> {
     const baseUrl = "https://dnsdumpster.com/";
     
     // Get CSRF token
-    const getResponse = await fetch(baseUrl, {
+    const getResponse = await fetchWithRetry(baseUrl, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://dnsdumpster.com"
@@ -808,7 +804,7 @@ async function queryDNSDumpster(domain: string ): Promise<string[]> {
     formData.append("targetip", domain);
     formData.append("user", "free");
     
-    const postResponse = await fetch(baseUrl, {
+    const postResponse = await fetchWithRetry(baseUrl, {
         method: "POST",
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -833,7 +829,7 @@ async function queryDNSDumpster(domain: string ): Promise<string[]> {
  */
 async function querySublist3r(domain: string ): Promise<string[]> {
     const url = `https://api.sublist3r.com/search.php?domain=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -859,7 +855,7 @@ async function querySublist3r(domain: string ): Promise<string[]> {
  */
 async function queryCertSpotter(domain: string ): Promise<string[]> {
     const url = `https://api.certspotter.com/v1/issuances?domain=${encodeURIComponent(domain)}&include_subdomains=true&expand=dns_names`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -896,7 +892,7 @@ async function queryCertSpotter(domain: string ): Promise<string[]> {
  */
 async function queryThreatMiner(domain: string ): Promise<string[]> {
     const url = `https://api.threatminer.org/v2/domain.php?q=${encodeURIComponent(domain)}&rt=5`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -917,10 +913,11 @@ async function queryNetcraft(domain: string ): Promise<string[]> {
     const baseUrl = "https://searchdns.netcraft.com/";
     let pageNum = 1;
     let last = "";
+    let previousLast = "";
     
     for (let i = 0; i < 25; i++) { // Limit to 25 pages (500 results)
         const url = `${baseUrl}?restriction=site+contains&position=limited&host=*.${encodeURIComponent(domain)}&from=${pageNum}${last}`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -940,6 +937,10 @@ async function queryNetcraft(domain: string ): Promise<string[]> {
             last = lastMatch[0];
         }
         
+        // Detect stuck pagination: if cursor didn't advance, stop
+        if (last === previousLast) break;
+        previousLast = last;
+        
         pageNum += 20;
     }
     
@@ -951,7 +952,7 @@ async function queryNetcraft(domain: string ): Promise<string[]> {
  */
 async function queryRiddler(domain: string ): Promise<string[]> {
     const url = `https://riddler.io/search?q=pld:${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -973,7 +974,7 @@ async function queryRobtex(domain: string ): Promise<string[]> {
     
     // Get forward DNS records
     const forwardUrl = `${baseUrl}/forward/${encodeURIComponent(domain)}`;
-    const forwardResponse = await fetch(forwardUrl, {
+    const forwardResponse = await fetchWithRetry(forwardUrl, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1001,7 +1002,7 @@ async function queryRobtex(domain: string ): Promise<string[]> {
     for (const ip of ipArray) {
         try {
             const reverseUrl = `${baseUrl}/reverse/${encodeURIComponent(ip)}`;
-            const reverseResponse = await fetch(reverseUrl, {
+            const reverseResponse = await fetchWithRetry(reverseUrl, {
                 headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
                 // @ts-ignore
             });
@@ -1021,7 +1022,7 @@ async function queryRobtex(domain: string ): Promise<string[]> {
  */
 async function querySiteDossier(domain: string ): Promise<string[]> {
     const url = `http://www.sitedossier.com/parentdomain/${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1039,7 +1040,7 @@ async function querySiteDossier(domain: string ): Promise<string[]> {
  */
 async function queryDNSGrep(domain: string ): Promise<string[]> {
     const url = `https://dns.bufferover.run/dns?q=.${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1091,7 +1092,7 @@ async function queryBeVigil(domain: string , apiToken?: string): Promise<string[
     }
     
     const url = `https://osint.bevigil.com/api/${encodeURIComponent(domain)}/subdomains/`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-Access-Token": apiToken
@@ -1140,7 +1141,7 @@ async function queryCensys(domain: string , apiId?: string, apiSecret?: string):
         }
         
         const auth = btoa(`${apiId}:${apiSecret}`);
-        const response = await fetch(`${url}?${params}`, {
+        const response = await fetchWithRetry(`${url}?${params}`, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Authorization": `Basic ${auth}`
@@ -1180,7 +1181,7 @@ async function queryVirusTotalAPI(domain: string , apiToken?: string): Promise<s
     
     for (let i = 0; i < 5; i++) {
         const url = `https://www.virustotal.com/api/v3/domains/${encodeURIComponent(domain)}/subdomains?limit=40${cursor ? `&cursor=${cursor}` : ""}`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "x-apikey": apiToken
@@ -1224,7 +1225,7 @@ async function querySecurityTrails(domain: string , apiToken?: string): Promise<
     }
     
     const url = `https://api.securitytrails.com/v1/domain/${encodeURIComponent(domain)}/subdomains`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "APIKEY": apiToken
@@ -1264,7 +1265,7 @@ async function queryShodan(domain: string , apiToken?: string): Promise<string[]
     }
     
     const url = `https://api.shodan.io/dns/domain/${encodeURIComponent(domain)}?key=${encodeURIComponent(apiToken)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1298,7 +1299,7 @@ async function queryGitHub(domain: string , apiToken?: string): Promise<string[]
     
     for (let page = 1; page <= 3; page++) {
         const url = `https://api.github.com/search/code?q=${encodeURIComponent(domain)}&per_page=100&page=${page}&sort=indexed`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "application/vnd.github.v3.text-match+json",
@@ -1336,7 +1337,7 @@ async function queryBinaryEdge(domain: string , apiToken?: string): Promise<stri
     
     for (let i = 0; i < 5; i++) {
         const url = `https://api.binaryedge.io/v2/query/domains/subdomain/${encodeURIComponent(domain)}?page=${page}`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "X-Key": apiToken
@@ -1378,7 +1379,7 @@ async function queryFullHunt(domain: string , apiToken?: string): Promise<string
     }
     
     const url = `https://fullhunt.io/api/v1/domain/${encodeURIComponent(domain)}/subdomains`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-API-KEY": apiToken
@@ -1408,7 +1409,7 @@ async function queryFullHunt(domain: string , apiToken?: string): Promise<string
  */
 async function queryGoogleCT(domain: string ): Promise<string[]> {
     const url = `https://transparencyreport.google.com/transparencyreport/api/v3/httpsreport/ct/certsearch?include_expired=true&include_subdomains=true&domain=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1426,7 +1427,7 @@ async function queryGoogleCT(domain: string ): Promise<string[]> {
  */
 async function queryMySSL(domain: string ): Promise<string[]> {
     const url = `https://myssl.com/api/v1/discover_sub_domain?domain=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1444,7 +1445,7 @@ async function queryMySSL(domain: string ): Promise<string[]> {
  */
 async function queryIP138(domain: string ): Promise<string[]> {
     const url = `https://site.ip138.com/${encodeURIComponent(domain)}/domain.htm`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1468,7 +1469,7 @@ async function queryRiskIQ(domain: string , username?: string, apiKey?: string):
     const url = `https://api.riskiq.net/pt/v2/enrichment/subdomains?query=${encodeURIComponent(domain)}`;
     const auth = btoa(`${username}:${apiKey}`);
     
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "application/json",
@@ -1503,7 +1504,7 @@ async function queryThreatBook(domain: string , apiKey?: string): Promise<string
     }
     
     const url = `https://api.threatbook.cn/v3/domain/sub_domains?apikey=${encodeURIComponent(apiKey)}&resource=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1539,7 +1540,7 @@ async function queryFOFA(domain: string , email?: string, apiKey?: string): Prom
     
     for (let page = 1; page <= 5; page++) {
         const url = `https://fofa.info/api/v1/search/all?email=${encodeURIComponent(email)}&key=${encodeURIComponent(apiKey)}&qbase64=${qbase64}&page=${page}&size=100&full=true`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -1572,7 +1573,7 @@ async function queryHunter(domain: string , apiKey?: string): Promise<string[]> 
     
     for (let page = 1; page <= 5; page++) {
         const url = `https://hunter.qianxin.com/openApi/search?api-key=${encodeURIComponent(apiKey)}&search=${encodeURIComponent(domain)}&page=${page}&page_size=100&is_web=1`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -1611,7 +1612,7 @@ async function queryQuake(domain: string , apiKey?: string): Promise<string[]> {
             size: 100
         });
         
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             method: "POST",
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -1650,7 +1651,7 @@ async function queryZoomEye(domain: string , apiKey?: string): Promise<string[]>
     
     for (let page = 1; page <= 5; page++) {
         const url = `https://api.zoomeye.org/domain/search?q=${encodeURIComponent(domain)}&page=${page}&type=1`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "API-KEY": apiKey
@@ -1683,7 +1684,7 @@ async function querySpyse(domain: string , apiToken?: string): Promise<string[]>
     }
     
     const url = `https://api.spyse.com/v4/data/domain/subdomain?domain=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Authorization": `Bearer ${apiToken}`
@@ -1714,7 +1715,7 @@ async function querySpyse(domain: string , apiToken?: string): Promise<string[]>
  */
 async function queryChinaz(domain: string ): Promise<string[]> {
     const url = `https://alexa.chinaz.com/${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1732,7 +1733,7 @@ async function queryChinaz(domain: string ): Promise<string[]> {
  */
 async function queryCeBaidu(domain: string ): Promise<string[]> {
     const url = `https://ce.baidu.com/index/getRelatedSites?site_address=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1753,7 +1754,7 @@ async function queryQianxun(domain: string ): Promise<string[]> {
     
     for (let page = 1; page <= 10; page++) {
         const url = `https://www.dnsscan.cn/dns.html?keywords=${encodeURIComponent(domain)}&page=${page}`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             method: "POST",
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -1813,7 +1814,7 @@ async function queryWindvane(domain: string , apiKey?: string): Promise<string[]
             }
         });
         
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             method: "POST",
             headers,
             body,
@@ -1852,7 +1853,7 @@ async function queryRacent(domain: string , apiToken?: string): Promise<string[]
     }
     
     const url = `https://face.racent.com/tool/query_ctlog?token=${encodeURIComponent(apiToken)}&keyword=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1872,7 +1873,7 @@ async function queryCDX(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
     const url = `https://index.commoncrawl.org/CC-MAIN-2024-10-index?url=*.${encodeURIComponent(domain)}&output=json`;
     
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1901,7 +1902,7 @@ async function queryCDX(domain: string ): Promise<string[]> {
  */
 async function queryArchive(domain: string ): Promise<string[]> {
     const url = `https://web.archive.org/cdx/search/cdx?url=*.${encodeURIComponent(domain)}/*&output=json&fl=original&collapse=urlkey`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1923,7 +1924,7 @@ async function queryChinazAPI(domain: string , apiKey?: string): Promise<string[
     }
     
     const url = `https://apidata.chinaz.com/CallAPI/Alexa?key=${encodeURIComponent(apiKey)}&domainName=${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
         // @ts-ignore
     });
@@ -1947,7 +1948,7 @@ async function queryCIRCL(domain: string , username?: string, password?: string)
     const url = `https://www.circl.lu/pdns/query/${encodeURIComponent(domain)}`;
     const auth = btoa(`${username}:${password}`);
     
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Authorization": `Basic ${auth}`
@@ -1979,7 +1980,7 @@ async function queryCloudflare(domain: string , apiToken?: string): Promise<stri
     };
     
     // Get account ID
-    const accountResponse = await fetch("https://api.cloudflare.com/client/v4/accounts", {
+    const accountResponse = await fetchWithRetry("https://api.cloudflare.com/client/v4/accounts", {
         headers,
         // @ts-ignore
     });
@@ -1996,7 +1997,7 @@ async function queryCloudflare(domain: string , apiToken?: string): Promise<stri
     }
     
     // Get zones for domain
-    const zonesResponse = await fetch(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(domain)}`, {
+    const zonesResponse = await fetchWithRetry(`https://api.cloudflare.com/client/v4/zones?name=${encodeURIComponent(domain)}`, {
         headers,
         // @ts-ignore
     });
@@ -2015,7 +2016,7 @@ async function queryCloudflare(domain: string , apiToken?: string): Promise<stri
     // Get DNS records
     let page = 1;
     while (page <= 10) {
-        const dnsResponse = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?page=${page}&per_page=100`, {
+        const dnsResponse = await fetchWithRetry(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?page=${page}&per_page=100`, {
             headers,
             // @ts-ignore
         });
@@ -2048,7 +2049,7 @@ async function queryDNSDB(domain: string , apiKey?: string): Promise<string[]> {
     }
     
     const url = `https://api.dnsdb.info/lookup/rrset/name/*.${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "X-API-Key": apiKey
@@ -2076,7 +2077,7 @@ async function queryIPv4Info(domain: string , apiKey?: string): Promise<string[]
     
     for (let page = 0; page < 50; page++) {
         const url = `http://ipv4info.com/api_v1/?type=SUBDOMAINS&key=${encodeURIComponent(apiKey)}&value=${encodeURIComponent(domain)}&page=${page}`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -2117,7 +2118,7 @@ async function queryPassiveDNS(domain: string , apiToken?: string, apiAddr?: str
     }
     
     const url = `${baseUrl}/flint/rrset/*.${encodeURIComponent(domain)}`;
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
         headers,
         // @ts-ignore
     });
@@ -2146,7 +2147,7 @@ async function queryBingAPI(domain: string , apiKey?: string): Promise<string[]>
         const query = `site:.${domain}`;
         const url = `https://api.bing.microsoft.com/v7.0/search?q=${encodeURIComponent(query)}&count=${perPage}&offset=${offset}&safesearch=Off`;
         
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Ocp-Apim-Subscription-Key": apiKey
@@ -2182,7 +2183,7 @@ async function queryGoogleAPI(domain: string , apiKey?: string, searchEngineId?:
         const query = `site:.${domain}`;
         const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(apiKey)}&cx=${encodeURIComponent(searchEngineId)}&q=${encodeURIComponent(query)}&fields=items/link&start=${start}&num=10`;
         
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -2207,7 +2208,7 @@ async function queryGitee(domain: string ): Promise<string[]> {
     
     for (let page = 1; page <= 100; page++) {
         const url = `https://search.gitee.com/?pageno=${page}&q=${encodeURIComponent(domain)}&type=code`;
-        const response = await fetch(url, {
+        const response = await fetchWithRetry(url, {
             headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
             // @ts-ignore
         });
@@ -2429,19 +2430,34 @@ async function querySource(
 }
 
 /**
- * Submit source work together so Rust can own request pacing and concurrency.
+ * Run source tasks with bounded plugin concurrency. Host enforces global direct-fetch limit.
  */
-async function runThroughRuntimeQueue(tasks: Array<() => Promise<SourceResult>>): Promise<SourceResult[]> {
-    const results = new Array<SourceResult>(tasks.length);
+async function runSourceTasksWithConcurrency(tasks: Array<() => Promise<SourceResult>>): Promise<SourceResult[]> {
+    const results: SourceResult[] = [];
+    const workerCount = Math.min(16, tasks.length);
     let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
-        while (nextIndex < tasks.length) {
-            const currentIndex = nextIndex++;
-            const result = await tasks[currentIndex]();
-            logSourceResult(result);
-            results[currentIndex] = result;
-        }
-    });
+
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < workerCount; w++) {
+        workers.push((async () => {
+            while (nextIndex < tasks.length) {
+                const currentIndex = nextIndex++;
+                try {
+                    const result = await tasks[currentIndex]();
+                    logSourceResult(result);
+                    results[currentIndex] = result;
+                } catch (err: any) {
+                    results[currentIndex] = {
+                        source: "unknown",
+                        subdomains: [],
+                        count: 0,
+                        error: err?.message || String(err),
+                        responseTime: 0,
+                    };
+                }
+            }
+        })());
+    }
     await Promise.all(workers);
     return results;
 }
@@ -2500,7 +2516,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         sources = prioritizeSources(sources);
         try {
-            (globalThis as any).Sentinel?.log?.(
+            Sentinel?.log?.(
                 "info",
                 `[subdomain_enumerator] start domain=${domain} sources=${sources.length}`
             );
@@ -2508,7 +2524,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             // Ignore logging failures.
         }
         const tasks = sources.map(source => () => querySource(source, domain, input.apiConfig));
-        const sourceResults = await runThroughRuntimeQueue(tasks);
+        const sourceResults = await runSourceTasksWithConcurrency(tasks);
         
         const allSubdomains: string[] = [];
         let sourcesSucceeded = 0;
@@ -2627,4 +2643,3 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     }
 }
 
-pluginGlobals.analyze = analyze;

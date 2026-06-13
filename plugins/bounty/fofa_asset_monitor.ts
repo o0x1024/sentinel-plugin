@@ -713,6 +713,7 @@ async function fetchJson(url: string): Promise<FofaApiResponse> {
     const response = await fetch(url, {
         method: "GET",
         headers: { accept: "application/json" },
+        timeout: 30000,
     });
     const text = await response.text();
     let payload: any;
@@ -1087,10 +1088,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             data: {
                 queries: plans,
                 results,
-                subdomains: [],
-                urls: [],
-                ips: [],
-                assets: [],
+                subdomains,
+                urls,
+                ips,
+                assets: allAssets,
                 changeEvents,
                 snapshots,
                 summary: {
