@@ -3,9 +3,12 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.5
+ * @version 2.2.6
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type risk
+ * @input_mode asset
+ * @target_asset_types web
  * @category risk
  * @default_severity medium
  * @tags risk, poc, verification, dictionary, workflow

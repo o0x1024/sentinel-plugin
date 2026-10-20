@@ -3,9 +3,12 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.6
+ * @version 1.2.7
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type service
+ * @input_mode asset
+ * @target_asset_types service
  * @category recon
  * @default_severity info
  * @tags service, probe, fingerprint, banner, asm

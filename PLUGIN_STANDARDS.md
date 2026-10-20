@@ -122,6 +122,34 @@ Sentinel.emitFinding({
 
 ## 4. 插件元数据与输入定义
 
+### 监控插件的商店声明
+
+`plugins.json` 中声明 `monitor_type` 的 `agent` / `bounty` 插件，必须同时声明完整的输入所有权：
+
+- `input_mode: "asset"`：必须有非空的 `target_asset_types`，不得配置 `seed_bindings`。
+- `input_mode: "seed"`：必须有非空的 `seed_bindings`，不得配置资产类型。
+- `input_mode: "hybrid"`：资产类型和种子绑定都必须配置。
+
+例如 DNS Resolver 使用 `"monitor_type": "ip"`、`"input_mode": "asset"` 和
+`"target_asset_types": ["domain", "web"]`。`monitor_type` 表示调度阶段；资产类型表示实际输入，二者不必同名。
+种子绑定的 `input_key` 必须对应插件输入 Schema 中的字符串数组。
+
+资产模式下，监控器注入 `targets`、`domains`、`urls`、`ips`、`target_objects` 和 `service_targets`；
+非空域名、URL、IP 列表另提供首项别名 `domain`、`url`、`ip`。API 资产可额外提供 `api_paths`。
+插件应使用对应的标准字段，避免要求监控器不会注入的字段。单值插件每次使用对应列表的首项。
+目标和种子由监控器管理，不应写入全局默认配置。
+
+修改商店声明后，同步插件头部声明与版本号，并运行：
+
+```bash
+deno test --allow-read scripts/plugin_manifest_test.ts
+deno run --allow-read scripts/plugin_catalog_smoke.ts
+deno run --allow-read scripts/bounty_functional_test.ts
+```
+
+以上功能测试使用本地桩，不需要网络访问。输入所有权规则对应 Sentinel 的
+`sentinel-contracts/src/monitor_plugin.rs`，规则变更时应同步本仓库的 `scripts/plugin_monitor_contract.ts`。
+
 一定要导出 `get_input_schema()`，这对 AI Agent 正确调用工具至关重要。
 
 ```typescript

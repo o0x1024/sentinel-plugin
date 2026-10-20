@@ -3,9 +3,12 @@
  * 
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.3
+ * @version 1.2.4
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type cert
+ * @input_mode asset
+ * @target_asset_types domain, web
  * @category monitor
  * @default_severity medium
  * @tags certificate, ssl, tls, monitor, change-detection, expiry

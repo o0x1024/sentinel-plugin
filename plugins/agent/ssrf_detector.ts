@@ -3,9 +3,12 @@
  * 
  * @plugin ssrf_detector
  * @name SSRF Detector
- * @version 1.3.3
+ * @version 1.3.4
  * @author Sentinel Team
  * @main_category agent
+ * @monitor_type risk
+ * @input_mode asset
+ * @target_asset_types web
  * @category vuln
  * @default_severity high
  * @tags ssrf, vulnerability, security, web

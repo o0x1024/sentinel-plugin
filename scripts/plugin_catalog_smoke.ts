@@ -1,4 +1,7 @@
-interface ManifestPlugin {
+import { validateMonitorMetadata, validateMonitorSchema } from "./plugin_monitor_contract.ts";
+import type { MonitorPluginMetadata } from "./plugin_monitor_contract.ts";
+
+interface ManifestPlugin extends MonitorPluginMetadata {
     id: string;
     name: string;
     main_category: string;
@@ -182,6 +185,7 @@ window.__APP_CONFIG__ = {
 fetch("/api/health");
 fetch("/api/users");
 fetch("/rest/v1/projects");
+//# sourceMappingURL=app.js.map
 `.trim();
 }
 
@@ -261,7 +265,7 @@ async function fetchStub(input: RequestInfo | URL, init?: RequestInit): Promise<
         return Response.json({
             version: 3,
             file: "app.js",
-            sources: ["app.ts"],
+            sources: ["webpack:///src/app.ts"],
             sourcesContent: [buildJsBundle()],
             names: [],
             mappings: "",
@@ -624,6 +628,43 @@ function buildInputForPlugin(plugin: ManifestPlugin): Record<string, unknown> {
     }
 }
 
+// Exercise the payload ownership used by monitor_input_support.rs, rather than
+// relying only on the hand-written tool invocation fixtures above.
+function buildMonitorAssetInput(
+    plugin: ManifestPlugin,
+    assetType: string,
+    properties: Record<string, unknown>,
+): Record<string, unknown> {
+    const input = buildInputForPlugin(plugin);
+    const runtimeKeys = ["targets", "target_objects", "service_targets", "urls", "url", "domains", "domain", "ips", "ip"];
+    for (const key of runtimeKeys) delete input[key];
+    // This legacy alias must not mask a missing standard domain input.
+    if (plugin.id === "subdomain_takeover") delete input.subdomains;
+    const payload: Record<string, unknown> = { targets: [], domains: [], urls: [], ips: [], target_objects: [], service_targets: [] };
+    const type = assetType === "api" ? "web" : assetType;
+    const value = type === "domain" ? "example.com"
+        : type === "ip" ? "203.0.113.10"
+        : type === "ip_range" ? "203.0.113.0/30"
+        : type === "service" ? "example.com:443" : "https://example.com";
+    const descriptor = type === "service"
+        ? { type, value, host: "example.com", port: 443, protocol: "https" }
+        : { type, value };
+    if (assetType === "api") {
+        input.api_paths = ["https://example.com/api/users"];
+    } else {
+        payload.targets = [value];
+        payload.target_objects = [descriptor];
+        if (type === "domain") Object.assign(payload, { domains: [value], domain: value });
+        if (type === "web") Object.assign(payload, { urls: [value], url: value });
+        if (type === "ip" || type === "ip_range") Object.assign(payload, { ips: [value], ip: value });
+        if (type === "service") payload.service_targets = [descriptor];
+    }
+    for (const [key, value] of Object.entries(payload)) {
+        if (key in properties) input[key] = value;
+    }
+    return input;
+}
+
 async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
     let localUrl: URL;
     try {
@@ -653,6 +694,7 @@ async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
     }
 
     try {
+        validateMonitorMetadata(plugin);
         const module = await import(`${localUrl.href}?smoke=${Date.now()}-${plugin.id}`);
         if (plugin.main_category === "traffic") {
             if (typeof module.scan_transaction !== "function") {
@@ -687,6 +729,7 @@ async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
         if (!inputSchema || typeof inputSchema !== "object") {
             throw new Error("get_input_schema returned an invalid value");
         }
+        validateMonitorSchema(plugin, inputSchema);
         if (!outputSchema || typeof outputSchema !== "object") {
             throw new Error("get_output_schema returned an invalid value");
         }
@@ -698,6 +741,14 @@ async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
         if (output.success !== true) {
             throw new Error(String(output.error || "analyze returned success=false"));
         }
+        if (plugin.input_mode === "asset") {
+            for (const assetType of plugin.target_asset_types ?? []) {
+                const monitorOutput = await module.analyze(buildMonitorAssetInput(plugin, assetType, inputSchema.properties));
+                if (monitorOutput?.success !== true) {
+                    throw new Error(`Monitor ${assetType} input: ${monitorOutput?.error || "analyze returned success=false"}`);
+                }
+            }
+        }
 
         return {
             id: plugin.id,
@@ -705,7 +756,7 @@ async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
             mainCategory: plugin.main_category,
             localPath: localUrl.pathname,
             status: "passed",
-            detail: "analyze ok",
+            detail: "analyze and declared monitor asset inputs ok",
         };
     } catch (error) {
         return {
@@ -739,6 +790,7 @@ async function main(): Promise<void> {
         failed: failed.length,
         failures: failed,
     }, null, 2));
+    if (failed.length) Deno.exit(1);
 }
 
 await main();

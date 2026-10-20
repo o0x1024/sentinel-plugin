@@ -3,9 +3,12 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.3.4
+ * @version 1.3.5
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type web
+ * @input_mode asset
+ * @target_asset_types web
  * @category recon
  * @default_severity info
  * @tags favicon, fingerprint, web, asm, surface

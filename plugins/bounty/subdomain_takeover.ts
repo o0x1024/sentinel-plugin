@@ -3,9 +3,12 @@
  * 
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.1.4
+ * @version 1.1.5
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type risk
+ * @input_mode asset
+ * @target_asset_types domain
  * @category vuln
  * @default_severity high
  * @tags subdomain, takeover, dns, vulnerability, security
@@ -13,7 +16,8 @@
  */
 
 interface ToolInput {
-    subdomains: string[];
+    domains?: string[];
+    subdomains?: string[];
     concurrency?: number;
     checkCname?: boolean;
     checkHttp?: boolean;
@@ -485,12 +489,17 @@ const SERVICE_FINGERPRINTS: ServiceFingerprint[] = [
 export function get_input_schema() {
     return {
         type: "object",
-        required: ["subdomains"],
+        required: [],
         properties: {
+            domains: {
+                type: "array",
+                items: { type: "string" },
+                description: "Domain targets supplied by the monitor or caller"
+            },
             subdomains: {
                 type: "array",
                 items: { type: "string" },
-                description: "List of subdomains to check for takeover vulnerabilities"
+                description: "Legacy alias for domains; domains takes precedence when supplied"
             },
             concurrency: {
                 type: "integer",
@@ -831,15 +840,16 @@ async function runWithConcurrency<T>(
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         // Validate input
-        if (!input.subdomains || !Array.isArray(input.subdomains)) {
+        const subdomains = input.domains ?? input.subdomains;
+        if (!Array.isArray(subdomains)) {
             return {
                 success: false,
-                error: "Invalid input: subdomains array is required"
+                error: "Invalid input: domains (or legacy subdomains) array is required"
             };
         }
         
         // Filter out empty strings
-        const validSubdomains = [...new Set(input.subdomains.filter(s => typeof s === 'string' && s.trim().length > 0))];
+        const validSubdomains = [...new Set(subdomains.filter(s => typeof s === 'string' && s.trim().length > 0))];
         if (validSubdomains.length === 0) {
             return {
                 success: false,
@@ -877,7 +887,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         return {
             success: true,
             data: {
-                subdomains: input.subdomains,
+                subdomains: validSubdomains,
                 results,
                 summary: {
                     total: results.length,

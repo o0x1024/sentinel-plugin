@@ -3,9 +3,12 @@
  * 
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.5
+ * @version 1.4.6
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type web
+ * @input_mode asset
+ * @target_asset_types domain, ip, service, web
  * @category recon
  * @default_severity info
  * @tags http, probe, alive, discovery, web

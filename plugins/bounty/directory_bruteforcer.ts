@@ -3,9 +3,12 @@
  * 
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.6
+ * @version 1.2.7
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type web
+ * @input_mode asset
+ * @target_asset_types web
  * @category discovery
  * @default_severity info
  * @tags directory, bruteforce, discovery, fuzzing, web

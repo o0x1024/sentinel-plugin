@@ -3,9 +3,12 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.4
+ * @version 3.1.5
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type api
+ * @input_mode asset
+ * @target_asset_types web
  * @category discovery
  * @default_severity info
  * @tags javascript, endpoint, api, discovery, secrets, ast

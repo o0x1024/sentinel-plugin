@@ -3,9 +3,12 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.1.2
+ * @version 1.1.3
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type ip
+ * @input_mode asset
+ * @target_asset_types domain, web
  * @category recon
  * @default_severity info
  * @tags dns, resolver, mapping, domain, asm

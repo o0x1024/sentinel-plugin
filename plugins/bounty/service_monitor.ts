@@ -3,9 +3,12 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.6
+ * @version 1.0.7
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type service
+ * @input_mode asset
+ * @target_asset_types service
  * @category monitor
  * @default_severity medium
  * @tags service, monitor, change-detection, banner, version, asm

@@ -3,9 +3,12 @@
  * 
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.5
+ * @version 1.3.6
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type port
+ * @input_mode asset
+ * @target_asset_types ip, service
  * @category monitor
  * @default_severity medium
  * @tags port, service, monitor, change-detection, scan

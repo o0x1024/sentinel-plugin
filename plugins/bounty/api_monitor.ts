@@ -3,9 +3,12 @@
  * 
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.4.1
+ * @version 1.4.2
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type api
+ * @input_mode asset
+ * @target_asset_types web
  * @category monitor
  * @default_severity high
  * @tags api, endpoint, monitor, change-detection, rest, javascript, spa

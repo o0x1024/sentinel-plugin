@@ -3,9 +3,12 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.2.6
+ * @version 2.2.7
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type web
+ * @input_mode asset
+ * @target_asset_types web
  * @category recon
  * @default_severity info
  * @tags fingerprint, technology, dictionary, web

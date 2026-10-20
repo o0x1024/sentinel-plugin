@@ -3,9 +3,12 @@
  * 
  * @plugin sql_injection_scanner
  * @name SQL Injection Scanner
- * @version 1.1.3
+ * @version 1.1.4
  * @author Sentinel Team
  * @main_category agent
+ * @monitor_type risk
+ * @input_mode asset
+ * @target_asset_types web
  * @category vuln
  * @default_severity critical
  * @tags sqli, sql-injection, vulnerability, security, web, owasp, database

@@ -3,9 +3,12 @@
  * 
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.4
+ * @version 1.1.5
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type content
+ * @input_mode asset
+ * @target_asset_types web
  * @category monitor
  * @default_severity low
  * @tags content, monitor, change-detection, fingerprint, hash

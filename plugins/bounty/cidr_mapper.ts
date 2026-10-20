@@ -3,9 +3,12 @@
  *
  * @plugin cidr_mapper
  * @name CIDR Mapper
- * @version 1.0.0
+ * @version 1.0.1
  * @author Sentinel Team
  * @main_category bounty
+ * @monitor_type ip
+ * @input_mode asset
+ * @target_asset_types ip, ip_range
  * @category recon
  * @default_severity info
  * @tags cidr, ip, network, asm, surface
