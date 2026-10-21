@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.3.1
+ * @version 2.3.2
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -31,6 +31,7 @@ interface ToolInput {
     url?: string;
     base_url?: string;
     targets?: string[];
+    target_objects?: Array<{ type: string; value: string; source: string; asset_id?: string }>;
     dictionaryId?: string;
     dictionaryEntries?: RuleEntry[];
     concurrency?: number;
@@ -75,7 +76,6 @@ interface PerTargetResult {
     http_status?: number;
     final_url?: string;
     checked_at: string;
-    input_index?: number;
 }
 
 interface TechnologySnapshot {
@@ -117,6 +117,7 @@ interface ToolOutput {
             identifiedTechnologies: number;
             technologyChanges: number;
             failedTargets: number;
+            skippedTargets: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -176,6 +177,7 @@ export function get_input_schema() {
             url: { type: "string", description: "Target URL" },
             base_url: { type: "string", description: "Base URL alias" },
             targets: { type: "array", items: { type: "string" }, description: "Multiple target URLs" },
+            target_objects: { type: "array", items: { type: "object" }, description: "Runtime Web asset references supplied by the monitor host" },
             dictionaryId: { type: "string", "x-control": "dictionary-picker", "x-dictionary-type": "fingerprint_rule", description: "Structured fingerprint dictionary ID or name" },
             dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
             concurrency: {
@@ -247,13 +249,20 @@ async function runConcurrently<T>(
 }
 
 function normalizeTarget(raw: unknown): string {
-    if (typeof raw !== "string" || !raw || raw.trim() !== raw || /\s/.test(raw)) {
+    if (typeof raw !== "string" || !raw || raw.trim() !== raw || /[\s\x00-\x1f\x7f\\]/.test(raw)) {
         throw new Error("Target must be a non-empty URL without whitespace");
     }
-    if (!/^https?:\/\//i.test(raw)) throw new Error("Target must start with http:// or https://");
+    if (!/^https?:\/\/[^/\\]/i.test(raw)) throw new Error("Target must start with http:// or https:// and a host");
     const url = new URL(raw);
     if (!/^https?:$/i.test(url.protocol) || !url.hostname || url.username || url.password || raw.includes("#") || url.port === "0") {
         throw new Error("Target must be an absolute HTTP(S) URL without credentials or a fragment");
+    }
+    if (!url.hostname.startsWith("[")) {
+        const host = url.hostname.replace(/\.$/, "");
+        if (host.length > 253 || host.split(".").some(label => label.length > 63
+            || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))) {
+            throw new Error("Target must contain a valid DNS hostname or IP address");
+        }
     }
     // Preserve the exact asset identity; validation must not rewrite a stored key.
     return raw;
@@ -479,20 +488,32 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         ];
         if (rawTargets.length === 0) return { success: false, error: "At least one target URL is required" };
         const targets: string[] = [];
-        const rejected: Array<{ index: number }> = [];
-        const seen = new Set<string>();
+        let skippedTargets = 0;
+        let eligibleMonitorTargets: Set<string> | undefined;
+        if (input.__monitorExecution || input.target_objects !== undefined) {
+            if (!Array.isArray(input.target_objects)) throw new Error("Monitor target_objects must contain existing Web asset references");
+            eligibleMonitorTargets = new Set(input.target_objects
+                .filter(item => item && item.type === "web" && item.source === "surface_asset"
+                    && typeof item.asset_id === "string" && item.asset_id.trim().length > 0
+                    && typeof item.value === "string")
+                .map(item => item.value));
+        }
+        const seen = new Set<unknown>();
         for (let index = 0; index < rawTargets.length; index++) {
+            if (seen.has(rawTargets[index])) continue;
+            seen.add(rawTargets[index]);
             try {
                 const target = normalizeTarget(rawTargets[index]);
-                if (!seen.has(target)) { seen.add(target); targets.push(target); }
+                if (eligibleMonitorTargets && !eligibleMonitorTargets.has(target)) { skippedTargets++; continue; }
+                targets.push(target);
             } catch {
                 // Do not persist a rejected raw value: it may contain credentials.
-                rejected.push({ index });
+                skippedTargets++;
             }
         }
 
-        const rules = await loadRules(input);
-        if (rules.length === 0) {
+        const rules = targets.length > 0 ? await loadRules(input) : [];
+        if (targets.length > 0 && rules.length === 0) {
             return {
                 success: false,
                 error: "No technology fingerprint rules loaded. Configure dictionaryEntries or a fingerprint_rule dictionary with explicit matchers.",
@@ -515,11 +536,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
         const results: PerTargetResult[] = [];
         const timestamp = new Date().toISOString();
-        for (const item of rejected) {
-            results.push({ url: `[invalid target at index ${item.index}]`, input_index: item.index,
-                technologies: [], status: "failed", error: "INVALID_TARGET: absolute HTTP(S) URL without credentials or a fragment required", checked_at: timestamp });
-        }
-        const totalTargets = targets.length + rejected.length;
+        const totalTargets = targets.length;
         const fingerprints: any[] = [];
         const evidences: any[] = [];
         const previousSnapshots = input.previousSnapshots || {};
@@ -528,13 +545,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const monitorExecution = input.__monitorExecution;
 
         await reportMonitorProgress(monitorExecution, {
-            current: rejected.length,
+            current: 0,
             total: totalTargets,
             phase: "prepare",
             message: `Preparing technology fingerprints (${targets.length} targets, concurrency ${concurrency})`,
         });
 
-        let completedTargets = rejected.length;
+        let completedTargets = 0;
         await runConcurrently(targets.map((target) => async () => {
                 try {
                     const response = await fetchPage(target, userAgent);
@@ -673,8 +690,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         );
 
         return {
-            success: targets.length > 0,
-            error: targets.length > 0 ? undefined : "No valid HTTP(S) targets remain after validation",
+            success: true,
             data: {
                 results,
                 technologies: uniqueTechnologies,
@@ -686,6 +702,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     identifiedTechnologies: results.reduce((sum, item) => sum + item.technologies.length, 0),
                     technologyChanges: changeEvents.length,
                     failedTargets: results.filter(item => item.status === "failed").length,
+                    skippedTargets,
                 },
                 surface_artifacts: {
                     fingerprints,
