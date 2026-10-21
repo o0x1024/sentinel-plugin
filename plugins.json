@@ -1,5 +1,5 @@
 {
-  "version": "2.5.2",
+  "version": "2.5.3",
   "updated_at": "2026-10-21",
   "plugins": [
     {
@@ -239,7 +239,7 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "2.3.0",
+      "version": "2.3.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",

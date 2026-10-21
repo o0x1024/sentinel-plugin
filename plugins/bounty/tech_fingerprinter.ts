@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.3.0
+ * @version 2.3.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -75,6 +75,7 @@ interface PerTargetResult {
     http_status?: number;
     final_url?: string;
     checked_at: string;
+    input_index?: number;
 }
 
 interface TechnologySnapshot {
@@ -245,12 +246,17 @@ async function runConcurrently<T>(
     return results;
 }
 
-function normalizeTarget(raw?: string): string | null {
-    if (!raw || typeof raw !== "string") return null;
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    if (!/^https?:\/\//i.test(trimmed)) throw new Error("Target must be an absolute HTTP(S) URL");
-    return trimmed;
+function normalizeTarget(raw: unknown): string {
+    if (typeof raw !== "string" || !raw || raw.trim() !== raw || /\s/.test(raw)) {
+        throw new Error("Target must be a non-empty URL without whitespace");
+    }
+    if (!/^https?:\/\//i.test(raw)) throw new Error("Target must start with http:// or https://");
+    const url = new URL(raw);
+    if (!/^https?:$/i.test(url.protocol) || !url.hostname || url.username || url.password || raw.includes("#") || url.port === "0") {
+        throw new Error("Target must be an absolute HTTP(S) URL without credentials or a fragment");
+    }
+    // Preserve the exact asset identity; validation must not rewrite a stored key.
+    return raw;
 }
 
 function parseTitle(html: string): string {
@@ -271,20 +277,16 @@ function parseMetadata(value: any): Record<string, any> {
 }
 
 async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
-    if (!Sentinel?.Dictionary?.getEntries) return [];
-    try {
-        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-        return entries
-            .filter((item: any) => item && typeof item.word === "string")
-            .map((item: any) => ({
-                id: typeof item.id === "string" ? item.id : undefined,
-                word: item.word,
-                category: typeof item.category === "string" ? item.category : null,
-                metadata: parseMetadata(item.metadata),
-            }));
-    } catch {
-        return [];
-    }
+    if (!Sentinel?.Dictionary?.getEntries) throw new Error("Dictionary API unavailable; capability:dictionary is required");
+    const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
+    return entries
+        .filter((item: any) => item && typeof item.word === "string")
+        .map((item: any) => ({
+            id: typeof item.id === "string" ? item.id : undefined,
+            word: item.word,
+            category: typeof item.category === "string" ? item.category : null,
+            metadata: parseMetadata(item.metadata),
+        }));
 }
 
 async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
@@ -295,17 +297,14 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
         }));
     }
 
-    const defaultDictionaryId = Sentinel?.Dictionary?.getDefaultId
-        ? await Sentinel.Dictionary.getDefaultId("fingerprint_rule")
-        : null;
-
-    const dictionaryId = input.dictionaryId || defaultDictionaryId;
+    const dictionaryId = input.dictionaryId || (Sentinel?.Dictionary?.getDefaultId
+        ? await Sentinel.Dictionary.getDefaultId("fingerprint_rule") : null);
     if (!dictionaryId) throw new Error("Configure a fingerprint_rule dictionary before probing");
     return await loadDictionaryEntries(dictionaryId);
 }
 
 async function fetchPage(url: string, userAgent: string): Promise<Response> {
-    return await fetch(url, {
+    const options: RequestInit & { timeout: number } = {
         method: "GET",
         redirect: "follow",
         headers: {
@@ -313,7 +312,8 @@ async function fetchPage(url: string, userAgent: string): Promise<Response> {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
         timeout: DEFAULT_TIMEOUT_MS,
-    });
+    };
+    return await fetch(url, options);
 }
 
 function normalizeTechnologySnapshot(technologies: Array<{ name: string; category: string; version?: string }>): Array<{ name: string; category: string; version?: string }> {
@@ -469,14 +469,26 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             MAX_CONCURRENCY,
         );
         const userAgent = input.userAgent || "Sentinel-Tech-Fingerprinter/2.0";
-        const targets = Array.from(new Set([
-            normalizeTarget(input.url),
-            normalizeTarget(input.base_url),
-            ...(Array.isArray(input.targets) ? input.targets.map(normalizeTarget) : []),
-        ].filter((value): value is string => Boolean(value))));
-
-        if (targets.length === 0) {
-            return { success: false, error: "At least one target URL is required" };
+        if (input.targets !== undefined && !Array.isArray(input.targets)) {
+            return { success: false, error: "targets must be an array" };
+        }
+        const rawTargets: unknown[] = [
+            ...(input.url !== undefined ? [input.url] : []),
+            ...(input.base_url !== undefined ? [input.base_url] : []),
+            ...(input.targets || []),
+        ];
+        if (rawTargets.length === 0) return { success: false, error: "At least one target URL is required" };
+        const targets: string[] = [];
+        const rejected: Array<{ index: number }> = [];
+        const seen = new Set<string>();
+        for (let index = 0; index < rawTargets.length; index++) {
+            try {
+                const target = normalizeTarget(rawTargets[index]);
+                if (!seen.has(target)) { seen.add(target); targets.push(target); }
+            } catch {
+                // Do not persist a rejected raw value: it may contain credentials.
+                rejected.push({ index });
+            }
         }
 
         const rules = await loadRules(input);
@@ -502,22 +514,27 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             for (const pattern of metadata.version_patterns || []) new RegExp(pattern.pattern, "i");
         }
         const results: PerTargetResult[] = [];
+        const timestamp = new Date().toISOString();
+        for (const item of rejected) {
+            results.push({ url: `[invalid target at index ${item.index}]`, input_index: item.index,
+                technologies: [], status: "failed", error: "INVALID_TARGET: absolute HTTP(S) URL without credentials or a fragment required", checked_at: timestamp });
+        }
+        const totalTargets = targets.length + rejected.length;
         const fingerprints: any[] = [];
         const evidences: any[] = [];
         const previousSnapshots = input.previousSnapshots || {};
         const changeEvents: ChangeEvent[] = [];
         const snapshots: Record<string, TechnologySnapshot> = { ...previousSnapshots };
-        const timestamp = new Date().toISOString();
         const monitorExecution = input.__monitorExecution;
 
         await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: targets.length,
+            current: rejected.length,
+            total: totalTargets,
             phase: "prepare",
             message: `Preparing technology fingerprints (${targets.length} targets, concurrency ${concurrency})`,
         });
 
-        let completedTargets = 0;
+        let completedTargets = rejected.length;
         await runConcurrently(targets.map((target) => async () => {
                 try {
                     const response = await fetchPage(target, userAgent);
@@ -639,7 +656,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     completedTargets += 1;
                     await reportMonitorProgress(monitorExecution, {
                         current: completedTargets,
-                        total: targets.length,
+                        total: totalTargets,
                         currentTarget: target,
                         phase: "fingerprint",
                         message: `Checked technology fingerprint for ${target}`,
@@ -656,14 +673,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         );
 
         return {
-            success: true,
+            success: targets.length > 0,
+            error: targets.length > 0 ? undefined : "No valid HTTP(S) targets remain after validation",
             data: {
                 results,
                 technologies: uniqueTechnologies,
                 changeEvents,
                 snapshots,
                 summary: {
-                    totalTargets: targets.length,
+                    totalTargets,
                     matchedTargets: results.filter(item => item.technologies.length > 0).length,
                     identifiedTechnologies: results.reduce((sum, item) => sum + item.technologies.length, 0),
                     technologyChanges: changeEvents.length,
