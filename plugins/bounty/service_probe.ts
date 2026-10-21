@@ -3,15 +3,16 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.7
+ * @version 1.2.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type service
  * @input_mode asset
- * @target_asset_types service
+ * @target_asset_types ["service"]
  * @category recon
+ * @seed_bindings []
  * @default_severity info
- * @tags service, probe, fingerprint, banner, asm
+ * @tags service, probe, fingerprint, banner, asm, network, dictionary, normalized, native, capability:network-scan, capability:dictionary, capability:monitor-events
  * @description Identify exposed services from host/port targets with the native Rust service identification engine, normalized fingerprint artifacts, and structured service evidence
  */
 

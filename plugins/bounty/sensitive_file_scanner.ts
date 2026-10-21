@@ -3,15 +3,16 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.3.7
+ * @version 1.3.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["web"]
  * @category risk
+ * @seed_bindings []
  * @default_severity medium
- * @tags risk, exposure, file, dictionary, web
+ * @tags risk, exposure, file, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events
  * @description Scan web targets for exposed sensitive files using structured dictionary rules.
  */
 

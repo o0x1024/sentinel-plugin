@@ -3,14 +3,16 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.5
+ * @version 1.2.6
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
  * @monitor_type web
  * @input_mode seed
+ * @target_asset_types []
+ * @seed_bindings [{"seed_type":"root_domain","input_key":"domains"},{"seed_type":"domain","input_key":"domains"},{"seed_type":"favicon_hash","input_key":"iconHashes"},{"seed_type":"brand_keyword","input_key":"brandKeywords"},{"seed_type":"org_name","input_key":"orgNames"},{"seed_type":"asn","input_key":"asnList"},{"seed_type":"cname_keyword","input_key":"cnameKeywords"},{"seed_type":"title_keyword","input_key":"titleKeywords"},{"seed_type":"body_keyword","input_key":"bodyKeywords"},{"seed_type":"header_keyword","input_key":"headerKeywords"}]
  * @default_severity medium
- * @tags fofa, asset, monitor, reconnaissance, osint, surface, change-detection
+ * @tags fofa, website, monitor, reconnaissance, osint, surface, change-detection, capability:fetch, capability:monitor-events
  * @description Query FOFA Search API with domain and enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.
  */
 

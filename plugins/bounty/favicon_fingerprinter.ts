@@ -3,15 +3,16 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.3.5
+ * @version 1.3.6
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["domain","web"]
  * @category recon
+ * @seed_bindings []
  * @default_severity info
- * @tags favicon, fingerprint, web, asm, surface
+ * @tags favicon, icon-hash, fingerprint, web, asm, surface, dictionary, capability:fetch, capability:dictionary, capability:monitor-events
  * @description Fetch favicons from website targets, discover or enrich web assets, and emit favicon fingerprints/evidence
  */
 

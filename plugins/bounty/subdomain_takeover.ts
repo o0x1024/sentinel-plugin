@@ -1,14 +1,14 @@
 /**
  * Subdomain Takeover Detector Tool
- * 
+ *
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
  * @input_mode asset
- * @target_asset_types domain
+ * @target_asset_types ["domain"]
  * @category vuln
  * @default_severity high
  * @tags subdomain, takeover, dns, vulnerability, security

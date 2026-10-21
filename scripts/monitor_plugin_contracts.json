@@ -1,0 +1,312 @@
+{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "actuator_scanner",
+      "monitor_type": "risk",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web",
+        "api"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "api_monitor",
+      "monitor_type": "api",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "cert_monitor",
+      "monitor_type": "cert",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "domain",
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:tls-inspect",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "cidr_mapper",
+      "monitor_type": "ip",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "ip",
+        "ip_range"
+      ],
+      "seed_bindings": [],
+      "capability_tags": []
+    },
+    {
+      "id": "content_monitor",
+      "monitor_type": "content",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "directory_bruteforcer",
+      "monitor_type": "web",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "dns_resolver",
+      "monitor_type": "ip",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "domain",
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:network-scan",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "favicon_fingerprinter",
+      "monitor_type": "web",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "domain",
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "fofa_asset_monitor",
+      "monitor_type": "web",
+      "input_mode": "seed",
+      "target_asset_types": [],
+      "seed_bindings": [
+        {
+          "seed_type": "root_domain",
+          "input_key": "domains"
+        },
+        {
+          "seed_type": "domain",
+          "input_key": "domains"
+        },
+        {
+          "seed_type": "favicon_hash",
+          "input_key": "iconHashes"
+        },
+        {
+          "seed_type": "brand_keyword",
+          "input_key": "brandKeywords"
+        },
+        {
+          "seed_type": "org_name",
+          "input_key": "orgNames"
+        },
+        {
+          "seed_type": "asn",
+          "input_key": "asnList"
+        },
+        {
+          "seed_type": "cname_keyword",
+          "input_key": "cnameKeywords"
+        },
+        {
+          "seed_type": "title_keyword",
+          "input_key": "titleKeywords"
+        },
+        {
+          "seed_type": "body_keyword",
+          "input_key": "bodyKeywords"
+        },
+        {
+          "seed_type": "header_keyword",
+          "input_key": "headerKeywords"
+        }
+      ],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "http_prober",
+      "monitor_type": "web",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "domain",
+        "ip",
+        "service",
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "js_analyzer",
+      "monitor_type": "api",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:ast-parse",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "port_monitor",
+      "monitor_type": "port",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "ip",
+        "service"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:network-scan",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "risk_scanner",
+      "monitor_type": "risk",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "sensitive_file_scanner",
+      "monitor_type": "risk",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "service_monitor",
+      "monitor_type": "service",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "service"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:network-scan",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "service_probe",
+      "monitor_type": "service",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "service"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:network-scan",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "subdomain_enumerator",
+      "monitor_type": "dns",
+      "input_mode": "seed",
+      "target_asset_types": [],
+      "seed_bindings": [
+        {
+          "seed_type": "root_domain",
+          "input_key": "domains"
+        },
+        {
+          "seed_type": "domain",
+          "input_key": "domains"
+        }
+      ],
+      "capability_tags": [
+        "capability:fetch"
+      ]
+    },
+    {
+      "id": "tech_fingerprinter",
+      "monitor_type": "web",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:dictionary",
+        "capability:monitor-events"
+      ]
+    },
+    {
+      "id": "webpack_source_downloader",
+      "monitor_type": "web",
+      "input_mode": "asset",
+      "target_asset_types": [
+        "web"
+      ],
+      "seed_bindings": [],
+      "capability_tags": [
+        "capability:fetch",
+        "capability:filesystem-write",
+        "capability:monitor-events"
+      ]
+    }
+  ]
+}

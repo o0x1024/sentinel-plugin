@@ -3,13 +3,14 @@
  *
  * @plugin cidr_mapper
  * @name CIDR Mapper
- * @version 1.0.1
+ * @version 1.0.2
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
  * @input_mode asset
- * @target_asset_types ip, ip_range
+ * @target_asset_types ["ip","ip_range"]
  * @category recon
+ * @seed_bindings []
  * @default_severity info
  * @tags cidr, ip, network, asm, surface
  * @description Expand IPv4 CIDR blocks and individual IP targets into typed IP surface artifacts for ASM and network asset mapping workflows

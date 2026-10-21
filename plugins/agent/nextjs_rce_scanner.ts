@@ -3,15 +3,15 @@
  *
  * @plugin nextjs_rce_scanner
  * @name Next.js RCE Scanner
- * @version 1.0.5
+ * @version 1.0.6
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["web"]
  * @category exploit
  * @default_severity critical
- * @tags nextjs, rce, prototype-pollution, cve
+ * @tags nextjs, rce, prototype-pollution, cve, exploit
  * @description Detect and exploit Next.js prototype pollution RCE vulnerability
  */
 

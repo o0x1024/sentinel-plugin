@@ -1,0 +1,12 @@
+{
+  "name": "sentinel-plugin-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:monitors": "node scripts/build_monitor_plugins.mjs",
+    "check:monitors": "node scripts/build_monitor_plugins.mjs --check"
+  },
+  "devDependencies": {
+    "esbuild": "0.21.5"
+  }
+}

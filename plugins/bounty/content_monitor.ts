@@ -1,17 +1,18 @@
 /**
  * Web Content Change Monitor
- * 
+ *
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type content
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["web"]
  * @category monitor
+ * @seed_bindings []
  * @default_severity low
- * @tags content, monitor, change-detection, fingerprint, hash
+ * @tags content, monitor, change-detection, fingerprint, hash, capability:fetch, capability:monitor-events
  * @description Monitor web pages for content changes, generating ChangeEvents for workflow automation
  */
 

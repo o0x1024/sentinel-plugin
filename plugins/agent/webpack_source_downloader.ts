@@ -3,15 +3,16 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.7
+ * @version 1.0.8
  * @author Sentinel Team
  * @main_category agent
+ * @category utility
  * @monitor_type web
  * @input_mode asset
- * @target_asset_types web
- * @category utility
+ * @target_asset_types ["web"]
+ * @seed_bindings []
  * @default_severity info
- * @tags webpack, sourcemap, source, frontend, download
+ * @tags webpack, sourcemap, source, frontend, download, capability:fetch, capability:filesystem-write, capability:monitor-events
  * @description Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with optional workspace directory saving and content-free result manifests.
  */
 

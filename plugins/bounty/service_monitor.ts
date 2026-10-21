@@ -3,15 +3,16 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.7
+ * @version 1.0.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type service
  * @input_mode asset
- * @target_asset_types service
+ * @target_asset_types ["service"]
  * @category monitor
+ * @seed_bindings []
  * @default_severity medium
- * @tags service, monitor, change-detection, banner, version, asm
+ * @tags service, monitor, change-detection, banner, version, asm, network, capability:network-scan, capability:dictionary, capability:monitor-events
  * @description Monitor exposed services for availability, banner, product, and version changes with structured snapshots and change events
  */
 

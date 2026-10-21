@@ -3,15 +3,16 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.1.3
+ * @version 1.1.4
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
  * @input_mode asset
- * @target_asset_types domain, web
+ * @target_asset_types ["domain","web"]
  * @category recon
+ * @seed_bindings []
  * @default_severity info
- * @tags dns, resolver, mapping, domain, asm
+ * @tags dns, resolver, mapping, domain, asm, surface, capability:network-scan, capability:monitor-events
  * @description Resolve DNS records for domains and produce typed surface graph artifacts for ASM and network asset mapping
  */
 

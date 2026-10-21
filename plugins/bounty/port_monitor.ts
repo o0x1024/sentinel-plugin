@@ -1,17 +1,18 @@
 /**
  * Port Change Monitor
- * 
+ *
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.6
+ * @version 1.3.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type port
  * @input_mode asset
- * @target_asset_types ip, service
+ * @target_asset_types ["ip","service"]
  * @category monitor
+ * @seed_bindings []
  * @default_severity medium
- * @tags port, service, monitor, change-detection, scan
+ * @tags port, monitor, network, asm, surface, ip, host, change-detection, native, capability:network-scan, capability:monitor-events
  * @description Monitor typed host and IP targets for port exposure changes using native Rust-backed port discovery, prioritizing structured monitor targets and preserving strict IP-only execution semantics for ASM workflows
  */
 

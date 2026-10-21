@@ -18,7 +18,7 @@ for (const plugin of manifest.plugins) {
         if (plugin.input_mode === "asset") {
             deepEqual(source.match(/@input_mode\s+(\S+)/)?.[1], "asset");
             deepEqual(source.match(/@monitor_type\s+(\S+)/)?.[1], plugin.monitor_type);
-            deepEqual(source.match(/@target_asset_types ([^\n]+)/)?.[1].trim().split(/,\s*/), plugin.target_asset_types);
+            deepEqual(JSON.parse(source.match(/@target_asset_types ([^\n]+)/)![1]), plugin.target_asset_types);
             // Targets must be supplied through fields the monitor actually injects.
             const properties = module.get_input_schema().properties;
             const keys = ["targets", "domains", "urls", "url", "ips", "ip", "target_objects", "service_targets", "api_paths"];

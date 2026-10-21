@@ -1,17 +1,18 @@
 /**
  * Directory Bruteforcer Tool
- * 
+ *
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.7
+ * @version 1.2.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["web"]
  * @category discovery
+ * @seed_bindings []
  * @default_severity info
- * @tags directory, bruteforce, discovery, fuzzing, web
+ * @tags directory, bruteforce, discovery, fuzzing, web, capability:fetch, capability:dictionary, capability:monitor-events
  * @description Discover hidden directories, files, and endpoints on web servers using wordlist-based brute forcing
  */
 

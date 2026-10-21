@@ -3,15 +3,16 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.2.7
+ * @version 2.3.0
  * @author Sentinel Team
  * @main_category bounty
+ * @category recon
  * @monitor_type web
  * @input_mode asset
- * @target_asset_types web
- * @category recon
+ * @target_asset_types ["web"]
+ * @seed_bindings []
  * @default_severity info
- * @tags fingerprint, technology, dictionary, web
+ * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events
  * @description Identify web technologies using dictionary-driven fingerprint rules with structured matchers.
  */
 
@@ -62,13 +63,18 @@ interface TechnologyResult {
     name: string;
     category: string;
     version?: string;
-    confidence: number;
+    confidence?: number;
     evidence: string[];
 }
 
 interface PerTargetResult {
     url: string;
     technologies: TechnologyResult[];
+    status: "identified" | "unidentified" | "failed";
+    error?: string;
+    http_status?: number;
+    final_url?: string;
+    checked_at: string;
 }
 
 interface TechnologySnapshot {
@@ -109,6 +115,7 @@ interface ToolOutput {
             matchedTargets: number;
             identifiedTechnologies: number;
             technologyChanges: number;
+            failedTargets: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -242,7 +249,8 @@ function normalizeTarget(raw?: string): string | null {
     if (!raw || typeof raw !== "string") return null;
     const trimmed = raw.trim();
     if (!trimmed) return null;
-    return trimmed.startsWith("http://") || trimmed.startsWith("https://") ? trimmed : `https://${trimmed}`;
+    if (!/^https?:\/\//i.test(trimmed)) throw new Error("Target must be an absolute HTTP(S) URL");
+    return trimmed;
 }
 
 function parseTitle(html: string): string {
@@ -291,15 +299,9 @@ async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
         ? await Sentinel.Dictionary.getDefaultId("fingerprint_rule")
         : null;
 
-    const candidates = [input.dictionaryId, defaultDictionaryId, "builtin_web_fingerprint_rules", "Web Fingerprint Rules"]
-        .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-
-    for (const candidate of candidates) {
-        const rules = await loadDictionaryEntries(candidate);
-        if (rules.length > 0) return rules;
-    }
-
-    return [];
+    const dictionaryId = input.dictionaryId || defaultDictionaryId;
+    if (!dictionaryId) throw new Error("Configure a fingerprint_rule dictionary before probing");
+    return await loadDictionaryEntries(dictionaryId);
 }
 
 async function fetchPage(url: string, userAgent: string): Promise<Response> {
@@ -405,13 +407,27 @@ function matcherHit(ctx: Record<string, any>, matcher: any): boolean {
     return source.toLowerCase().includes(String(value || "").toLowerCase());
 }
 
-function ruleMatched(ctx: Record<string, any>, metadata: Record<string, any>): boolean {
+function matchedEvidence(ctx: Record<string, any>, metadata: Record<string, any>): Array<{part: string; key?: string; value: string}> {
     const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
-    if (matchers.length === 0) return false;
-    const operator = String(metadata.operator || "or").toLowerCase();
-    return operator === "and"
-        ? matchers.every((matcher: any) => matcherHit(ctx, matcher))
-        : matchers.some((matcher: any) => matcherHit(ctx, matcher));
+    if (matchers.length === 0) throw new Error("Fingerprint rule requires explicit matchers");
+    const hits = matchers.filter((matcher: any) => matcherHit(ctx, matcher));
+    if (String(metadata.operator || "or").toLowerCase() === "and" && hits.length !== matchers.length) return [];
+    return hits.map((matcher: any) => {
+        const part = String(matcher.part || "body").toLowerCase();
+        const key = part === "header" ? String(matcher.key).toLowerCase() : undefined;
+        const source = part === "header" ? String(ctx.headers[key!] || "") : part === "title" ? ctx.title : part === "status" ? String(ctx.status) : ctx.body;
+        let value = String(matcher.value || "");
+        if (matcher.type === "regex") value = source.match(new RegExp(value, "i"))?.[0] || "";
+        if (matcher.type === "exists") value = "[present]";
+        if (key === "set-cookie") {
+            // Only cookie names are evidence; discard every value and attribute.
+            value = value.split("=")[0].replace(/^[\s;,]+/, "") + "=[REDACTED]";
+        } else if (key && /authorization|cookie|token|secret|api[-_]?key/i.test(key)) {
+            value = "[REDACTED]";
+        }
+        value = value.replace(/((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s;<>"']+/gi, "$1[REDACTED]");
+        return { part, key, value: value.slice(0, 180) };
+    });
 }
 
 function extractVersion(ctx: Record<string, any>, metadata: Record<string, any>): string | undefined {
@@ -433,10 +449,10 @@ function extractVersion(ctx: Record<string, any>, metadata: Record<string, any>)
     return undefined;
 }
 
-function normalizeConfidence(value: unknown): number {
-    const numeric = Number(value);
+function normalizeConfidence(value: unknown): number | undefined {
+    const numeric = value == null ? NaN : Number(value);
     if (!Number.isFinite(numeric)) {
-        return 0.8;
+        return undefined;
     }
     if (numeric > 1) {
         return Math.max(0, Math.min(numeric / 100, 1));
@@ -470,11 +486,27 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 error: "No technology fingerprint rules loaded. Configure dictionaryEntries or a fingerprint_rule dictionary with explicit matchers.",
             };
         }
+        for (const rule of rules) {
+            const metadata = parseMetadata(rule.metadata);
+            if (!Array.isArray(metadata.matchers) || metadata.matchers.length === 0) {
+                throw new Error(`Fingerprint rule ${rule.word} requires explicit matchers`);
+            }
+            if (metadata.operator && !["and", "or"].includes(metadata.operator)) throw new Error(`Invalid operator in fingerprint rule ${rule.word}`);
+            for (const matcher of metadata.matchers) {
+                if (!["header", "body", "title", "status"].includes(matcher.part)) throw new Error(`Invalid source part in fingerprint rule ${rule.word}`);
+                if (matcher.part === "header" && !matcher.key) throw new Error(`Missing header key in fingerprint rule ${rule.word}`);
+                if (!["contains", "equals", "regex", "exists", "in"].includes(matcher.type)) throw new Error(`Invalid matcher type in fingerprint rule ${rule.word}`);
+                if (["contains", "regex"].includes(matcher.type) && (typeof matcher.value !== "string" || !matcher.value)) throw new Error(`Missing matcher value in fingerprint rule ${rule.word}`);
+                if (matcher.type === "regex") new RegExp(matcher.value, "i");
+            }
+            for (const pattern of metadata.version_patterns || []) new RegExp(pattern.pattern, "i");
+        }
         const results: PerTargetResult[] = [];
         const fingerprints: any[] = [];
+        const evidences: any[] = [];
         const previousSnapshots = input.previousSnapshots || {};
         const changeEvents: ChangeEvent[] = [];
-        const snapshots: Record<string, TechnologySnapshot> = {};
+        const snapshots: Record<string, TechnologySnapshot> = { ...previousSnapshots };
         const timestamp = new Date().toISOString();
         const monitorExecution = input.__monitorExecution;
 
@@ -500,8 +532,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     };
 
                     const technologies = rules
-                        .filter(rule => ruleMatched(ctx, parseMetadata(rule.metadata)))
-                        .map(rule => {
+                        .map(rule => ({ rule, matches: matchedEvidence(ctx, parseMetadata(rule.metadata)) }))
+                        .filter(item => item.matches.length > 0)
+                        .map(({ rule, matches }) => {
                             const metadata = parseMetadata(rule.metadata);
                             const version = extractVersion(ctx, metadata);
                             const ruleName = metadata.name || rule.word;
@@ -514,8 +547,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                                 name: ruleName,
                                 category: normalizedCategory,
                                 version,
-                                confidence: Math.round(confidence * 100),
-                                evidence: [`matched:${rule.word}`],
+                                confidence: confidence === undefined ? undefined : Math.round(confidence * 100),
+                                evidence: matches.map(hit => `${hit.part}${hit.key ? ":" + hit.key : ""}: ${hit.value}`),
                             };
 
                             fingerprints.push({
@@ -534,11 +567,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                                 version: tech.version,
                                 confidence,
                                 is_primary: Boolean(metadata.is_primary),
-                                match_source_part: Array.isArray(metadata.matchers) && metadata.matchers.length > 0
-                                    ? String(metadata.matchers[0]?.part || "body").toLowerCase()
-                                    : "body",
+                                match_source_part: matches[0].part,
                                 source: "tech_fingerprinter",
-                                evidence: `matched:${rule.word}`,
+                                request_url: target,
+                                final_url: response.url || target,
+                                http_status: response.status,
+                                checked_at: timestamp,
+                                match_details: matches,
+                                evidence: tech.evidence.join("\n"),
                             });
 
                             return tech;
@@ -584,14 +620,21 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         }
                     }
 
-                    results.push({ url: target, technologies });
-                } catch {
-                    snapshots[target] = {
-                        url: target,
-                        technologies: [],
-                        lastChecked: timestamp,
+                    const result: PerTargetResult = {
+                        url: target, technologies, status: technologies.length ? "identified" : "unidentified",
+                        http_status: response.status, final_url: response.url || target, checked_at: timestamp,
                     };
-                    results.push({ url: target, technologies: [] });
+                    results.push(result);
+                    evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe",
+                        title: `Technology Probe: ${target}`, content_json: result,
+                        content_text: `HTTP ${response.status}; ${result.status}; ${technologies.map(item => item.name).join(", ") || "UNKNOWN"}` });
+                } catch (error) {
+                    const message = error instanceof Error && /timeout|timed out|abort/i.test(error.message)
+                        ? "Request timed out" : "HTTP request or response processing failed";
+                    const result: PerTargetResult = { url: target, technologies: [], status: "failed", error: message, checked_at: timestamp };
+                    results.push(result);
+                    evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe_failure",
+                        title: `Technology Probe Failed: ${target}`, content_text: message, content_json: result });
                 } finally {
                     completedTargets += 1;
                     await reportMonitorProgress(monitorExecution, {
@@ -624,6 +667,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     matchedTargets: results.filter(item => item.technologies.length > 0).length,
                     identifiedTechnologies: results.reduce((sum, item) => sum + item.technologies.length, 0),
                     technologyChanges: changeEvents.length,
+                    failedTargets: results.filter(item => item.status === "failed").length,
                 },
                 surface_artifacts: {
                     fingerprints,
@@ -640,14 +684,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         source: "tech_fingerprinter",
                         metadata: event.metadata,
                     })),
-                    evidences: Object.values(snapshots).map(snapshot => ({
-                        asset_type: "web",
-                        asset_key: snapshot.url,
-                        evidence_type: "technology_snapshot",
-                        title: `Technology Snapshot: ${snapshot.url}`,
-                        content_json: snapshot,
-                        source: "tech_fingerprinter",
-                    })),
+                    evidences,
                 },
             },
         };

@@ -1,17 +1,18 @@
 /**
  * HTTP Prober Tool
- * 
+ *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.6
+ * @version 1.4.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
  * @input_mode asset
- * @target_asset_types domain, ip, service, web
+ * @target_asset_types ["domain","ip","service","web"]
  * @category recon
+ * @seed_bindings []
  * @default_severity info
- * @tags http, probe, alive, discovery, web
+ * @tags http, probe, alive, discovery, web, service, headers, evidence, capability:fetch, capability:monitor-events
  * @description Probe HTTP/HTTPS endpoints from URLs and service endpoints to confirm live websites, collect status code, title, headers, technologies, and structured web artifacts
  */
 

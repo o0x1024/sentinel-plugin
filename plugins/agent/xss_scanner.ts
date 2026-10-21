@@ -1,14 +1,14 @@
 /**
  * XSS Scanner Tool (Agent Version)
- * 
+ *
  * @plugin xss_scanner
  * @name XSS Scanner
- * @version 1.1.4
+ * @version 1.1.5
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["web"]
  * @category vuln
  * @default_severity high
  * @tags xss, cross-site-scripting, vulnerability, security, web, owasp

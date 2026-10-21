@@ -1,17 +1,18 @@
 /**
  * SSL/TLS Certificate Monitor
- * 
+ *
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.4
+ * @version 1.2.5
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type cert
  * @input_mode asset
- * @target_asset_types domain, web
+ * @target_asset_types ["domain","web"]
  * @category monitor
+ * @seed_bindings []
  * @default_severity medium
- * @tags certificate, ssl, tls, monitor, change-detection, expiry
+ * @tags certificate, ssl, tls, monitor, change-detection, expiry, capability:tls-inspect, capability:monitor-events
  * @description Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation
  */
 

@@ -1,14 +1,14 @@
 /**
  * Open Redirect Detector Tool
- * 
+ *
  * @plugin open_redirect_detector
  * @name Open Redirect Detector
- * @version 1.3.5
+ * @version 1.3.6
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
  * @input_mode asset
- * @target_asset_types web
+ * @target_asset_types ["web"]
  * @category vuln
  * @default_severity medium
  * @tags redirect, vulnerability, security, web, phishing
