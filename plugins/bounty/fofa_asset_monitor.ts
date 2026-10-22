@@ -3,7 +3,7 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.6
+ * @version 1.2.7
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -14,6 +14,8 @@
  * @default_severity medium
  * @tags fofa, website, monitor, reconnaissance, osint, surface, change-detection, capability:fetch, capability:monitor-events
  * @description Query FOFA Search API with domain and enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.
+ * @target_asset_types []
+ * @seed_bindings [{"seed_type":"root_domain","input_key":"domains"},{"seed_type":"domain","input_key":"domains"},{"seed_type":"favicon_hash","input_key":"iconHashes"},{"seed_type":"brand_keyword","input_key":"brandKeywords"},{"seed_type":"org_name","input_key":"orgNames"},{"seed_type":"asn","input_key":"asnList"},{"seed_type":"cname_keyword","input_key":"cnameKeywords"},{"seed_type":"title_keyword","input_key":"titleKeywords"},{"seed_type":"body_keyword","input_key":"bodyKeywords"},{"seed_type":"header_keyword","input_key":"headerKeywords"}]
  */
 
 interface ToolInput {
@@ -1085,8 +1087,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const surfaceArtifacts = buildArtifacts(allAssets);
         const successfulQueries = results.filter(result => result.success).length;
 
+        const failures = results.filter(result => !result.success);
         return {
-            success: true,
+            success: failures.length === 0,
+            ...(failures.length ? { error: `FOFA queries failed (${failures.length}/${plans.length}): ${failures.map(result => `${result.target}: ${result.error}`).join("; ")}` } : {}),
             data: {
                 queries: plans,
                 results,

@@ -3,7 +3,7 @@
  *
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.6
+ * @version 2.2.7
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -39,6 +39,7 @@ interface SourceResult {
     count: number;
     error?: string;
     responseTime: number;
+    domain?: string;
 }
 
 interface SubdomainSnapshot {
@@ -67,6 +68,9 @@ interface ToolOutput {
     success: boolean;
     data?: {
         domain: string;
+        domains?: string[];
+        results?: ToolOutput[];
+        warnings?: string[];
         subdomains: string[];
         sourceResults: SourceResult[];
         slowSources?: SourceResult[];
@@ -81,6 +85,9 @@ interface ToolOutput {
             sourcesFailed: number;
             sourcesSkipped: number;
             subdomainChanges: number;
+            totalTargets?: number;
+            successfulTargets?: number;
+            failedTargets?: number;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -334,24 +341,15 @@ function normalizeStringList(value: unknown): string[] {
     return [];
 }
 
-function resolveInputDomain(input: ToolInput): string {
-    const candidates = [
-        typeof input.domain === "string" ? input.domain : "",
+function resolveInputDomains(input: ToolInput): string[] {
+    return [...new Set([
         ...normalizeStringList(input.domains),
+        typeof input.domain === "string" ? input.domain : "",
         ...normalizeStringList(input.targets),
         ...((Array.isArray(input.target_objects) ? input.target_objects : [])
             .filter(item => item?.type === "domain" || item?.type === "root_domain")
-            .map(item => String(item?.value || "").trim())),
-    ];
-
-    for (const candidate of candidates) {
-        const normalized = candidate.toLowerCase().trim();
-        if (normalized) {
-            return normalized;
-        }
-    }
-
-    return "";
+            .map(item => String(item?.value || ""))),
+    ].map(value => value.toLowerCase().trim()).filter(Boolean))];
 }
 
 /**
@@ -717,9 +715,8 @@ async function runSourceTasksWithConcurrency(tasks: Array<() => Promise<SourceRe
 /**
  * Main analysis function
  */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
+async function analyzeDomain(input: ToolInput, domain: string): Promise<ToolOutput> {
     try {
-        const domain = resolveInputDomain(input);
 
         if (!domain) {
             return {
@@ -821,21 +818,25 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             if (added.length > 0) {
                 changeEvents.push(createSubdomainChangeEvent(domain, "asset_discovered", added, timestamp));
             }
-            if (removed.length > 0) {
+            if (sourcesFailed === 0 && removed.length > 0) {
                 changeEvents.push(createSubdomainChangeEvent(domain, "asset_removed", removed, timestamp));
             }
         }
 
+        const successful = sourcesSucceeded > 0;
         return {
-            success: true,
+            success: successful,
+            ...(successful ? {} : { error: `All ${sources.length} sources failed for ${domain}: ${[...new Set(sourceResults.map(result => result.error).filter(Boolean))].slice(0, 3).join("; ")}` }),
             data: {
                 domain,
+                warnings: sourceResults.filter(result => result.error).map(result => `${domain} / ${result.source}: ${result.error}`),
                 subdomains: finalSubdomains,
                 sourceResults: sourceResults.sort((a, b) => b.count - a.count),
                 slowSources,
                 skippedSources,
                 changeEvents,
-                snapshots,
+                // Incomplete enumeration cannot replace a known-good baseline.
+                snapshots: sourcesFailed === 0 ? snapshots : {},
                 summary: {
                     totalUnique: new Set(allSubdomains).size,
                     totalFound: allSubdomains.length,
@@ -893,4 +894,69 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             error: error instanceof Error ? error.message : String(error)
         };
     }
+}
+
+
+/** Enumerate every injected domain; scalar aliases never truncate list input. */
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
+    const domains = resolveInputDomains(input);
+    if (domains.length === 0) return { success: false, error: "Invalid input: domain parameter is required" };
+    const results: ToolOutput[] = new Array(domains.length);
+    let completed = 0;
+    let nextDomain = 0;
+    const report = async (domain: string) => {
+        const context = (input as any).__monitorExecution;
+        const monitor = (globalThis as any).Sentinel?.Monitor;
+        if (context && monitor?.reportProgress) {
+            try {
+                await monitor.reportProgress({ monitorProgress: context, current: completed, total: domains.length,
+                    currentTarget: domain, phase: "enumerate", message: `Enumerating ${domain} (${completed}/${domains.length} completed)` });
+            } catch { /* Progress delivery must not change query results. */ }
+        }
+    };
+    // Bound domain fan-out as well as per-domain sources. Host fetch has its own global limit.
+    await Promise.all(Array.from({ length: Math.min(4, domains.length) }, async () => {
+        while (nextDomain < domains.length) {
+            const index = nextDomain++;
+            const domain = domains[index];
+            await report(domain);
+            results[index] = await analyzeDomain(input, domain);
+            completed += 1;
+            await report(domain);
+        }
+    }));
+    const failed = results.filter(result => !result.success);
+    const data = results.flatMap(result => result.data ? [result.data] : []);
+    const subdomains = [...new Set(data.flatMap(item => item.subdomains))].sort();
+    const sourceResults = data.flatMap(item => item.sourceResults.map(result => ({ ...result, domain: item.domain })));
+    const snapshots = Object.assign({}, input.previousSnapshots || {}, ...data.map(item => item.snapshots));
+    const surface_artifacts: Record<string, any[]> = {};
+    for (const item of data) {
+        for (const [key, values] of Object.entries(item.surface_artifacts || {})) {
+            (surface_artifacts[key] ||= []).push(...values);
+        }
+    }
+    return {
+        success: failed.length === 0,
+        ...(failed.length ? { error: `Subdomain enumeration failed for ${failed.length}/${domains.length} domains: ${failed.map(result => result.error).join("; ")}` } : {}),
+        data: {
+            domain: domains[0], domains, results,
+            subdomains, sourceResults,
+            slowSources: [...sourceResults].sort((a, b) => b.responseTime - a.responseTime).slice(0, 10),
+            skippedSources: [...new Set(data.flatMap(item => item.skippedSources || []))],
+            warnings: data.flatMap(item => item.warnings || []),
+            changeEvents: data.flatMap(item => item.changeEvents), snapshots,
+            summary: {
+                totalUnique: subdomains.length,
+                totalFound: data.reduce((sum, item) => sum + item.summary.totalFound, 0),
+                sourcesQueried: data.reduce((sum, item) => sum + item.summary.sourcesQueried, 0),
+                sourcesSucceeded: data.reduce((sum, item) => sum + item.summary.sourcesSucceeded, 0),
+                sourcesFailed: data.reduce((sum, item) => sum + item.summary.sourcesFailed, 0),
+                sourcesSkipped: data.reduce((sum, item) => sum + item.summary.sourcesSkipped, 0),
+                subdomainChanges: data.reduce((sum, item) => sum + item.summary.subdomainChanges, 0),
+                totalTargets: domains.length, successfulTargets: domains.length - failed.length, failedTargets: failed.length,
+            },
+            surface_artifacts,
+        },
+    };
 }

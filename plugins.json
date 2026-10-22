@@ -117,7 +117,7 @@
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "2.2.6",
+      "version": "2.2.7",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -380,7 +380,7 @@
     {
       "id": "fofa_asset_monitor",
       "name": "FOFA Asset Monitor",
-      "version": "1.2.6",
+      "version": "1.2.7",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",

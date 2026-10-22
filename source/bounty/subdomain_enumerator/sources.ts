@@ -93,6 +93,7 @@ export async function queryRapidDNS(domain: string ): Promise<string[]> {
  */
 export async function queryAlienVault(domain: string ): Promise<string[]> {
     const subdomains = new Set<string>();
+    const errors: string[] = [];
 
     // Query passive DNS
     const dnsUrl = `https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/passive_dns`;
@@ -105,7 +106,7 @@ export async function queryAlienVault(domain: string ): Promise<string[]> {
             const text = await dnsResponse.text();
             extractSubdomains(text, domain).forEach(s => subdomains.add(s));
         }
-    } catch { /* ignore */ }
+    } catch (error: any) { errors.push(error?.message || String(error)); }
 
     // Query URL list
     const urlListUrl = `https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/url_list`;
@@ -118,8 +119,9 @@ export async function queryAlienVault(domain: string ): Promise<string[]> {
             const text = await urlResponse.text();
             extractSubdomains(text, domain).forEach(s => subdomains.add(s));
         }
-    } catch { /* ignore */ }
+    } catch (error: any) { errors.push(error?.message || String(error)); }
 
+    if (errors.length === 2) throw new Error(errors.join("; "));
     return [...subdomains];
 }
 

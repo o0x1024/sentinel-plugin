@@ -3,7 +3,7 @@
  *
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.6
+ * @version 2.2.7
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -24,8 +24,8 @@ includes("network")||message.includes("fetch")||message.includes("socket")||mess
 init.method||"GET").toUpperCase();const maxAttempts=isRetryableMethod(method)?2:1;const fetchInit={...init,timeout:init.timeout??DEFAULT_FETCH_TIMEOUT_MS};let lastError;
 for(let attempt=1;attempt<=maxAttempts;attempt++){try{const response=await _nativeFetch(input,fetchInit);if(attempt<maxAttempts&&RETRYABLE_STATUSES.has(response.
 status)){const retryDelay=parseRetryAfter(response.headers.get("retry-after"))??300*attempt;try{await response.arrayBuffer()}catch{}await sleep(Math.min(retryDelay,
-2e3));continue}return response}catch(error){lastError=error;if(attempt>=maxAttempts||!isRetryableError(error)){throw error}await sleep(300*attempt)}}throw lastError??
-new Error("Request failed")}function extractSubdomains(text,domain){const escapedDomain=domain.replace(/\./g,"\\.");const regex=new RegExp(`[a-zA-Z0-9][-a-zA-Z0-9]*(?:\\.[a-zA-Z0-9][-a-zA-Z\
+2e3));continue}if(!response.ok)throw new Error(`HTTP ${response.status}`);return response}catch(error){lastError=error;if(attempt>=maxAttempts||!isRetryableError(
+error)){throw error}await sleep(300*attempt)}}throw lastError??new Error("Request failed")}function extractSubdomains(text,domain){const escapedDomain=domain.replace(/\./g,"\\.");const regex=new RegExp(`[a-zA-Z0-9][-a-zA-Z0-9]*(?:\\.[a-zA-Z0-9][-a-zA-Z\
 0-9]*)*\\.${escapedDomain}`,"gi");const matches=text.match(regex)||[];return[...new Set(matches.map(m=>m.toLowerCase()))]}async function queryCrtsh(domain){const url=`\
 https://crt.sh/?q=%.${encodeURIComponent(domain)}&output=json`;const response=await fetchWithRetry(url,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win\
 64; x64) AppleWebKit/537.36"}});if(!response.ok){throw new Error(`HTTP ${response.status}`)}const text=await response.text();const subdomains=new Set;try{const data=JSON.
@@ -36,14 +36,15 @@ url,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 text();if(text.includes("error")||text.includes("API count exceeded")){throw new Error("API rate limit exceeded")}return extractSubdomains(text,domain)}async function queryRapidDNS(domain){
 const url=`https://rapiddns.io/subdomain/${encodeURIComponent(domain)}?full=1`;const response=await fetchWithRetry(url,{headers:{"User-Agent":"Mozilla/5.0 (Wind\
 ows NT 10.0; Win64; x64) AppleWebKit/537.36"}});if(!response.ok){throw new Error(`HTTP ${response.status}`)}const text=await response.text();return extractSubdomains(
-text,domain)}async function queryAlienVault(domain){const subdomains=new Set;const dnsUrl=`https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(
+text,domain)}async function queryAlienVault(domain){const subdomains=new Set;const errors=[];const dnsUrl=`https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(
 domain)}/passive_dns`;try{const dnsResponse=await fetchWithRetry(dnsUrl,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}});
-if(dnsResponse.ok){const text=await dnsResponse.text();extractSubdomains(text,domain).forEach(s=>subdomains.add(s))}}catch{}const urlListUrl=`https://otx.alienv\
-ault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/url_list`;try{const urlResponse=await fetchWithRetry(urlListUrl,{headers:{"User-Agent":"Mozilla/\
-5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}});if(urlResponse.ok){const text=await urlResponse.text();extractSubdomains(text,domain).forEach(s=>subdomains.
-add(s))}}catch{}return[...subdomains]}async function queryVirusTotal(domain){const subdomains=new Set;let cursor="";let iterations=0;const maxIterations=3;while(iterations<
-maxIterations){const url=`https://www.virustotal.com/ui/domains/${encodeURIComponent(domain)}/subdomains?limit=40&cursor=${cursor}`;const response=await fetchWithRetry(
-url,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36","Referer":"https://www.virustotal.com/"}});if(!response.ok){break}const text=await response.
+if(dnsResponse.ok){const text=await dnsResponse.text();extractSubdomains(text,domain).forEach(s=>subdomains.add(s))}}catch(error){errors.push(error?.message||String(
+error))}const urlListUrl=`https://otx.alienvault.com/api/v1/indicators/domain/${encodeURIComponent(domain)}/url_list`;try{const urlResponse=await fetchWithRetry(
+urlListUrl,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}});if(urlResponse.ok){const text=await urlResponse.text();extractSubdomains(
+text,domain).forEach(s=>subdomains.add(s))}}catch(error){errors.push(error?.message||String(error))}if(errors.length===2)throw new Error(errors.join("; "));return[
+...subdomains]}async function queryVirusTotal(domain){const subdomains=new Set;let cursor="";let iterations=0;const maxIterations=3;while(iterations<maxIterations){
+const url=`https://www.virustotal.com/ui/domains/${encodeURIComponent(domain)}/subdomains?limit=40&cursor=${cursor}`;const response=await fetchWithRetry(url,{headers:{
+"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36","Referer":"https://www.virustotal.com/"}});if(!response.ok){break}const text=await response.
 text();const found=extractSubdomains(text,domain);if(found.length===0){break}found.forEach(s=>subdomains.add(s));try{const data=JSON.parse(text);cursor=data?.meta?.
 cursor||"";if(!cursor)break}catch{break}iterations++}return[...subdomains]}async function queryURLScan(domain){const url=`https://urlscan.io/api/v1/search/?q=do\
 main:${encodeURIComponent(domain)}`;const response=await fetchWithRetry(url,{headers:{"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}});
@@ -246,27 +247,27 @@ string",description:"Google API key"},google_cx:{type:"string",description:"Goog
  token"},quake_token:{type:"string",description:"Quake API token"},shodan_token:{type:"string",description:"Shodan API token"},zoomeye_token:{type:"string",description:"\
 ZoomEye API token"}}},previousSnapshots:{type:"object",description:"Previous subdomain snapshots keyed by root domain for change detection"}}}}function normalizeStringList(value){
 if(Array.isArray(value)){return value.map(item=>String(item||"").trim()).filter(Boolean)}if(typeof value==="string"){return value.split(",").map(item=>item.trim()).
-filter(Boolean)}return[]}function resolveInputDomain(input){const candidates=[typeof input.domain==="string"?input.domain:"",...normalizeStringList(input.domains),
-...normalizeStringList(input.targets),...(Array.isArray(input.target_objects)?input.target_objects:[]).filter(item=>item?.type==="domain"||item?.type==="root_do\
-main").map(item=>String(item?.value||"").trim())];for(const candidate of candidates){const normalized=candidate.toLowerCase().trim();if(normalized){return normalized}}
-return""}function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",
-properties:{domain:{type:"string",description:"Target domain"},subdomains:{type:"array",items:{type:"string"},description:"List of discovered subdomains"},sourceResults:{
-type:"array",description:"Results from each data source"},slowSources:{type:"array",description:"Slowest data source results ordered by response time"},changeEvents:{
-type:"array",description:"Detected subdomain change events"},snapshots:{type:"object",description:"Subdomain snapshots keyed by root domain"},summary:{type:"obj\
-ect",properties:{totalUnique:{type:"integer"},totalFound:{type:"integer"},sourcesQueried:{type:"integer"},sourcesSucceeded:{type:"integer"},sourcesFailed:{type:"\
-integer"},sourcesSkipped:{type:"integer"}}},skippedSources:{type:"array",items:{type:"string"},description:"Sources skipped by default because required API cred\
-entials were not configured"},surface_artifacts:{type:"object",description:"Typed network surface artifacts for surface graph ingestion"}}},error:{type:"string",
-description:"Error message if failed"}}}}function hasRequiredApiConfig(source,apiConfig){const keys=SOURCE_REQUIRED_CONFIG[source];if(!keys||keys.length===0){return true}
-return keys.every(key=>{const value=apiConfig?.[key];return typeof value==="string"&&value.trim().length>0})}function prioritizeSources(sources){return[...sources].
-sort((left,right)=>{const leftScore=SOURCE_PRIORITY[left]??100;const rightScore=SOURCE_PRIORITY[right]??100;if(leftScore!==rightScore){return leftScore-rightScore}
-return left.localeCompare(right)})}function logSourceResult(result){const status=result.error?"failed":"completed";const suffix=result.error?` error=${String(result.
-error).slice(0,160)}`:"";try{Sentinel?.log?.("info",`[subdomain_enumerator] source=${result.source} ${status} count=${result.count} duration_ms=${result.responseTime}${suffix}`)}catch{}}
-function buildSubdomainEventId(domain,eventType,timestamp){return`${eventType}-${domain}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g,"-").slice(0,120)}function createSubdomainChangeEvent(domain,eventType,subdomains,timestamp){
-const discovered=eventType==="asset_discovered";const severity=subdomains.length>=10?"medium":"low";return{id:buildSubdomainEventId(domain,eventType,timestamp),
-assetId:domain,eventType,severity,title:discovered?`New subdomains discovered for ${domain}`:`Subdomains no longer observed for ${domain}`,description:discovered?
-`Discovered ${subdomains.length} subdomain(s): ${subdomains.join(", ")}`:`No longer observed ${subdomains.length} subdomain(s): ${subdomains.join(", ")}`,oldValue:discovered?
-void 0:subdomains.join("\n"),newValue:discovered?subdomains.join("\n"):void 0,detectionMethod:"subdomain_enumerator",tags:["subdomain",discovered?"discovered":"\
-removed","dns"],autoTriggerEnabled:true,riskScore:discovered?44+Math.min(subdomains.length,10):56+Math.min(subdomains.length,10),metadata:{domain,subdomains}}}async function querySource(source,domain,apiConfig){
+filter(Boolean)}return[]}function resolveInputDomains(input){return[...new Set([...normalizeStringList(input.domains),typeof input.domain==="string"?input.domain:
+"",...normalizeStringList(input.targets),...(Array.isArray(input.target_objects)?input.target_objects:[]).filter(item=>item?.type==="domain"||item?.type==="root\
+_domain").map(item=>String(item?.value||""))].map(value=>value.toLowerCase().trim()).filter(Boolean))]}function get_output_schema(){return{type:"object",properties:{
+success:{type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{domain:{type:"string",description:"Target domain"},subdomains:{
+type:"array",items:{type:"string"},description:"List of discovered subdomains"},sourceResults:{type:"array",description:"Results from each data source"},slowSources:{
+type:"array",description:"Slowest data source results ordered by response time"},changeEvents:{type:"array",description:"Detected subdomain change events"},snapshots:{
+type:"object",description:"Subdomain snapshots keyed by root domain"},summary:{type:"object",properties:{totalUnique:{type:"integer"},totalFound:{type:"integer"},
+sourcesQueried:{type:"integer"},sourcesSucceeded:{type:"integer"},sourcesFailed:{type:"integer"},sourcesSkipped:{type:"integer"}}},skippedSources:{type:"array",
+items:{type:"string"},description:"Sources skipped by default because required API credentials were not configured"},surface_artifacts:{type:"object",description:"\
+Typed network surface artifacts for surface graph ingestion"}}},error:{type:"string",description:"Error message if failed"}}}}function hasRequiredApiConfig(source,apiConfig){
+const keys=SOURCE_REQUIRED_CONFIG[source];if(!keys||keys.length===0){return true}return keys.every(key=>{const value=apiConfig?.[key];return typeof value==="str\
+ing"&&value.trim().length>0})}function prioritizeSources(sources){return[...sources].sort((left,right)=>{const leftScore=SOURCE_PRIORITY[left]??100;const rightScore=SOURCE_PRIORITY[right]??
+100;if(leftScore!==rightScore){return leftScore-rightScore}return left.localeCompare(right)})}function logSourceResult(result){const status=result.error?"failed":
+"completed";const suffix=result.error?` error=${String(result.error).slice(0,160)}`:"";try{Sentinel?.log?.("info",`[subdomain_enumerator] source=${result.source}\
+ ${status} count=${result.count} duration_ms=${result.responseTime}${suffix}`)}catch{}}function buildSubdomainEventId(domain,eventType,timestamp){return`${eventType}\
+-${domain}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g,"-").slice(0,120)}function createSubdomainChangeEvent(domain,eventType,subdomains,timestamp){const discovered=eventType===
+"asset_discovered";const severity=subdomains.length>=10?"medium":"low";return{id:buildSubdomainEventId(domain,eventType,timestamp),assetId:domain,eventType,severity,
+title:discovered?`New subdomains discovered for ${domain}`:`Subdomains no longer observed for ${domain}`,description:discovered?`Discovered ${subdomains.length}\
+ subdomain(s): ${subdomains.join(", ")}`:`No longer observed ${subdomains.length} subdomain(s): ${subdomains.join(", ")}`,oldValue:discovered?void 0:subdomains.
+join("\n"),newValue:discovered?subdomains.join("\n"):void 0,detectionMethod:"subdomain_enumerator",tags:["subdomain",discovered?"discovered":"removed","dns"],autoTriggerEnabled:true,
+riskScore:discovered?44+Math.min(subdomains.length,10):56+Math.min(subdomains.length,10),metadata:{domain,subdomains}}}async function querySource(source,domain,apiConfig){
 const startTime=performance.now();try{let subdomains;switch(source){case"crtsh":subdomains=await queryCrtsh(domain);break;case"certspotter":subdomains=await queryCertSpotter(
 domain);break;case"censys":subdomains=await queryCensys(domain,apiConfig?.censys_id,apiConfig?.censys_secret);break;case"google_ct":subdomains=await queryGoogleCT(
 domain);break;case"myssl":subdomains=await queryMySSL(domain);break;case"racent":subdomains=await queryRacent(domain,apiConfig?.racent_token);break;case"hackert\
@@ -294,8 +295,8 @@ d: ${source}`)}const responseTime=performance.now()-startTime;return{source,subd
 const responseTime=performance.now()-startTime;return{source,subdomains:[],count:0,error:error.message||String(error),responseTime:Math.round(responseTime)}}}async function runSourceTasksWithConcurrency(tasks){
 const results=[];const workerCount=Math.min(16,tasks.length);let nextIndex=0;const workers=[];for(let w=0;w<workerCount;w++){workers.push((async()=>{while(nextIndex<
 tasks.length){const currentIndex=nextIndex++;try{const result=await tasks[currentIndex]();logSourceResult(result);results[currentIndex]=result}catch(err){results[currentIndex]=
-{source:"unknown",subdomains:[],count:0,error:err?.message||String(err),responseTime:0}}}})())}await Promise.all(workers);return results}async function analyze(input){
-try{const domain=resolveInputDomain(input);if(!domain){return{success:false,error:"Invalid input: domain parameter is required"}}if(!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.
+{source:"unknown",subdomains:[],count:0,error:err?.message||String(err),responseTime:0}}}})())}await Promise.all(workers);return results}async function analyzeDomain(input,domain){
+try{if(!domain){return{success:false,error:"Invalid input: domain parameter is required"}}if(!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.
 test(domain)){return{success:false,error:`Invalid domain format: ${domain}`}}const removeDuplicates=input.removeDuplicates!==false;const requestedSourceList=Array.
 isArray(input.sources)?input.sources:[];const requestedSources=requestedSourceList.length>0;const skippedSources=[];const previousSnapshots=input.previousSnapshots||
 {};const timestamp=new Date().toISOString();let sources=[...AVAILABLE_SOURCES];if(requestedSources){sources=requestedSourceList.filter(s=>AVAILABLE_SOURCES.includes(
@@ -309,13 +310,31 @@ lastChecked:timestamp}};const changeEvents=[];const previousSnapshot=previousSna
 createSubdomainChangeEvent(domain,"asset_discovered",finalSubdomains,timestamp))}}else{const previousSet=new Set((previousSnapshot.subdomains||[]).map(item=>item.
 toLowerCase()));const currentSet=new Set(finalSubdomains.map(item=>item.toLowerCase()));const added=finalSubdomains.filter(item=>!previousSet.has(item.toLowerCase()));
 const removed=(previousSnapshot.subdomains||[]).filter(item=>!currentSet.has(item.toLowerCase()));if(added.length>0){changeEvents.push(createSubdomainChangeEvent(
-domain,"asset_discovered",added,timestamp))}if(removed.length>0){changeEvents.push(createSubdomainChangeEvent(domain,"asset_removed",removed,timestamp))}}return{
-success:true,data:{domain,subdomains:finalSubdomains,sourceResults:sourceResults.sort((a,b)=>b.count-a.count),slowSources,skippedSources,changeEvents,snapshots,
-summary:{totalUnique:new Set(allSubdomains).size,totalFound:allSubdomains.length,sourcesQueried:sources.length,sourcesSucceeded,sourcesFailed,sourcesSkipped:skippedSources.
-length,subdomainChanges:changeEvents.length},surface_artifacts:{domains:finalSubdomains.map(subdomain=>({fqdn:subdomain,root_domain:domain,main_domain:domain,source:"\
-subdomain_enumerator",confidence:.8})),changes:changeEvents.map(event=>({asset_key:event.assetId,asset_type:"domain",change_type:event.eventType,severity:event.
-severity,title:event.title,description:event.description,old_value:event.oldValue,new_value:event.newValue,risk_score:event.riskScore,source:"subdomain_enumerat\
-or",metadata:event.metadata})),evidences:[{asset_type:"domain",asset_key:domain,evidence_type:"subdomain_snapshot",title:`Subdomain Snapshot: ${domain}`,content_json:snapshots[domain],
-source:"subdomain_enumerator"}],relations:finalSubdomains.map(subdomain=>({from_type:"domain",from_key:domain,to_type:"domain",to_key:subdomain,relation_type:"c\
-ontains_subdomain",source:"subdomain_enumerator",confidence:.8}))}}}}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}export{analyze,get_input_schema,get_output_schema};
+domain,"asset_discovered",added,timestamp))}if(sourcesFailed===0&&removed.length>0){changeEvents.push(createSubdomainChangeEvent(domain,"asset_removed",removed,
+timestamp))}}const successful=sourcesSucceeded>0;return{success:successful,...successful?{}:{error:`All ${sources.length} sources failed for ${domain}: ${[...new Set(
+sourceResults.map(result=>result.error).filter(Boolean))].slice(0,3).join("; ")}`},data:{domain,warnings:sourceResults.filter(result=>result.error).map(result=>`${domain}\
+ / ${result.source}: ${result.error}`),subdomains:finalSubdomains,sourceResults:sourceResults.sort((a,b)=>b.count-a.count),slowSources,skippedSources,changeEvents,
+snapshots:sourcesFailed===0?snapshots:{},summary:{totalUnique:new Set(allSubdomains).size,totalFound:allSubdomains.length,sourcesQueried:sources.length,sourcesSucceeded,
+sourcesFailed,sourcesSkipped:skippedSources.length,subdomainChanges:changeEvents.length},surface_artifacts:{domains:finalSubdomains.map(subdomain=>({fqdn:subdomain,
+root_domain:domain,main_domain:domain,source:"subdomain_enumerator",confidence:.8})),changes:changeEvents.map(event=>({asset_key:event.assetId,asset_type:"domai\
+n",change_type:event.eventType,severity:event.severity,title:event.title,description:event.description,old_value:event.oldValue,new_value:event.newValue,risk_score:event.
+riskScore,source:"subdomain_enumerator",metadata:event.metadata})),evidences:[{asset_type:"domain",asset_key:domain,evidence_type:"subdomain_snapshot",title:`Su\
+bdomain Snapshot: ${domain}`,content_json:snapshots[domain],source:"subdomain_enumerator"}],relations:finalSubdomains.map(subdomain=>({from_type:"domain",from_key:domain,
+to_type:"domain",to_key:subdomain,relation_type:"contains_subdomain",source:"subdomain_enumerator",confidence:.8}))}}}}catch(error){return{success:false,error:error instanceof
+Error?error.message:String(error)}}}async function analyze(input){const domains=resolveInputDomains(input);if(domains.length===0)return{success:false,error:"Inv\
+alid input: domain parameter is required"};const results=new Array(domains.length);let completed=0;let nextDomain=0;const report=async domain=>{const context=input.
+__monitorExecution;const monitor=globalThis.Sentinel?.Monitor;if(context&&monitor?.reportProgress){try{await monitor.reportProgress({monitorProgress:context,current:completed,
+total:domains.length,currentTarget:domain,phase:"enumerate",message:`Enumerating ${domain} (${completed}/${domains.length} completed)`})}catch{}}};await Promise.
+all(Array.from({length:Math.min(4,domains.length)},async()=>{while(nextDomain<domains.length){const index=nextDomain++;const domain=domains[index];await report(
+domain);results[index]=await analyzeDomain(input,domain);completed+=1;await report(domain)}}));const failed=results.filter(result=>!result.success);const data=results.
+flatMap(result=>result.data?[result.data]:[]);const subdomains=[...new Set(data.flatMap(item=>item.subdomains))].sort();const sourceResults=data.flatMap(item=>item.
+sourceResults.map(result=>({...result,domain:item.domain})));const snapshots=Object.assign({},input.previousSnapshots||{},...data.map(item=>item.snapshots));const surface_artifacts={};
+for(const item of data){for(const[key,values]of Object.entries(item.surface_artifacts||{})){(surface_artifacts[key]||(surface_artifacts[key]=[])).push(...values)}}
+return{success:failed.length===0,...failed.length?{error:`Subdomain enumeration failed for ${failed.length}/${domains.length} domains: ${failed.map(result=>result.
+error).join("; ")}`}:{},data:{domain:domains[0],domains,results,subdomains,sourceResults,slowSources:[...sourceResults].sort((a,b)=>b.responseTime-a.responseTime).
+slice(0,10),skippedSources:[...new Set(data.flatMap(item=>item.skippedSources||[]))],warnings:data.flatMap(item=>item.warnings||[]),changeEvents:data.flatMap(item=>item.
+changeEvents),snapshots,summary:{totalUnique:subdomains.length,totalFound:data.reduce((sum,item)=>sum+item.summary.totalFound,0),sourcesQueried:data.reduce((sum,item)=>sum+
+item.summary.sourcesQueried,0),sourcesSucceeded:data.reduce((sum,item)=>sum+item.summary.sourcesSucceeded,0),sourcesFailed:data.reduce((sum,item)=>sum+item.summary.
+sourcesFailed,0),sourcesSkipped:data.reduce((sum,item)=>sum+item.summary.sourcesSkipped,0),subdomainChanges:data.reduce((sum,item)=>sum+item.summary.subdomainChanges,
+0),totalTargets:domains.length,successfulTargets:domains.length-failed.length,failedTargets:failed.length},surface_artifacts}}}export{analyze,get_input_schema,get_output_schema};
 globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

@@ -66,6 +66,7 @@ export async function fetchWithRetry(input: RequestInfo | URL, init: FetchWithTi
                 continue;
             }
 
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response;
         } catch (error: any) {
             lastError = error;
