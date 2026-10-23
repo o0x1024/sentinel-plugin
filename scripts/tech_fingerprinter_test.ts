@@ -84,3 +84,82 @@ Deno.test("monitor queue contains only valid existing Web assets", async () => {
         ok(output.data!.surface_artifacts!.evidences.every(e => targets.slice(2).includes(e.asset_key)));
     } finally { globalThis.fetch = original; }
 });
+
+function streamInput(targets: string[]) {
+    return {
+        targets, concurrency: 4, dictionaryEntries: [rule],
+        target_objects: targets.map((value, index) => ({ type: "web", value, source: "surface_asset", asset_id: `web-${index}` })),
+        __monitorExecution: { task_id: "t", task_name: "stream", program_id: "p", execution_mode: "test", started_at: "2026-10-23T00:00:00Z",
+            current_plugin: "tech_fingerprinter", current_plugin_index: 1, completed_steps: 0, total_steps: 1,
+            result_stream: { protocol: "technology-v1" as const, max_targets: 3 } },
+    };
+}
+Deno.test("stream submits bounded deltas, retains failed baseline and releases acknowledged payloads", async () => {
+    const originalFetch = globalThis.fetch;
+    const globals = globalThis as Record<string, unknown>;
+    const originalSentinel = globals.Sentinel;
+    try {
+        fixture();
+        const chunks: any[] = [];
+        globals.Sentinel = { Monitor: { commitResults: async (request: any) => {
+            chunks.push(structuredClone(request));
+            return { ok: true, sequence: request.sequence };
+        } } };
+        const targets = Array.from({length: 10}, (_, i) => `https://example.test/${i === 5 ? "fail" : i}`);
+        const output = await analyze(streamInput(targets));
+        equal(output.success, true); equal(output.data!.stream_complete, true);
+        equal(chunks.length, 4);
+        deepEqual(chunks.map(chunk => chunk.sequence), [1, 2, 3, 4]);
+        equal(chunks.flatMap(chunk => chunk.output.data.results).length, 10);
+        equal(output.data!.summary.failedTargets, 1); equal(output.data!.summary.matchedTargets, 9);
+        equal(output.data!.results.length, 0); equal(output.data!.surface_artifacts!.evidences.length, 0);
+        deepEqual(output.data!.snapshots, {});
+        for (const chunk of chunks) {
+            ok(chunk.output.data.results.length <= 3);
+            ok(!Object.hasOwn(chunk.output.data.snapshots, targets[5]));
+            for (const evidence of chunk.output.data.surface_artifacts.evidences) {
+                ok(chunk.output.data.results.some((result: any) => result.url === evidence.asset_key));
+            }
+        }
+    } finally { globalThis.fetch = originalFetch; globals.Sentinel = originalSentinel; }
+});
+Deno.test("stream commit rejection and wrong acknowledgement cannot turn into request failures or success", async () => {
+    const originalFetch = globalThis.fetch;
+    const globals = globalThis as Record<string, unknown>;
+    const originalSentinel = globals.Sentinel;
+    try {
+        for (const wrongAck of [false, true]) {
+            const requests = fixture(); let commits = 0;
+            globals.Sentinel = { Monitor: { commitResults: (request: any) => {
+                commits++;
+                if (!wrongAck) throw new Error("database write failed");
+                return { ok: true, sequence: request.sequence + 1 };
+            } } };
+            const input = streamInput(Array.from({length: 20}, (_, i) => `https://example.test/${i}`));
+            input.concurrency = 1;
+            const output = await analyze(input);
+            equal(output.success, false); equal(commits, 1); equal(requests.length, 3);
+            ok(output.error!.includes(wrongAck ? "acknowledged" : "database write failed"));
+        }
+    } finally { globalThis.fetch = originalFetch; globals.Sentinel = originalSentinel; }
+});
+
+Deno.test("slow low-concurrency scans commit progress before a full chunk accumulates", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalNow = Date.now;
+    const globals = globalThis as Record<string, unknown>;
+    const originalSentinel = globals.Sentinel;
+    try {
+        let now = 0; Date.now = () => now;
+        globalThis.fetch = async () => { now += 6000; return new Response("ok"); };
+        const sizes: number[] = [];
+        globals.Sentinel = { Monitor: { commitResults: (request: any) => {
+            sizes.push(request.output.data.results.length);
+            return { ok: true, sequence: request.sequence };
+        } } };
+        const input = streamInput(["https://example.test/1", "https://example.test/2"]);
+        input.concurrency = 1;
+        const result = await analyze(input);
+        equal(result.success, true); deepEqual(sizes, [1, 1]);
+    } finally { globalThis.fetch = originalFetch; Date.now = originalNow; globals.Sentinel = originalSentinel; }
+});

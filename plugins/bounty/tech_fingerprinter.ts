@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.3.2
+ * @version 2.4.0
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -12,7 +12,7 @@
  * @target_asset_types ["web"]
  * @seed_bindings []
  * @default_severity info
- * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events
+ * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events, monitor:technology-stream-v1
  * @description Identify web technologies using dictionary-driven fingerprint rules with structured matchers.
  */
 
@@ -24,6 +24,7 @@ declare const Sentinel: {
     };
     Monitor?: {
         reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
+        commitResults?(request: Record<string, unknown>): Promise<{ ok: boolean; sequence: number }> | { ok: boolean; sequence: number };
     };
 };
 
@@ -51,6 +52,7 @@ interface MonitorExecutionContext {
     completed_steps: number;
     total_steps: number;
     imported_assets?: number;
+    result_stream?: { protocol: "technology-v1"; max_targets: number };
 }
 
 interface RuleEntry {
@@ -107,6 +109,7 @@ interface ChangeEvent {
 interface ToolOutput {
     success: boolean;
     data?: {
+        stream_complete?: boolean;
         results: PerTargetResult[];
         technologies: TechnologyResult[];
         changeEvents: ChangeEvent[];
@@ -132,8 +135,6 @@ type PluginGlobals = typeof globalThis & {
 
 const pluginGlobals = globalThis as PluginGlobals;
 const DEFAULT_TIMEOUT_MS = 5000;
-const MIN_TIMEOUT_MS = 3000;
-const MAX_TIMEOUT_MS = 3000;
 const DEFAULT_CONCURRENCY = 32;
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 32;
@@ -234,13 +235,15 @@ async function runConcurrently<T>(
 ): Promise<T[]> {
     const results = new Array<T>(tasks.length);
     let nextIndex = 0;
+    let stopped = false;
     const workerCount = Math.min(concurrency, tasks.length);
 
     async function worker() {
-        while (nextIndex < tasks.length) {
+        while (!stopped && nextIndex < tasks.length) {
             const index = nextIndex;
             nextIndex += 1;
-            results[index] = await tasks[index]();
+            try { results[index] = await tasks[index](); }
+            catch (error) { stopped = true; throw error; }
         }
     }
 
@@ -534,6 +537,11 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
             for (const pattern of metadata.version_patterns || []) new RegExp(pattern.pattern, "i");
         }
+        const stream = input.__monitorExecution?.result_stream;
+        if (stream && (stream.protocol !== "technology-v1" || !Sentinel.Monitor?.commitResults)) {
+            throw new Error("Host requested an unsupported technology result stream");
+        }
+        const chunkSize = stream ? clampInteger(stream.max_targets, 32, 1, 32) : 0;
         const results: PerTargetResult[] = [];
         const timestamp = new Date().toISOString();
         const totalTargets = targets.length;
@@ -541,7 +549,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const evidences: any[] = [];
         const previousSnapshots = input.previousSnapshots || {};
         const changeEvents: ChangeEvent[] = [];
-        const snapshots: Record<string, TechnologySnapshot> = { ...previousSnapshots };
+        const snapshots: Record<string, TechnologySnapshot> = stream ? {} : { ...previousSnapshots };
         const monitorExecution = input.__monitorExecution;
 
         await reportMonitorProgress(monitorExecution, {
@@ -552,6 +560,49 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         });
 
         let completedTargets = 0;
+        let matchedTargets = 0;
+        let identifiedTechnologies = 0;
+        let failedTargets = 0;
+        let technologyChanges = 0;
+        let sequence = 0;
+        let lastCommitAt = Date.now();
+        let commitChain = Promise.resolve();
+        const changeArtifacts = (events: ChangeEvent[]) => events.map(event => ({
+            asset_key: event.assetId, asset_type: "web", change_type: event.eventType,
+            severity: event.severity, title: event.title, description: event.description,
+            old_value: event.oldValue, new_value: event.newValue, risk_score: event.riskScore,
+            source: "tech_fingerprinter", metadata: event.metadata,
+        }));
+        function commitPending(force = false): Promise<void> {
+            if (!stream || results.length === 0 || (!force && results.length < chunkSize)) return commitChain;
+            lastCommitAt = Date.now();
+            const chunkResults = results.splice(0, chunkSize);
+            const keys = new Set(chunkResults.map(result => result.url));
+            const take = (items: any[], key: (item: any) => string): any[] => {
+                const selected = items.filter(item => keys.has(key(item)));
+                const remaining = items.filter(item => !keys.has(key(item)));
+                items.splice(0, items.length, ...remaining);
+                return selected;
+            };
+            const chunkSnapshots: Record<string, TechnologySnapshot> = {};
+            for (const key of keys) {
+                if (snapshots[key]) { chunkSnapshots[key] = snapshots[key]; delete snapshots[key]; }
+            }
+            const chunkChanges = take(changeEvents, event => event.assetId);
+            const request = { sequence: ++sequence, output: { success: true, data: {
+                results: chunkResults, snapshots: chunkSnapshots,
+                summary: { totalTargets: chunkResults.length, failedTargets: chunkResults.filter(result => result.status === "failed").length },
+                surface_artifacts: {
+                    fingerprints: take(fingerprints, item => item.asset_key),
+                    evidences: take(evidences, item => item.asset_key), changes: changeArtifacts(chunkChanges),
+                },
+            } } };
+            commitChain = commitChain.then(async () => {
+                const ack = await Sentinel.Monitor!.commitResults!(request);
+                if (!ack?.ok || ack.sequence !== request.sequence) throw new Error("Monitor result commit was not acknowledged");
+            });
+            return commitChain;
+        }
         await runConcurrently(targets.map((target) => async () => {
                 try {
                     const response = await fetchPage(target, userAgent);
@@ -651,6 +702,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         });
                         if (added.length > 0 || removed.length > 0 || updated.length > 0) {
                             changeEvents.push(createTechnologyChangeEvent(target, added, removed, updated, timestamp));
+                            technologyChanges++;
                         }
                     }
 
@@ -659,6 +711,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         http_status: response.status, final_url: response.url || target, checked_at: timestamp,
                     };
                     results.push(result);
+                    if (technologies.length > 0) matchedTargets++;
+                    identifiedTechnologies += technologies.length;
                     evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe",
                         title: `Technology Probe: ${target}`, content_json: result,
                         content_text: `HTTP ${response.status}; ${result.status}; ${technologies.map(item => item.name).join(", ") || "UNKNOWN"}` });
@@ -667,11 +721,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         ? "Request timed out" : "HTTP request or response processing failed";
                     const result: PerTargetResult = { url: target, technologies: [], status: "failed", error: message, checked_at: timestamp };
                     results.push(result);
+                    failedTargets++;
                     evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe_failure",
                         title: `Technology Probe Failed: ${target}`, content_text: message, content_json: result });
                 } finally {
                     completedTargets += 1;
-                    await reportMonitorProgress(monitorExecution, {
+                    await commitPending(Date.now() - lastCommitAt >= 5000);
+                    if (!stream) await reportMonitorProgress(monitorExecution, {
                         current: completedTargets,
                         total: totalTargets,
                         currentTarget: target,
@@ -680,6 +736,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     });
                 }
             }), concurrency);
+        while (stream && results.length > 0) await commitPending(true);
+        await commitChain;
 
         const uniqueTechnologies = Array.from(
             new Map(
@@ -692,16 +750,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         return {
             success: true,
             data: {
+                ...(stream ? { stream_complete: true } : {}),
                 results,
                 technologies: uniqueTechnologies,
                 changeEvents,
                 snapshots,
                 summary: {
                     totalTargets,
-                    matchedTargets: results.filter(item => item.technologies.length > 0).length,
-                    identifiedTechnologies: results.reduce((sum, item) => sum + item.technologies.length, 0),
-                    technologyChanges: changeEvents.length,
-                    failedTargets: results.filter(item => item.status === "failed").length,
+                    matchedTargets,
+                    identifiedTechnologies,
+                    technologyChanges,
+                    failedTargets,
                     skippedTargets,
                 },
                 surface_artifacts: {

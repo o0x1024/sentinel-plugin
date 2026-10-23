@@ -1,6 +1,6 @@
 {
-  "version": "2.5.4",
-  "updated_at": "2026-10-21",
+  "version": "2.5.5",
+  "updated_at": "2026-10-23",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -239,7 +239,7 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "2.3.2",
+      "version": "2.4.0",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -259,7 +259,8 @@
         "surface",
         "capability:fetch",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:technology-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/tech_fingerprinter.ts",
       "seed_bindings": []
