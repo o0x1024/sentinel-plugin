@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.4.0
+ * @version 2.5.0
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -52,7 +52,7 @@ interface MonitorExecutionContext {
     completed_steps: number;
     total_steps: number;
     imported_assets?: number;
-    result_stream?: { protocol: "technology-v1"; max_targets: number };
+    result_stream?: { protocol: "technology-v1"; max_targets: number; max_pending_commits?: number };
 }
 
 interface RuleEntry {
@@ -78,6 +78,8 @@ interface PerTargetResult {
     http_status?: number;
     final_url?: string;
     checked_at: string;
+    failure_category?: string;
+    timings?: Record<string, number | string | null>;
 }
 
 interface TechnologySnapshot {
@@ -121,6 +123,7 @@ interface ToolOutput {
             technologyChanges: number;
             failedTargets: number;
             skippedTargets: number;
+            diagnostics?: Record<string, number>;
         };
         surface_artifacts?: Record<string, any[]>;
     };
@@ -474,6 +477,7 @@ function normalizeConfidence(value: unknown): number | undefined {
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
+        const scanStartedAt = Date.now();
         const concurrency = clampInteger(
             input.concurrency,
             DEFAULT_CONCURRENCY,
@@ -515,7 +519,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         }
 
+        const dictionaryStartedAt = Date.now();
         const rules = targets.length > 0 ? await loadRules(input) : [];
+        const dictionaryLoadMs = Date.now() - dictionaryStartedAt;
         if (targets.length > 0 && rules.length === 0) {
             return {
                 success: false,
@@ -566,15 +572,34 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let technologyChanges = 0;
         let sequence = 0;
         let lastCommitAt = Date.now();
-        let commitChain = Promise.resolve();
+        const pendingCommits = new Set<Promise<void>>();
+        const maxPendingCommits = stream ? clampInteger(stream.max_pending_commits, 1, 1, 2) : 1;
+        let commitFailure: Error | undefined;
+        let matchingMs = 0;
+        let backpressureMs = 0;
+        let maxQueuedCommits = 0;
+        const diagnostics = () => ({ dictionary_load_ms: dictionaryLoadMs, matching_ms_sum: matchingMs,
+            backpressure_ms_sum: backpressureMs, max_pending_commits: maxQueuedCommits, scan_wall_ms: Date.now() - scanStartedAt });
+        async function awaitCommitCapacity(): Promise<void> {
+            const started = Date.now();
+            while (pendingCommits.size >= maxPendingCommits) {
+                await Promise.race(pendingCommits);
+                if (commitFailure) throw commitFailure;
+            }
+            backpressureMs += Date.now() - started;
+            if (commitFailure) throw commitFailure;
+        }
         const changeArtifacts = (events: ChangeEvent[]) => events.map(event => ({
             asset_key: event.assetId, asset_type: "web", change_type: event.eventType,
             severity: event.severity, title: event.title, description: event.description,
             old_value: event.oldValue, new_value: event.newValue, risk_score: event.riskScore,
             source: "tech_fingerprinter", metadata: event.metadata,
         }));
-        function commitPending(force = false): Promise<void> {
-            if (!stream || results.length === 0 || (!force && results.length < chunkSize)) return commitChain;
+        async function commitPending(force = false): Promise<void> {
+            if (!stream) return;
+            while (pendingCommits.size >= maxPendingCommits) await awaitCommitCapacity();
+            if (commitFailure) throw commitFailure;
+            if (results.length === 0 || (!force && results.length < chunkSize)) return;
             lastCommitAt = Date.now();
             const chunkResults = results.splice(0, chunkSize);
             const keys = new Set(chunkResults.map(result => result.url));
@@ -591,22 +616,30 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const chunkChanges = take(changeEvents, event => event.assetId);
             const request = { sequence: ++sequence, output: { success: true, data: {
                 results: chunkResults, snapshots: chunkSnapshots,
-                summary: { totalTargets: chunkResults.length, failedTargets: chunkResults.filter(result => result.status === "failed").length },
+                summary: { totalTargets: chunkResults.length, failedTargets: chunkResults.filter(result => result.status === "failed").length, diagnostics: diagnostics() },
                 surface_artifacts: {
                     fingerprints: take(fingerprints, item => item.asset_key),
                     evidences: take(evidences, item => item.asset_key), changes: changeArtifacts(chunkChanges),
                 },
             } } };
-            commitChain = commitChain.then(async () => {
+            let pending: Promise<void>;
+            pending = Promise.resolve().then(async () => {
                 const ack = await Sentinel.Monitor!.commitResults!(request);
                 if (!ack?.ok || ack.sequence !== request.sequence) throw new Error("Monitor result commit was not acknowledged");
-            });
-            return commitChain;
+            }).catch(error => {
+                commitFailure = error instanceof Error ? error : new Error(String(error));
+            }).finally(() => { pendingCommits.delete(pending); });
+            pendingCommits.add(pending);
+            maxQueuedCommits = Math.max(maxQueuedCommits, pendingCommits.size);
+            await awaitCommitCapacity();
         }
         await runConcurrently(targets.map((target) => async () => {
+                if (commitFailure) throw commitFailure;
+                let matchingStartedAt: number | undefined;
                 try {
                     const response = await fetchPage(target, userAgent);
                     const body = await response.text();
+                    matchingStartedAt = Date.now();
                     const headers: Record<string, string> = {};
                     response.headers.forEach((value, key) => { headers[String(key).toLowerCase()] = value; });
                     const ctx = {
@@ -709,6 +742,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     const result: PerTargetResult = {
                         url: target, technologies, status: technologies.length ? "identified" : "unidentified",
                         http_status: response.status, final_url: response.url || target, checked_at: timestamp,
+                        timings: (response as Response & { timings?: Record<string, number | string | null> }).timings,
                     };
                     results.push(result);
                     if (technologies.length > 0) matchedTargets++;
@@ -717,14 +751,23 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         title: `Technology Probe: ${target}`, content_json: result,
                         content_text: `HTTP ${response.status}; ${result.status}; ${technologies.map(item => item.name).join(", ") || "UNKNOWN"}` });
                 } catch (error) {
-                    const message = error instanceof Error && /timeout|timed out|abort/i.test(error.message)
-                        ? "Request timed out" : "HTTP request or response processing failed";
-                    const result: PerTargetResult = { url: target, technologies: [], status: "failed", error: message, checked_at: timestamp };
+                    const typed = error as { category?: string; timings?: Record<string, number | string | null>; message?: string };
+                    const allowed = new Set(["timeout", "dns", "tls", "connect", "redirect", "response_body", "request_config", "permission", "queue", "network_other"]);
+                    const category = matchingStartedAt !== undefined ? "processing"
+                        : typed?.category && allowed.has(typed.category) ? typed.category
+                        : /timeout|timed out|abort/i.test(typed?.message || "") ? "timeout" : "network_other";
+                    const labels: Record<string, string> = { timeout: "Request timed out", dns: "DNS resolution failed", tls: "TLS negotiation failed",
+                        connect: "Connection failed", redirect: "Redirect failed", response_body: "Response body read failed", request_config: "Invalid HTTP request configuration",
+                        permission: "Request permission denied", queue: "Request queue failed", processing: "Fingerprint processing failed", network_other: "HTTP request failed" };
+                    const message = labels[category];
+                    const result: PerTargetResult = { url: target, technologies: [], status: "failed", error: message, checked_at: timestamp,
+                        failure_category: category, timings: typed?.timings };
                     results.push(result);
                     failedTargets++;
                     evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe_failure",
                         title: `Technology Probe Failed: ${target}`, content_text: message, content_json: result });
                 } finally {
+                    if (matchingStartedAt !== undefined) matchingMs += Date.now() - matchingStartedAt;
                     completedTargets += 1;
                     await commitPending(Date.now() - lastCommitAt >= 5000);
                     if (!stream) await reportMonitorProgress(monitorExecution, {
@@ -737,7 +780,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 }
             }), concurrency);
         while (stream && results.length > 0) await commitPending(true);
-        await commitChain;
+        await Promise.all(pendingCommits);
+        if (commitFailure) throw commitFailure;
 
         const uniqueTechnologies = Array.from(
             new Map(
@@ -762,6 +806,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     technologyChanges,
                     failedTargets,
                     skippedTargets,
+                    diagnostics: diagnostics(),
                 },
                 surface_artifacts: {
                     fingerprints,

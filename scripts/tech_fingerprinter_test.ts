@@ -163,3 +163,41 @@ Deno.test("slow low-concurrency scans commit progress before a full chunk accumu
         equal(result.success, true); deepEqual(sizes, [1, 1]);
     } finally { globalThis.fetch = originalFetch; Date.now = originalNow; globals.Sentinel = originalSentinel; }
 });
+
+Deno.test("two-chunk result queue overlaps scanning and bounds unacknowledged submissions", async () => {
+    const originalFetch = globalThis.fetch;
+    const globals = globalThis as Record<string, unknown>;
+    const originalSentinel = globals.Sentinel;
+    try {
+        const requests = fixture();
+        const receipts: Array<() => void> = [];
+        let active = 0, peak = 0, commits = 0;
+        globals.Sentinel = { Monitor: { commitResults: (request: any) => new Promise(resolve => {
+            active++; commits++; peak = Math.max(peak, active);
+            receipts.push(() => { active--; resolve({ ok: true, sequence: request.sequence }); });
+        }) } };
+        const base = streamInput(Array.from({length: 18}, (_, i) => `https://example.test/${i}`));
+        const input = { ...base, __monitorExecution: { ...base.__monitorExecution, result_stream: { ...base.__monitorExecution.result_stream, max_pending_commits: 2 } } };
+        const scan = analyze(input);
+        for (let tick = 0; tick < 200 && commits < 2; tick++) await Promise.resolve();
+        equal(commits, 2); equal(peak, 2); ok(requests.length >= 6);
+        for (let tick = 0; tick < 500; tick++) {
+            receipts.shift()?.();
+            await Promise.resolve();
+        }
+        while (receipts.length) receipts.shift()!();
+        const result = await scan;
+        equal(result.success, true); equal(result.data!.summary.totalTargets, 18);
+        equal(peak, 2); equal(active, 0);
+    } finally { globalThis.fetch = originalFetch; globals.Sentinel = originalSentinel; }
+});
+Deno.test("structured network errors retain category without exposing raw error text", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+        globalThis.fetch = async () => { throw Object.assign(new Error("PRIVATE_TLS_DIAGNOSTIC"), { category: "tls", timings: { headers_ms: 17 } }); };
+        const result = await analyze({ targets: ["https://example.test/"], dictionaryEntries: [rule] });
+        equal(result.success, true); equal(result.data!.results[0].failure_category, "tls");
+        equal(result.data!.results[0].timings?.headers_ms, 17);
+        ok(!JSON.stringify(result).includes("PRIVATE_TLS_DIAGNOSTIC"));
+    } finally { globalThis.fetch = originalFetch; }
+});
