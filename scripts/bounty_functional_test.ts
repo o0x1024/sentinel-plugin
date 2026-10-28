@@ -5,6 +5,8 @@
  * Usage: deno run --allow-read --allow-net scripts/bounty_functional_test.ts
  */
 
+import { nativeSubdomainBruteFixture } from "./subdomain_brute_fixture.ts";
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const iconBytes = Uint8Array.from([0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0, 104, 4, 0, 0, 22, 0, 0, 0]);
@@ -271,6 +273,9 @@ function installRuntimeStubs(): void {
             },
         },
         Network: {
+            async bruteForceSubdomains(request: Record<string, unknown>) {
+                return nativeSubdomainBruteFixture(request, nowIso);
+            },
             async scanPorts(request: { targets: Array<{ host: string; ports?: number[] }>; ports: number[] }) {
                 return {
                     success: true,
@@ -409,6 +414,23 @@ function assertNumber(obj: any, path: string, minVal?: number): string | null {
 }
 
 const bountyTests: TestCase[] = [
+    {
+        pluginId: "subdomain_brute",
+        file: "subdomain_brute.ts",
+        input: { targets: ["example.com", "example.org"], dictionary_id: "fixture-subdomain-dictionary", dictionary: ["api", "www"], transport: "udp" },
+        validate(output) {
+            const errors: string[] = [];
+            for (const path of ["data.subdomains", "data.results", "data.change_events", "data.changeEvents", "data.surface_artifacts.domains", "data.surface_artifacts.ips", "data.surface_artifacts.changes"]) {
+                const error = assertArrayNotEmpty(output, path);
+                if (error) errors.push(error);
+            }
+            const targets = assertNumber(output, "data.summary.total_targets", 2);
+            if (targets) errors.push(targets);
+            if (output.data?.summary?.dictionary_source !== "fixture-subdomain-dictionary") errors.push("native dictionary ID was not preserved");
+            if (Object.keys(output.data?.snapshots ?? {}).length !== 2) errors.push("native snapshots must cover both targets");
+            return errors;
+        },
+    },
     {
         pluginId: "subdomain_enumerator",
         file: "subdomain_enumerator.ts",

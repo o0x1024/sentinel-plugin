@@ -30,6 +30,7 @@ Only host progress publication requires `monitor-events`.
 | service_monitor | network-scan, dictionary, monitor-events | Native `Sentinel.Network.probeServices`; HTTP protocol checks and TCP banner operations; dictionary entries; progress publication |
 | service_probe | network-scan, dictionary, monitor-events | Native `Sentinel.Network.probeServices`; HTTP protocol checks and TCP banner operations; dictionary entries; progress publication |
 | subdomain_enumerator | fetch | Imported source modules make OSINT HTTP requests; logs and returned change events need no extra capability |
+| subdomain_brute | network-scan, monitor-events | One `Sentinel.Network.bruteForceSubdomains` batch delegates dictionary loading, DNS, progress, snapshots and surface artifacts to the shared native Rust engine; no per-word JavaScript DNS or Dictionary calls |
 | tech_fingerprinter | fetch, dictionary, monitor-events | HTTP fingerprinting; dictionary default ID and entries; progress publication |
 | webpack_source_downloader | fetch, filesystem-write, monitor-events | HTTP source-map/source download; `Deno.mkdir` and `Deno.writeTextFile` export source files; progress publication |
 

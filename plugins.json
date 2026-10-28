@@ -1,6 +1,6 @@
 {
-  "version": "2.5.6",
-  "updated_at": "2026-10-23",
+  "version": "2.5.7",
+  "updated_at": "2026-10-28",
   "plugins": [
     {
       "id": "sql_injection_detector",
@@ -113,6 +113,25 @@
         "exploit"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/agent/nextjs_rce_scanner.ts"
+    },
+    {
+      "id": "subdomain_brute",
+      "name": "Subdomain Brute Force",
+      "version": "1.0.0",
+      "author": "Sentinel Team",
+      "main_category": "bounty",
+      "category": "recon",
+      "monitor_type": "dns",
+      "input_mode": "seed",
+      "target_asset_types": [],
+      "seed_bindings": [
+        { "seed_type": "root_domain", "input_key": "targets" },
+        { "seed_type": "domain", "input_key": "targets" }
+      ],
+      "description": "Batch dictionary-based DNS discovery through the native Rust engine, with platform dictionary IDs, explicit UDP or ethernet transport, snapshots and typed surface artifacts. Defaults to UDP without silent transport fallback.",
+      "default_severity": "info",
+      "tags": ["subdomain", "dns", "bruteforce", "dictionary", "native", "asm", "surface", "capability:network-scan", "capability:monitor-events"],
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_brute.ts"
     },
     {
       "id": "subdomain_enumerator",

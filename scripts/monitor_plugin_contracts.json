@@ -262,6 +262,17 @@
       ]
     },
     {
+      "id": "subdomain_brute",
+      "monitor_type": "dns",
+      "input_mode": "seed",
+      "target_asset_types": [],
+      "seed_bindings": [
+        { "seed_type": "root_domain", "input_key": "targets" },
+        { "seed_type": "domain", "input_key": "targets" }
+      ],
+      "capability_tags": ["capability:network-scan", "capability:monitor-events"]
+    },
+    {
       "id": "subdomain_enumerator",
       "monitor_type": "dns",
       "input_mode": "seed",

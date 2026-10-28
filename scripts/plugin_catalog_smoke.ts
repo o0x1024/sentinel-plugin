@@ -1,5 +1,6 @@
 import { validateMonitorMetadata, validateMonitorSchema } from "./plugin_monitor_contract.ts";
 import type { MonitorPluginMetadata } from "./plugin_monitor_contract.ts";
+import { nativeSubdomainBruteFixture } from "./subdomain_brute_fixture.ts";
 
 interface ManifestPlugin extends MonitorPluginMetadata {
     id: string;
@@ -390,6 +391,9 @@ function installRuntimeStubs(): void {
             },
         },
         Network: {
+            async bruteForceSubdomains(request: Record<string, unknown>) {
+                return nativeSubdomainBruteFixture(request, nowIso);
+            },
             async scanPorts(request: { targets: Array<{ host: string; ports?: number[] }>; ports: number[] }) {
                 return {
                     success: true,
@@ -536,6 +540,8 @@ function buildInputForPlugin(plugin: ManifestPlugin): Record<string, unknown> {
             return { targets: ["https://example.com"], detectOnly: true };
         case "subdomain_enumerator":
             return { domain: "example.com", sources: ["crtsh"], removeDuplicates: true };
+        case "subdomain_brute":
+            return { targets: ["example.com", "example.org"], dictionary: ["api", "www"], transport: "udp" };
         case "dns_resolver":
             return { targets: ["example.com"], recordTypes: ["A", "CNAME", "TXT"], concurrency: 4 };
         case "cidr_mapper":
