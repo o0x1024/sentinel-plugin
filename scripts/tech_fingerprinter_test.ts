@@ -1,6 +1,7 @@
 // Deterministic input/failure isolation tests. No network permission is granted.
 import { deepEqual, equal, ok } from "node:assert/strict";
 import { analyze } from "../plugins/bounty/tech_fingerprinter.ts";
+import { monitorExecution } from "./monitor_stream_fixture.ts";
 const rule = { word: "php", metadata: { name: "PHP", product: "PHP", asset_category: "programming_language", matchers: [{ part: "header", key: "x-powered-by", type: "contains", value: "PHP" }] } };
 function fixture() {
     const requests: string[] = [];
@@ -89,9 +90,7 @@ function streamInput(targets: string[]) {
     return {
         targets, concurrency: 4, dictionaryEntries: [rule],
         target_objects: targets.map((value, index) => ({ type: "web", value, source: "surface_asset", asset_id: `web-${index}` })),
-        __monitorExecution: { task_id: "t", task_name: "stream", program_id: "p", execution_mode: "test", started_at: "2026-10-23T00:00:00Z",
-            current_plugin: "tech_fingerprinter", current_plugin_index: 1, completed_steps: 0, total_steps: 1,
-            result_stream: { protocol: "technology-v1" as const, max_targets: 3 } },
+        __monitorExecution: monitorExecution(targets, { pluginId: "tech_fingerprinter", maxWorkItems: 3 }),
     };
 }
 Deno.test("stream submits bounded deltas, retains failed baseline and releases acknowledged payloads", async () => {
@@ -111,9 +110,11 @@ Deno.test("stream submits bounded deltas, retains failed baseline and releases a
         equal(chunks.length, 4);
         deepEqual(chunks.map(chunk => chunk.sequence), [1, 2, 3, 4]);
         equal(chunks.flatMap(chunk => chunk.output.data.results).length, 10);
-        equal(output.data!.summary.failedTargets, 1); equal(output.data!.summary.matchedTargets, 9);
-        equal(output.data!.results.length, 0); equal(output.data!.surface_artifacts!.evidences.length, 0);
-        deepEqual(output.data!.snapshots, {});
+        equal(chunks.flatMap(chunk => chunk.work).filter(item => item.status === "failed").length, 1);
+        equal(chunks.flatMap(chunk => chunk.output.data.results).filter(item => item.status === "identified").length, 9);
+        equal(output.data!.summary.diagnostics!.completed_targets, 10);
+        equal(output.data!.results, undefined); equal(output.data!.surface_artifacts, undefined);
+        equal(output.data!.snapshots, undefined);
         for (const chunk of chunks) {
             ok(chunk.output.data.results.length <= 3);
             ok(!Object.hasOwn(chunk.output.data.snapshots, targets[5]));
@@ -187,7 +188,7 @@ Deno.test("two-chunk result queue overlaps scanning and bounds unacknowledged su
         }
         while (receipts.length) receipts.shift()!();
         const result = await scan;
-        equal(result.success, true); equal(result.data!.summary.totalTargets, 18);
+        equal(result.success, true); equal(result.data!.summary.diagnostics!.completed_targets, 18);
         equal(peak, 2); equal(active, 0);
     } finally { globalThis.fetch = originalFetch; globals.Sentinel = originalSentinel; }
 });

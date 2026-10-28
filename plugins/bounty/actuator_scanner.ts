@@ -3,7 +3,7 @@
  *
  * @plugin actuator_scanner
  * @name Actuator Path Scanner
- * @version 1.1.3
+ * @version 1.1.4
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -12,677 +12,152 @@
  * @target_asset_types ["web","api"]
  * @seed_bindings []
  * @default_severity high
- * @tags actuator, spring, exposure, misconfiguration, java, web, capability:fetch, capability:monitor-events
+ * @tags actuator, spring, exposure, misconfiguration, java, web, capability:fetch, capability:monitor-events, monitor:results-stream-v1
  * @description Scan for exposed Spring Boot Actuator endpoints by backtracking through API path segments. Detects sensitive actuator endpoints like /env, /heapdump, /mappings that may leak configuration, secrets, or enable remote code execution.
  */
-
-declare const Sentinel: {
-    Monitor?: {
-        reportProgress?(update: Record<string, unknown>): Promise<boolean>;
-    };
-};
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-interface ToolInput {
-    targets?: string[];
-    api_paths?: string[];
-    actuator_endpoints?: string[];
-    include_actuator_prefix?: boolean;
-    userAgent?: string;
-    concurrency?: number;
-    timeout?: number;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface Finding {
-    title: string;
-    severity: string;
-    url: string;
-    endpoint: string;
-    description: string;
-    evidence?: string;
-    cwe?: string;
-    remediation?: string;
-    tags?: string[];
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        findings: Finding[];
-        summary: {
-            totalApiPaths: number;
-            generatedProbeUrls: number;
-            deduplicatedProbeUrls: number;
-            confirmedExposures: number;
-            requestsMade: number;
-            errors: number;
-        };
-        surface_artifacts?: { findings: any[] };
-    };
-    error?: string;
-}
-
-interface ActuatorEndpointDef {
-    name: string;
-    severity: "critical" | "high" | "medium" | "low" | "info";
-    keys: string[];
-    description: string;
-}
-
-interface Soft404Baseline {
-    status: number;
-    bodyText: string;
-    contentLength: number;
-    title: string;
-}
-
-const ACTUATOR_ENDPOINTS: ActuatorEndpointDef[] = [
-    { name: "env", severity: "critical", keys: ["propertySources", "activeProfiles", "systemProperties", "systemEnvironment"], description: "Environment properties exposure - may contain secrets, database credentials, API keys" },
-    { name: "info", severity: "low", keys: ["app", "build", "git"], description: "Application info - may reveal version and build details" },
-];
-
-const pluginGlobals = globalThis as typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: [],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "Base URLs to scan (e.g. [\"http://example.com\"]). Used for root-level actuator probing.",
-            },
-            api_paths: {
-                type: "array",
-                items: { type: "string" },
-                description: "Full API paths to backtrack from (e.g. [\"http://example.com/api/v1/users\"]). The scanner will probe actuator endpoints at each path level.",
-            },
-            actuator_endpoints: {
-                type: "array",
-                items: { type: "string" },
-                description: "Custom actuator endpoint names to probe (overrides built-in list). Example: [\"env\", \"health\", \"heapdump\"]",
-            },
-            include_actuator_prefix: {
-                type: "boolean",
-                description: "Also probe /actuator/* prefix variants (Spring Boot 2.x+). Default: true",
-                default: true,
-            },
-            userAgent: {
-                type: "string",
-                description: "User-Agent header for requests",
-                default: "Sentinel-Actuator-Scanner/1.0",
-            },
-            concurrency: {
-                type: "integer",
-                description: "Maximum concurrent requests",
-                default: 100,
-                minimum: 1,
-                maximum: 200,
-            },
-            timeout: {
-                type: "integer",
-                description: "Per-request timeout in milliseconds",
-                default: 3000,
-                minimum: 1000,
-                maximum: 10000,
-            },
-        },
-    };
-}
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean" },
-            data: {
-                type: "object",
-                properties: {
-                    findings: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                title: { type: "string" },
-                                severity: { type: "string" },
-                                url: { type: "string" },
-                                endpoint: { type: "string" },
-                                description: { type: "string" },
-                                evidence: { type: "string" },
-                                cwe: { type: "string" },
-                                remediation: { type: "string" },
-                                tags: { type: "array", items: { type: "string" } },
-                            },
-                        },
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalApiPaths: { type: "integer" },
-                            generatedProbeUrls: { type: "integer" },
-                            deduplicatedProbeUrls: { type: "integer" },
-                            confirmedExposures: { type: "integer" },
-                            requestsMade: { type: "integer" },
-                            errors: { type: "integer" },
-                        },
-                    },
-                    surface_artifacts: { type: "object" },
-                },
-            },
-            error: { type: "string" },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-pluginGlobals.get_output_schema = get_output_schema;
-
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
-        while (nextIndex < tasks.length) {
-            const currentIndex = nextIndex++;
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    });
-    await Promise.all(workers);
-    return results;
-}
-
-function normalizeUrl(raw?: string): string | null {
-    if (!raw || typeof raw !== "string") return null;
-    let trimmed = raw.trim().replace(/\/+$/, "");
-    if (!trimmed) return null;
-    if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
-        trimmed = "https://" + trimmed;
-    }
-    return trimmed;
-}
-
-function extractOrigin(url: string): string {
-    try {
-        const parsed = new URL(url);
-        return `${parsed.protocol}//${parsed.host}`;
-    } catch {
-        const match = url.match(/^(https?:\/\/[^/]+)/);
-        return match ? match[1] : url;
-    }
-}
-
-function getPathSegments(url: string): string[] {
-    try {
-        const parsed = new URL(url);
-        return parsed.pathname.split("/").filter(Boolean);
-    } catch {
-        const withoutOrigin = url.replace(/^https?:\/\/[^/]+/, "");
-        return withoutOrigin.split("/").filter(Boolean);
-    }
-}
-
-const MAX_BACKTRACK_DEPTH = 3;
-
-function generateBacktrackPaths(apiPath: string, endpointNames: string[], includeActuatorPrefix: boolean): string[] {
-    const origin = extractOrigin(apiPath);
-    const segments = getPathSegments(apiPath);
-    const probeUrls: string[] = [];
-    const maxDepth = Math.min(segments.length, MAX_BACKTRACK_DEPTH);
-
-    for (let depth = maxDepth; depth >= 0; depth--) {
-        const basePath = depth === 0 ? "" : "/" + segments.slice(0, depth).join("/");
-        for (const endpoint of endpointNames) {
-            probeUrls.push(`${origin}${basePath}/${endpoint}`);
-            if (includeActuatorPrefix && endpoint !== "actuator") {
-                probeUrls.push(`${origin}${basePath}/actuator/${endpoint}`);
-            }
-        }
-    }
-
-    return probeUrls;
-}
-
-function getEndpointDef(url: string): ActuatorEndpointDef | null {
-    const path = url.replace(/^https?:\/\/[^/]+/, "");
-    const lastSegment = path.split("/").filter(Boolean).pop() || "";
-    const secondLast = path.split("/").filter(Boolean).slice(-2).join("/");
-
-    for (const def of ACTUATOR_ENDPOINTS) {
-        if (lastSegment === def.name || secondLast === def.name) {
-            return def;
-        }
-    }
-    return null;
-}
-
-function randomProbePath(): string {
-    const seed = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-    return `sentinel-actuator-baseline-${seed}`;
-}
-
-async function buildSoft404Baseline(origin: string, userAgent: string, timeout: number): Promise<Soft404Baseline | null> {
-    const baselineUrl = `${origin}/${randomProbePath()}`;
-    try {
-        const response = await fetch(baselineUrl, {
-            method: "GET",
-            headers: { "User-Agent": userAgent, "Accept": "application/json, text/html, */*" },
-            redirect: "follow",
-            timeout,
-            maxBodyBytes: 32768,
-        } as any);
-        const body = await response.text();
-        return {
-            status: response.status,
-            bodyText: body.slice(0, 4000).toLowerCase().replace(/\s+/g, " ").trim(),
-            contentLength: body.length,
-            title: extractTitle(body),
-        };
-    } catch {
-        return null;
-    }
-}
-
-function extractTitle(html: string): string {
-    const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    return match?.[1]?.trim() || "";
-}
-
-function tokenize(text: string): string[] {
-    return text.toLowerCase().replace(/\s+/g, " ").trim().match(/[a-z0-9_/-]{3,}/g) || [];
-}
-
-function jaccardSimilarity(a: string[], b: string[]): number {
-    if (a.length === 0 || b.length === 0) return 0;
-    const setA = new Set(a);
-    const setB = new Set(b);
-    let intersection = 0;
-    for (const token of setA) {
-        if (setB.has(token)) intersection++;
-    }
-    const union = new Set([...setA, ...setB]).size;
-    return union === 0 ? 0 : intersection / union;
-}
-
-function isSoft404(body: string, status: number, baseline: Soft404Baseline | null): boolean {
-    if (status === 404 || status === 403 || status === 401) return false;
-
-    if (baseline && baseline.status === 200 && status === 200) {
-        const normalizedBody = body.slice(0, 4000).toLowerCase().replace(/\s+/g, " ").trim();
-        if (normalizedBody === baseline.bodyText) return true;
-        const similarity = jaccardSimilarity(tokenize(normalizedBody), tokenize(baseline.bodyText));
-        if (similarity >= 0.85) return true;
-    }
-
-    const lowerBody = body.toLowerCase();
-    const soft404Markers = ["404", "not found", "page not found", "does not exist", "cannot be found", "no such", "找不到", "不存在"];
-    if (status === 200 && soft404Markers.some(m => lowerBody.includes(m))) {
-        return true;
-    }
-
-    return false;
-}
-
-function isHeapdumpResponse(body: string, contentType: string): boolean {
-    if (contentType.includes("application/octet-stream") || contentType.includes("application/x-heap-dump")) {
-        return body.length > 1000;
-    }
-    return false;
-}
-
-function validateActuatorResponse(
-    body: string,
-    status: number,
-    contentType: string,
-    endpointDef: ActuatorEndpointDef,
-): boolean {
-    if (status !== 200) return false;
-
-    if (endpointDef.name === "heapdump") {
-        return isHeapdumpResponse(body, contentType);
-    }
-
-    if (!contentType.includes("json") && !contentType.includes("vnd.spring-boot.actuator")) {
-        return false;
-    }
-
-    if (endpointDef.keys.length === 0) return true;
-
-    let parsed: any;
-    try {
-        parsed = JSON.parse(body);
-    } catch {
-        return false;
-    }
-
-    if (typeof parsed !== "object" || parsed === null) return false;
-
-    if (endpointDef.name === "health" && typeof parsed.status === "string") {
-        const validStatuses = ["UP", "DOWN", "OUT_OF_SERVICE", "UNKNOWN"];
-        if (validStatuses.includes(parsed.status.toUpperCase())) return true;
-    }
-
-    if (endpointDef.name === "env") {
-        if (parsed.propertySources || parsed.activeProfiles || parsed.systemProperties || parsed.systemEnvironment) {
-            return true;
-        }
-    }
-
-    if (endpointDef.name === "actuator" || parsed._links) {
-        return true;
-    }
-
-    const bodyStr = JSON.stringify(parsed);
-    const matchedKeys = endpointDef.keys.filter(key => bodyStr.includes(`"${key}"`));
-    return matchedKeys.length >= Math.min(2, endpointDef.keys.length);
-}
-
-interface ProbeResult {
-    url: string;
-    endpoint: string;
-    confirmed: boolean;
-    status?: number;
-    evidence?: string;
-    error?: string;
-}
-
-async function probeActuatorUrl(
-    url: string,
-    endpointDef: ActuatorEndpointDef,
-    userAgent: string,
-    baseline: Soft404Baseline | null,
-    timeout: number,
-): Promise<ProbeResult> {
-    try {
-        const isHeapdump = endpointDef.name === "heapdump";
-        const response = await fetch(url, {
-            method: isHeapdump ? "HEAD" : "GET",
-            headers: {
-                "User-Agent": userAgent,
-                "Accept": "application/json, application/vnd.spring-boot.actuator.v3+json, */*",
-            },
-            redirect: "follow",
-            timeout,
-            maxBodyBytes: 32768,
-        } as any);
-
-        const status = response.status;
-
-        if (status === 404 || status === 403 || status === 401 || status === 405 || status >= 500) {
-            return { url, endpoint: endpointDef.name, confirmed: false, status };
-        }
-
-        if (isHeapdump) {
-            const contentType = (response.headers?.get?.("content-type") || "").toLowerCase();
-            const confirmed = contentType.includes("application/octet-stream") ||
-                contentType.includes("application/x-heap-dump");
-            return { url, endpoint: endpointDef.name, confirmed, status, evidence: confirmed ? `Content-Type: ${contentType}` : undefined };
-        }
-
-        const body = await response.text();
-        const contentType = (response.headers?.get?.("content-type") || "").toLowerCase();
-
-        if (isSoft404(body, status, baseline)) {
-            return { url, endpoint: endpointDef.name, confirmed: false, status };
-        }
-
-        const confirmed = validateActuatorResponse(body, status, contentType, endpointDef);
-        return {
-            url,
-            endpoint: endpointDef.name,
-            confirmed,
-            status,
-            evidence: confirmed ? body.slice(0, 500) : undefined,
-        };
-    } catch (error: any) {
-        return {
-            url,
-            endpoint: endpointDef.name,
-            confirmed: false,
-            error: error?.message || String(error),
-        };
-    }
-}
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!input || typeof input !== "object") {
-            return { success: false, error: "Invalid input: expected an object payload" };
-        }
-
-        const userAgent = input.userAgent || "Sentinel-Actuator-Scanner/1.0";
-        const concurrency = Math.max(1, Math.min(64, Number(input.concurrency) || 50));
-        const timeout = Math.max(1000, Math.min(30000, Number(input.timeout) || 5000));
-        const includeActuatorPrefix = input.include_actuator_prefix !== false;
-        const monitorExecution = input.__monitorExecution;
-
-        const rawTargets = Array.isArray(input.targets) ? input.targets : [];
-        const rawApiPaths = Array.isArray(input.api_paths) ? input.api_paths : [];
-
-        if (rawTargets.length === 0 && rawApiPaths.length === 0) {
-            return { success: false, error: "At least one target or api_path is required" };
-        }
-
-        const endpointNames: string[] = Array.isArray(input.actuator_endpoints) && input.actuator_endpoints.length > 0
-            ? input.actuator_endpoints
-            : ACTUATOR_ENDPOINTS.map(e => e.name);
-
-        const endpointNameSet = new Set(endpointNames);
-        if (!endpointNameSet.has("actuator") && includeActuatorPrefix) {
-            endpointNames.unshift("actuator");
-        }
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: 100,
-            phase: "prepare",
-            message: "Generating probe URLs from API paths",
-        });
-
-        const allProbeUrls: string[] = [];
-        let totalGenerated = 0;
-
-        for (const apiPath of rawApiPaths) {
-            const normalized = normalizeUrl(apiPath);
-            if (!normalized) continue;
-            const urls = generateBacktrackPaths(normalized, endpointNames, includeActuatorPrefix);
-            totalGenerated += urls.length;
-            allProbeUrls.push(...urls);
-        }
-
-        for (const target of rawTargets) {
-            const normalized = normalizeUrl(target);
-            if (!normalized) continue;
-            const origin = extractOrigin(normalized);
-            for (const endpoint of endpointNames) {
-                allProbeUrls.push(`${origin}/${endpoint}`);
-                totalGenerated++;
-                if (includeActuatorPrefix && endpoint !== "actuator") {
-                    allProbeUrls.push(`${origin}/actuator/${endpoint}`);
-                    totalGenerated++;
-                }
-            }
-        }
-
-        const deduplicatedUrls = [...new Set(allProbeUrls)];
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 5,
-            total: 100,
-            phase: "baseline",
-            message: `Generated ${deduplicatedUrls.length} unique probe URLs (from ${totalGenerated} total). Building soft-404 baselines...`,
-        });
-
-        const origins = [...new Set(deduplicatedUrls.map(extractOrigin))];
-        const baselineMap = new Map<string, Soft404Baseline | null>();
-        await runWithConcurrency(
-            origins.map(origin => async () => {
-                const baseline = await buildSoft404Baseline(origin, userAgent, timeout);
-                baselineMap.set(origin, baseline);
-            }),
-            Math.min(concurrency, origins.length),
-        );
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 10,
-            total: 100,
-            phase: "probe",
-            message: `Probing ${deduplicatedUrls.length} actuator URLs across ${origins.length} origins...`,
-        });
-
-        const findings: Finding[] = [];
-        const vulnerabilityFindings: any[] = [];
-        let requestsMade = 0;
-        let errors = 0;
-        let completed = 0;
-
-        const confirmedPrefixes = new Set<string>();
-        const deadOrigins = new Set<string>();
-        const originErrorCount = new Map<string, number>();
-        const ORIGIN_ERROR_THRESHOLD = 5;
-
-        const probeTasks = deduplicatedUrls.map(url => async () => {
-            const endpointDef = getEndpointDef(url);
-            if (!endpointDef) {
-                completed++;
-                return;
-            }
-
-            const origin = extractOrigin(url);
-
-            if (deadOrigins.has(origin)) {
-                completed++;
-                return;
-            }
-
-            const baseline = baselineMap.get(origin) || null;
-
-            const result = await probeActuatorUrl(url, endpointDef, userAgent, baseline, timeout);
-            requestsMade++;
-
-            if (result.error) {
-                errors++;
-                const count = (originErrorCount.get(origin) || 0) + 1;
-                originErrorCount.set(origin, count);
-                if (count >= ORIGIN_ERROR_THRESHOLD) {
-                    deadOrigins.add(origin);
-                }
-            }
-
-            if (result.confirmed) {
-                const pathPrefix = url.replace(/\/[^/]+$/, "");
-                if (confirmedPrefixes.has(`${pathPrefix}/${endpointDef.name}`)) {
-                    completed++;
-                    return;
-                }
-                confirmedPrefixes.add(`${pathPrefix}/${endpointDef.name}`);
-
-                const finding: Finding = {
-                    title: `Spring Boot Actuator Exposed: /${endpointDef.name}`,
-                    severity: endpointDef.severity,
-                    url: result.url,
-                    endpoint: endpointDef.name,
-                    description: endpointDef.description,
-                    evidence: result.evidence,
-                    cwe: "CWE-200",
-                    remediation: "Restrict access to actuator endpoints via Spring Security or network-level controls. In production, disable sensitive endpoints or require authentication.",
-                    tags: ["actuator", "spring-boot", "misconfiguration", endpointDef.name],
-                };
-                findings.push(finding);
-                vulnerabilityFindings.push({
-                    title: finding.title,
-                    severity: finding.severity,
-                    target: finding.url,
-                    vulnerability_type: "actuator_exposure",
-                    description: finding.description,
-                    evidence: finding.evidence,
-                    source: "actuator_scanner",
-                });
-            }
-
-            completed++;
-            if (completed % 50 === 0 || completed === deduplicatedUrls.length) {
-                const progress = 10 + Math.floor((completed / deduplicatedUrls.length) * 85);
-                await reportMonitorProgress(monitorExecution, {
-                    current: progress,
-                    total: 100,
-                    phase: "probe",
-                    message: `Probed ${completed}/${deduplicatedUrls.length} URLs, found ${findings.length} exposures`,
-                });
-            }
-        });
-
-        await runWithConcurrency(probeTasks, concurrency);
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 100,
-            total: 100,
-            phase: "complete",
-            message: `Scan complete: ${findings.length} actuator exposures found`,
-        });
-
-        return {
-            success: true,
-            data: {
-                findings,
-                summary: {
-                    totalApiPaths: rawApiPaths.length + rawTargets.length,
-                    generatedProbeUrls: totalGenerated,
-                    deduplicatedProbeUrls: deduplicatedUrls.length,
-                    confirmedExposures: findings.length,
-                    requestsMade,
-                    errors,
-                },
-                surface_artifacts: {
-                    findings: vulnerabilityFindings,
-                },
-            },
-        };
-    } catch (error: any) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/actuator_scanner/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function confirmedMonitorFinding(finding,findingType,evidence=finding.evidence){const required=(value,field)=>{if(typeof value!=="string"||!value.trim())throw new Error(
+`Confirmed monitor finding requires ${field}`);return value.trim()};const output={title:required(finding.title,"title"),description:required(finding.description,
+"description"),finding_type:required(findingType,"finding_type"),severity:required(finding.severity,"severity"),confidence:"high",affected_url:required(finding.
+url,"affected_url")};if(finding.cwe?.trim())output.cwe_id=finding.cwe.trim();if(finding.remediation?.trim())output.remediation=finding.remediation.trim();if(finding.
+impact?.trim())output.impact=finding.impact.trim();if(finding.tags?.length)output.tags=finding.tags;if(evidence!==void 0)output.evidence=evidence;return output}async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{
+taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
+started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}var ACTUATOR_ENDPOINTS=[{name:"env",severity:"\
+critical",keys:["propertySources","activeProfiles","systemProperties","systemEnvironment"],description:"Environment properties exposure - may contain secrets, d\
+atabase credentials, API keys"},{name:"info",severity:"low",keys:["app","build","git"],description:"Application info - may reveal version and build details"}];var pluginGlobals=globalThis;
+function get_input_schema(){return{type:"object",required:[],properties:{targets:{type:"array",items:{type:"string"},description:'Base URLs to scan (e.g. ["http\
+://example.com"]). Used for root-level actuator probing.'},api_paths:{type:"array",items:{type:"string"},description:'Full API paths to backtrack from (e.g. ["h\
+ttp://example.com/api/v1/users"]). The scanner will probe actuator endpoints at each path level.'},actuator_endpoints:{type:"array",items:{type:"string"},description:'\
+Custom actuator endpoint names to probe (overrides built-in list). Example: ["env", "health", "heapdump"]'},include_actuator_prefix:{type:"boolean",description:"\
+Also probe /actuator/* prefix variants (Spring Boot 2.x+). Default: true",default:true},userAgent:{type:"string",description:"User-Agent header for requests",default:"\
+Sentinel-Actuator-Scanner/1.0"},concurrency:{type:"integer",description:"Maximum concurrent requests",default:100,minimum:1,maximum:200},timeout:{type:"integer",
+description:"Per-request timeout in milliseconds",default:3e3,minimum:1e3,maximum:1e4}}}}function get_output_schema(){return{type:"object",properties:{success:{
+type:"boolean"},data:{type:"object",properties:{findings:{type:"array",items:{type:"object",properties:{title:{type:"string"},severity:{type:"string"},url:{type:"\
+string"},endpoint:{type:"string"},description:{type:"string"},evidence:{type:"string"},cwe:{type:"string"},remediation:{type:"string"},tags:{type:"array",items:{
+type:"string"}}}}},summary:{type:"object",properties:{totalApiPaths:{type:"integer"},generatedProbeUrls:{type:"integer"},deduplicatedProbeUrls:{type:"integer"},
+confirmedExposures:{type:"integer"},requestsMade:{type:"integer"},errors:{type:"integer"}}},surface_artifacts:{type:"object"}}},error:{type:"string"}}}}pluginGlobals.
+get_input_schema=get_input_schema;pluginGlobals.get_output_schema=get_output_schema;async function runWithConcurrency(tasks,concurrency){const results=new Array(
+tasks.length);let nextIndex=0;const workers=Array.from({length:Math.min(concurrency,tasks.length)},async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex++;
+results[currentIndex]=await tasks[currentIndex]()}});await Promise.all(workers);return results}function normalizeUrl(raw){if(!raw||typeof raw!=="string")return null;
+let trimmed=raw.trim().replace(/\/+$/,"");if(!trimmed)return null;if(!trimmed.startsWith("http://")&&!trimmed.startsWith("https://")){trimmed="https://"+trimmed}
+return trimmed}function extractOrigin(url){try{const parsed=new URL(url);return`${parsed.protocol}//${parsed.host}`}catch{const match=url.match(/^(https?:\/\/[^/]+)/);
+return match?match[1]:url}}function getPathSegments(url){try{const parsed=new URL(url);return parsed.pathname.split("/").filter(Boolean)}catch{const withoutOrigin=url.
+replace(/^https?:\/\/[^/]+/,"");return withoutOrigin.split("/").filter(Boolean)}}var MAX_BACKTRACK_DEPTH=3;function generateBacktrackPaths(apiPath,endpointNames,includeActuatorPrefix){
+const origin=extractOrigin(apiPath);const segments=getPathSegments(apiPath);const probeUrls=[];const maxDepth=Math.min(segments.length,MAX_BACKTRACK_DEPTH);for(let depth=maxDepth;depth>=
+0;depth--){const basePath=depth===0?"":"/"+segments.slice(0,depth).join("/");for(const endpoint of endpointNames){probeUrls.push(`${origin}${basePath}/${endpoint}`);
+if(includeActuatorPrefix&&endpoint!=="actuator"){probeUrls.push(`${origin}${basePath}/actuator/${endpoint}`)}}}return probeUrls}function getEndpointDef(url){const path=url.
+replace(/^https?:\/\/[^/]+/,"");const lastSegment=path.split("/").filter(Boolean).pop()||"";const secondLast=path.split("/").filter(Boolean).slice(-2).join("/");
+for(const def of ACTUATOR_ENDPOINTS){if(lastSegment===def.name||secondLast===def.name){return def}}return null}function randomProbePath(){const seed=`${Date.now().
+toString(36)}${Math.random().toString(36).slice(2,10)}`;return`sentinel-actuator-baseline-${seed}`}async function buildSoft404Baseline(origin,userAgent,timeout){
+const baselineUrl=`${origin}/${randomProbePath()}`;try{const response=await fetch(baselineUrl,{method:"GET",headers:{"User-Agent":userAgent,"Accept":"applicatio\
+n/json, text/html, */*"},redirect:"follow",timeout,maxBodyBytes:32768});const body=await response.text();return{status:response.status,bodyText:body.slice(0,4e3).
+toLowerCase().replace(/\s+/g," ").trim(),contentLength:body.length,title:extractTitle(body)}}catch{return null}}function extractTitle(html){const match=html.match(
+/<title[^>]*>([^<]+)<\/title>/i);return match?.[1]?.trim()||""}function tokenize(text){return text.toLowerCase().replace(/\s+/g," ").trim().match(/[a-z0-9_/-]{3,}/g)||
+[]}function jaccardSimilarity(a,b){if(a.length===0||b.length===0)return 0;const setA=new Set(a);const setB=new Set(b);let intersection=0;for(const token of setA){
+if(setB.has(token))intersection++}const union=new Set([...setA,...setB]).size;return union===0?0:intersection/union}function isSoft404(body,status,baseline){if(status===
+404||status===403||status===401)return false;if(baseline&&baseline.status===200&&status===200){const normalizedBody=body.slice(0,4e3).toLowerCase().replace(/\s+/g,
+" ").trim();if(normalizedBody===baseline.bodyText)return true;const similarity=jaccardSimilarity(tokenize(normalizedBody),tokenize(baseline.bodyText));if(similarity>=
+.85)return true}const lowerBody=body.toLowerCase();const soft404Markers=["404","not found","page not found","does not exist","cannot be found","no such","找不到",
+"不存在"];if(status===200&&soft404Markers.some(m=>lowerBody.includes(m))){return true}return false}function isHeapdumpResponse(body,contentType){if(contentType.
+includes("application/octet-stream")||contentType.includes("application/x-heap-dump")){return body.length>1e3}return false}function validateActuatorResponse(body,status,contentType,endpointDef){
+if(status!==200)return false;if(endpointDef.name==="heapdump"){return isHeapdumpResponse(body,contentType)}if(!contentType.includes("json")&&!contentType.includes(
+"vnd.spring-boot.actuator")){return false}if(endpointDef.keys.length===0)return true;let parsed;try{parsed=JSON.parse(body)}catch{return false}if(typeof parsed!==
+"object"||parsed===null)return false;if(endpointDef.name==="health"&&typeof parsed.status==="string"){const validStatuses=["UP","DOWN","OUT_OF_SERVICE","UNKNOWN"];
+if(validStatuses.includes(parsed.status.toUpperCase()))return true}if(endpointDef.name==="env"){if(parsed.propertySources||parsed.activeProfiles||parsed.systemProperties||
+parsed.systemEnvironment){return true}}if(endpointDef.name==="actuator"||parsed._links){return true}const bodyStr=JSON.stringify(parsed);const matchedKeys=endpointDef.
+keys.filter(key=>bodyStr.includes(`"${key}"`));return matchedKeys.length>=Math.min(2,endpointDef.keys.length)}async function probeActuatorUrl(url,endpointDef,userAgent,baseline,timeout){
+try{const isHeapdump=endpointDef.name==="heapdump";const response=await fetch(url,{method:isHeapdump?"HEAD":"GET",headers:{"User-Agent":userAgent,"Accept":"appl\
+ication/json, application/vnd.spring-boot.actuator.v3+json, */*"},redirect:"follow",timeout,maxBodyBytes:32768});const status=response.status;if(status===404||status===
+403||status===401||status===405||status>=500){return{url,endpoint:endpointDef.name,confirmed:false,status}}if(isHeapdump){const contentType2=(response.headers?.
+get?.("content-type")||"").toLowerCase();const confirmed2=contentType2.includes("application/octet-stream")||contentType2.includes("application/x-heap-dump");return{
+url,endpoint:endpointDef.name,confirmed:confirmed2,status,evidence:confirmed2?`Content-Type: ${contentType2}`:void 0}}const body=await response.text();const contentType=(response.
+headers?.get?.("content-type")||"").toLowerCase();if(isSoft404(body,status,baseline)){return{url,endpoint:endpointDef.name,confirmed:false,status}}const confirmed=validateActuatorResponse(
+body,status,contentType,endpointDef);return{url,endpoint:endpointDef.name,confirmed,status,evidence:confirmed?body.slice(0,500):void 0}}catch(error){return{url,
+endpoint:endpointDef.name,confirmed:false,error:error?.message||String(error)}}}async function analyze(input){try{const stream=createMonitorResultStream(input);
+if(!input||typeof input!=="object"){return{success:false,error:"Invalid input: expected an object payload"}}const userAgent=input.userAgent||"Sentinel-Actuator-\
+Scanner/1.0";const concurrency=Math.max(1,Math.min(64,Number(input.concurrency)||50));const timeout=Math.max(1e3,Math.min(3e4,Number(input.timeout)||5e3));const includeActuatorPrefix=input.
+include_actuator_prefix!==false;const monitorExecution=input.__monitorExecution;const rawTargets=Array.isArray(input.targets)?input.targets:[];const rawApiPaths=Array.
+isArray(input.api_paths)?input.api_paths:[];if(rawTargets.length===0&&rawApiPaths.length===0){return{success:false,error:"At least one target or api_path is req\
+uired"}}const endpointNames=Array.isArray(input.actuator_endpoints)&&input.actuator_endpoints.length>0?input.actuator_endpoints:ACTUATOR_ENDPOINTS.map(e=>e.name);
+const endpointNameSet=new Set(endpointNames);if(!endpointNameSet.has("actuator")&&includeActuatorPrefix){endpointNames.unshift("actuator")}await reportMonitorProgress(
+monitorExecution,{current:0,total:100,phase:"prepare",message:"Generating probe URLs from API paths"});const allProbeUrls=[];const probeOwners=new Map;const addProbe=(target,url)=>{
+allProbeUrls.push(url);if(!probeOwners.has(url))probeOwners.set(url,new Set);probeOwners.get(url).add(target)};const recordProbe=async(url,output,status="ok",error)=>{
+const owners=[...probeOwners.get(url)||[]];for(let index=0;index<owners.length;index++)await stream.record(owners[index],url,index===0?output:{success:true,data:{}},
+{status,error,complete:false})};let totalGenerated=0;for(const apiPath of rawApiPaths){const normalized=normalizeUrl(apiPath);if(!normalized)continue;const urls=generateBacktrackPaths(
+normalized,endpointNames,includeActuatorPrefix);totalGenerated+=urls.length;for(const url of urls)addProbe(apiPath,url)}for(const target of rawTargets){const normalized=normalizeUrl(
+target);if(!normalized)continue;const origin=extractOrigin(normalized);for(const endpoint of endpointNames){addProbe(target,`${origin}/${endpoint}`);totalGenerated++;
+if(includeActuatorPrefix&&endpoint!=="actuator"){addProbe(target,`${origin}/actuator/${endpoint}`);totalGenerated++}}}const deduplicatedUrls=[...new Set(allProbeUrls)];
+await reportMonitorProgress(monitorExecution,{current:5,total:100,phase:"baseline",message:`Generated ${deduplicatedUrls.length} unique probe URLs (from ${totalGenerated}\
+ total). Building soft-404 baselines...`});const origins=[...new Set(deduplicatedUrls.map(extractOrigin))];const baselineMap=new Map;await runWithConcurrency(origins.
+map(origin=>async()=>{stream.assertHealthy();const baseline=await buildSoft404Baseline(origin,userAgent,timeout);baselineMap.set(origin,baseline);const owners=new Set(
+deduplicatedUrls.filter(url=>extractOrigin(url)===origin).flatMap(url=>[...probeOwners.get(url)||[]]));for(const owner of owners)await stream.record(owner,`base\
+line:${origin}`,{success:true,data:{results:[{origin,kind:"baseline",observed:baseline!==null}]}},{complete:false})}),Math.min(concurrency,origins.length));await reportMonitorProgress(
+monitorExecution,{current:10,total:100,phase:"probe",message:`Probing ${deduplicatedUrls.length} actuator URLs across ${origins.length} origins...`});const findings=[];
+const vulnerabilityFindings=[];let requestsMade=0;let errors=0;let completed=0;let confirmedExposures=0;const failedTargets=new Set;const confirmedPrefixes=new Set;
+const deadOrigins=new Set;const originErrorCount=new Map;const ORIGIN_ERROR_THRESHOLD=5;const probeTasks=deduplicatedUrls.map(url=>async()=>{stream.assertHealthy();
+const endpointDef=getEndpointDef(url);if(!endpointDef){await recordProbe(url,{success:true,data:{results:[{url,skipped:"unknown_endpoint"}]}},"skipped");completed++;
+return}const origin=extractOrigin(url);if(deadOrigins.has(origin)){await recordProbe(url,{success:true,data:{results:[{url,skipped:"unreachable_origin"}]}},"ski\
+pped");completed++;return}const baseline=baselineMap.get(origin)||null;const result=await probeActuatorUrl(url,endpointDef,userAgent,baseline,timeout);requestsMade++;
+let matchedFinding;let surfaceFinding;if(result.error){for(const owner of probeOwners.get(url)||[])failedTargets.add(owner);errors++;const count=(originErrorCount.
+get(origin)||0)+1;originErrorCount.set(origin,count);if(count>=ORIGIN_ERROR_THRESHOLD){deadOrigins.add(origin)}}if(result.confirmed){const pathPrefix=url.replace(
+/\/[^/]+$/,"");if(confirmedPrefixes.has(`${pathPrefix}/${endpointDef.name}`)){await recordProbe(url,{success:true,data:{results:[{url,skipped:"already_confirmed"}]}},
+"skipped");completed++;return}confirmedPrefixes.add(`${pathPrefix}/${endpointDef.name}`);const finding={title:`Spring Boot Actuator Exposed: /${endpointDef.name}`,
+severity:endpointDef.severity,url:result.url,endpoint:endpointDef.name,description:endpointDef.description,evidence:result.evidence,cwe:"CWE-200",remediation:"R\
+estrict access to actuator endpoints via Spring Security or network-level controls. In production, disable sensitive endpoints or require authentication.",tags:[
+"actuator","spring-boot","misconfiguration",endpointDef.name]};matchedFinding=finding;confirmedExposures++;if(!stream.enabled)findings.push(finding);surfaceFinding=
+{title:finding.title,severity:finding.severity,target:finding.url,vulnerability_type:"actuator_exposure",description:finding.description,evidence:finding.evidence,
+source:"actuator_scanner"};if(!stream.enabled)vulnerabilityFindings.push(surfaceFinding)}await recordProbe(url,{success:true,data:{results:[result],findings:matchedFinding?
+[confirmedMonitorFinding(matchedFinding,"actuator_exposure")]:[],summary:{requestsMade:1,confirmedExposures:matchedFinding?1:0,errors:result.error?1:0}}},result.
+error?"failed":"ok",result.error);completed++;if(completed%50===0||completed===deduplicatedUrls.length){const progress=10+Math.floor(completed/deduplicatedUrls.
+length*85);await reportMonitorProgress(monitorExecution,{current:progress,total:100,phase:"probe",message:`Probed ${completed}/${deduplicatedUrls.length} URLs, \
+found ${confirmedExposures} exposures`})}});await runWithConcurrency(probeTasks,concurrency);for(const target of new Set([...rawTargets,...rawApiPaths]))await stream.
+record(target,"target-complete",{success:true,data:{}},{complete:true,status:failedTargets.has(target)?"failed":"ok"});await reportMonitorProgress(monitorExecution,
+{current:100,total:100,phase:"complete",message:`Scan complete: ${confirmedExposures} actuator exposures found`});return await stream.finish({success:true,data:{
+findings,summary:{totalApiPaths:rawApiPaths.length+rawTargets.length,generatedProbeUrls:totalGenerated,deduplicatedProbeUrls:deduplicatedUrls.length,confirmedExposures,
+requestsMade,errors},surface_artifacts:{findings:vulnerabilityFindings}}})}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}
+pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

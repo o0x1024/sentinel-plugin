@@ -1,5 +1,5 @@
 {
-  "version": "2.5.7",
+  "version": "2.5.8",
   "updated_at": "2026-10-28",
   "plugins": [
     {
@@ -117,7 +117,7 @@
     {
       "id": "subdomain_brute",
       "name": "Subdomain Brute Force",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -125,18 +125,35 @@
       "input_mode": "seed",
       "target_asset_types": [],
       "seed_bindings": [
-        { "seed_type": "root_domain", "input_key": "targets" },
-        { "seed_type": "domain", "input_key": "targets" }
+        {
+          "seed_type": "root_domain",
+          "input_key": "targets"
+        },
+        {
+          "seed_type": "domain",
+          "input_key": "targets"
+        }
       ],
       "description": "Batch dictionary-based DNS discovery through the native Rust engine, with platform dictionary IDs, explicit UDP or ethernet transport, snapshots and typed surface artifacts. Defaults to UDP without silent transport fallback.",
       "default_severity": "info",
-      "tags": ["subdomain", "dns", "bruteforce", "dictionary", "native", "asm", "surface", "capability:network-scan", "capability:monitor-events"],
+      "tags": [
+        "subdomain",
+        "dns",
+        "bruteforce",
+        "dictionary",
+        "native",
+        "asm",
+        "surface",
+        "capability:network-scan",
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
+      ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_brute.ts"
     },
     {
       "id": "subdomain_enumerator",
       "name": "Subdomain Enumerator",
-      "version": "2.2.7",
+      "version": "2.2.8",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -155,7 +172,9 @@
         "threat-intelligence",
         "passive-dns",
         "api",
-        "capability:fetch"
+        "capability:fetch",
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "seed_bindings": [
         {
@@ -173,7 +192,7 @@
     {
       "id": "dns_resolver",
       "name": "DNS Resolver",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -193,7 +212,8 @@
         "asm",
         "surface",
         "capability:network-scan",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/dns_resolver.ts",
       "seed_bindings": []
@@ -201,7 +221,7 @@
     {
       "id": "cidr_mapper",
       "name": "CIDR Mapper",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -218,7 +238,9 @@
         "ip",
         "network",
         "asm",
-        "surface"
+        "surface",
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/cidr_mapper.ts",
       "seed_bindings": []
@@ -226,7 +248,7 @@
     {
       "id": "http_prober",
       "name": "HTTP Prober",
-      "version": "1.4.7",
+      "version": "1.4.8",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -250,7 +272,8 @@
         "headers",
         "evidence",
         "capability:fetch",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/http_prober.ts",
       "seed_bindings": []
@@ -258,7 +281,7 @@
     {
       "id": "tech_fingerprinter",
       "name": "Technology Fingerprinter",
-      "version": "2.5.0",
+      "version": "2.6.0",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -279,7 +302,7 @@
         "capability:fetch",
         "capability:dictionary",
         "capability:monitor-events",
-        "monitor:technology-stream-v1"
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/tech_fingerprinter.ts",
       "seed_bindings": []
@@ -287,7 +310,7 @@
     {
       "id": "sensitive_file_scanner",
       "name": "Sensitive File Scanner",
-      "version": "1.3.8",
+      "version": "1.3.9",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
@@ -306,7 +329,8 @@
         "web",
         "capability:fetch",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/sensitive_file_scanner.ts",
       "seed_bindings": []
@@ -314,7 +338,7 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.2.7",
+      "version": "2.2.8",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
@@ -333,7 +357,8 @@
         "web",
         "capability:fetch",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/risk_scanner.ts",
       "seed_bindings": []
@@ -341,7 +366,7 @@
     {
       "id": "favicon_fingerprinter",
       "name": "Favicon Fingerprinter",
-      "version": "1.3.6",
+      "version": "1.3.7",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -363,7 +388,8 @@
         "dictionary",
         "capability:fetch",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/favicon_fingerprinter.ts",
       "seed_bindings": []
@@ -371,7 +397,7 @@
     {
       "id": "service_monitor",
       "name": "Service Monitor",
-      "version": "1.0.8",
+      "version": "1.0.9",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -392,7 +418,8 @@
         "network",
         "capability:network-scan",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/service_monitor.ts",
       "seed_bindings": []
@@ -400,7 +427,7 @@
     {
       "id": "fofa_asset_monitor",
       "name": "FOFA Asset Monitor",
-      "version": "1.2.7",
+      "version": "1.2.8",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -417,7 +444,8 @@
         "surface",
         "change-detection",
         "capability:fetch",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "seed_bindings": [
         {
@@ -467,7 +495,7 @@
     {
       "id": "service_probe",
       "name": "Service Probe",
-      "version": "1.2.8",
+      "version": "1.2.9",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",
@@ -490,7 +518,8 @@
         "native",
         "capability:network-scan",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/service_probe.ts",
       "seed_bindings": []
@@ -498,7 +527,7 @@
     {
       "id": "directory_bruteforcer",
       "name": "Directory Bruteforcer",
-      "version": "1.2.8",
+      "version": "1.2.9",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",
@@ -517,7 +546,8 @@
         "web",
         "capability:fetch",
         "capability:dictionary",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/directory_bruteforcer.ts",
       "seed_bindings": []
@@ -525,7 +555,7 @@
     {
       "id": "js_analyzer",
       "name": "JavaScript Analyzer",
-      "version": "3.1.6",
+      "version": "3.1.7",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "discovery",
@@ -545,7 +575,8 @@
         "ast",
         "capability:fetch",
         "capability:ast-parse",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/js_analyzer.ts",
       "seed_bindings": []
@@ -602,7 +633,7 @@
     {
       "id": "subdomain_takeover",
       "name": "Subdomain Takeover Detector",
-      "version": "1.1.6",
+      "version": "1.1.7",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "vuln",
@@ -618,9 +649,13 @@
         "takeover",
         "dns",
         "vulnerability",
-        "security"
+        "security",
+        "capability:fetch",
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
-      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_takeover.ts"
+      "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/subdomain_takeover.ts",
+      "seed_bindings": []
     },
     {
       "id": "cors_misconfiguration",
@@ -720,7 +755,7 @@
     {
       "id": "cert_monitor",
       "name": "Certificate Monitor",
-      "version": "1.2.5",
+      "version": "1.2.6",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -740,7 +775,8 @@
         "change-detection",
         "expiry",
         "capability:tls-inspect",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/cert_monitor.ts",
       "seed_bindings": []
@@ -748,7 +784,7 @@
     {
       "id": "content_monitor",
       "name": "Content Monitor",
-      "version": "1.1.6",
+      "version": "1.1.7",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -766,7 +802,8 @@
         "fingerprint",
         "hash",
         "capability:fetch",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/content_monitor.ts",
       "seed_bindings": []
@@ -774,7 +811,7 @@
     {
       "id": "api_monitor",
       "name": "API Monitor",
-      "version": "1.4.3",
+      "version": "1.4.4",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -794,7 +831,8 @@
         "javascript",
         "spa",
         "capability:fetch",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/api_monitor.ts",
       "seed_bindings": []
@@ -802,7 +840,7 @@
     {
       "id": "port_monitor",
       "name": "Port Monitor",
-      "version": "1.3.7",
+      "version": "1.3.8",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "monitor",
@@ -825,7 +863,8 @@
         "change-detection",
         "native",
         "capability:network-scan",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/port_monitor.ts",
       "seed_bindings": []
@@ -833,7 +872,7 @@
     {
       "id": "actuator_scanner",
       "name": "Actuator Path Scanner",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
@@ -853,7 +892,8 @@
         "java",
         "web",
         "capability:fetch",
-        "capability:monitor-events"
+        "capability:monitor-events",
+        "monitor:results-stream-v1"
       ],
       "download_url": "https://raw.githubusercontent.com/o0x1024/sentinel-plugin/main/plugins/bounty/actuator_scanner.ts",
       "seed_bindings": []

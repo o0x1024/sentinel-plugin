@@ -3,7 +3,7 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.3.8
+ * @version 1.3.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -12,767 +12,167 @@
  * @category risk
  * @seed_bindings []
  * @default_severity medium
- * @tags risk, exposure, file, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events
+ * @tags risk, exposure, file, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
  * @description Scan web targets for exposed sensitive files using structured dictionary rules.
  */
-
-declare const Sentinel: {
-    Dictionary?: {
-        get?(idOrName: string): Promise<any>;
-        getDefaultId?(dictType: string): Promise<string | null>;
-        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
-    };
-    Monitor?: {
-        reportProgress?(update: Record<string, unknown>): Promise<boolean>;
-    };
-};
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-interface ToolInput {
-    url?: string;
-    base_url?: string;
-    targets?: string[];
-    dictionaryId?: string;
-    dictionaryEntries?: RuleEntry[];
-    userAgent?: string;
-    maxTargets?: number;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface RuleEntry {
-    word: string;
-    category?: string | null;
-    metadata?: any;
-}
-
-interface Finding {
-    title: string;
-    severity: string;
-    url: string;
-    description: string;
-    evidence?: string;
-    cwe?: string;
-    remediation?: string;
-    tags?: string[];
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        findings: Finding[];
-        summary: {
-            totalTargets: number;
-            scannedRules: number;
-            findings: number;
-            attemptedRequests: number;
-            connectivityFailures: number;
-            timeoutErrors: number;
-            networkErrors: number;
-            skippedTargets: number;
-            skippedDeadTargetProbes: number;
-            heuristicFiltered: number;
-            soft404Filtered: number;
-            statusBuckets: Record<string, number>;
-        };
-        surface_artifacts?: Record<string, any[]>;
-    };
-    error?: string;
-}
-
-interface ScanStats {
-    attemptedRequests: number;
-    connectivityFailures: number;
-    timeoutErrors: number;
-    networkErrors: number;
-    skippedTargets: number;
-    skippedDeadTargetProbes: number;
-    heuristicFiltered: number;
-    soft404Filtered: number;
-    statusBuckets: Record<string, number>;
-}
-
-interface PreparedRule {
-    rule: RuleEntry;
-    metadata: Record<string, any>;
-    path: string;
-    matchers: any[];
-    negativeMatchers: any[];
-}
-
-interface ResponseContext {
-    url: string;
-    finalUrl: string;
-    redirected: boolean;
-    status: number;
-    headers: Record<string, string>;
-    contentType: string;
-    title: string;
-    body: string;
-    bodyText: string;
-    contentLength: number;
-}
-
-interface TargetBaseline {
-    soft404: ResponseContext | null;
-}
-
-const pluginGlobals = globalThis as typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: [],
-        properties: {
-            url: {
-                type: "string",
-                description: "Single target URL to scan for exposed sensitive files"
-            },
-            base_url: {
-                type: "string",
-                description: "Base URL alias for a single target"
-            },
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "List of target URLs to scan"
-            },
-            dictionaryId: {
-                type: "string",
-                "x-control": "dictionary-picker",
-                "x-dictionary-type": "sensitive_file",
-                description: "Structured dictionary ID or name used to resolve sensitive file rules"
-            },
-            dictionaryEntries: {
-                type: "array",
-                description: "Inline sensitive file rules that override dictionary loading",
-                items: {
-                    type: "object",
-                    required: ["word"],
-                    properties: {
-                        word: {
-                            type: "string",
-                            description: "Rule key or relative path to probe"
-                        },
-                        category: {
-                            type: "string",
-                            description: "Rule category used for normalized finding type"
-                        },
-                        metadata: {
-                            description: "Rule metadata object or JSON string with path, matchers, severity and tags"
-                        }
-                    }
-                }
-            },
-            userAgent: {
-                type: "string",
-                description: "User-Agent header used when requesting candidate files",
-                default: "Sentinel-Sensitive-File-Scanner/1.0"
-            },
-            maxTargets: {
-                type: "integer",
-                description: "Optional maximum number of normalized targets to scan",
-                minimum: 100,
-                default: 100,
-                maximum: 500
-            },
-        },
-    };
-}
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: {
-                type: "boolean",
-                description: "Whether the scan completed successfully"
-            },
-            data: {
-                type: "object",
-                properties: {
-                    findings: {
-                        type: "array",
-                        description: "Sensitive file exposure findings discovered during scanning",
-                        items: {
-                            type: "object",
-                            properties: {
-                                title: { type: "string" },
-                                severity: { type: "string" },
-                                url: { type: "string" },
-                                description: { type: "string" },
-                                evidence: { type: "string" },
-                                cwe: { type: "string" },
-                                remediation: { type: "string" },
-                                tags: {
-                                    type: "array",
-                                    items: { type: "string" }
-                                }
-                            }
-                        }
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTargets: { type: "integer" },
-                            scannedRules: { type: "integer" },
-                            findings: { type: "integer" },
-                            attemptedRequests: { type: "integer" },
-                            connectivityFailures: { type: "integer" },
-                            timeoutErrors: { type: "integer" },
-                            networkErrors: { type: "integer" },
-                            skippedTargets: { type: "integer" },
-                            skippedDeadTargetProbes: { type: "integer" },
-                            heuristicFiltered: { type: "integer" },
-                            soft404Filtered: { type: "integer" },
-                            statusBuckets: { type: "object" }
-                        },
-                        description: "High-level scan summary"
-                    },
-                    surface_artifacts: {
-                        type: "object",
-                        description: "Normalized findings prepared for surface graph and upper-layer ingestion",
-                        properties: {
-                            findings: {
-                                type: "array",
-                                description: "Normalized vulnerability findings"
-                            }
-                        }
-                    }
-                }
-            },
-            error: {
-                type: "string",
-                description: "Error message if the scan fails"
-            },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-pluginGlobals.get_output_schema = get_output_schema;
-
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
-        while (nextIndex < tasks.length) {
-            const currentIndex = nextIndex++;
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    });
-    await Promise.all(workers);
-    return results;
-}
-
-function normalizeTarget(raw?: string): string | null {
-    if (!raw || typeof raw !== "string") return null;
-    const trimmed = raw.trim().replace(/\/+$/, "");
-    if (!trimmed) return null;
-    if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return null;
-    return trimmed;
-}
-
-function parseMetadata(value: any): Record<string, any> {
-    if (!value) return {};
-    if (typeof value === "string") {
-        try {
-            return JSON.parse(value);
-        } catch {
-            return {};
-        }
-    }
-    return typeof value === "object" ? value : {};
-}
-
-async function loadStructuredDictionary(idOrName: string): Promise<RuleEntry[]> {
-    if (!Sentinel?.Dictionary?.getEntries) return [];
-    try {
-        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-        return entries
-            .filter((item: any) => item && typeof item.word === "string")
-            .map((item: any) => ({ word: item.word, category: item.category || null, metadata: parseMetadata(item.metadata) }));
-    } catch {
-        return [];
-    }
-}
-
-async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
-        return input.dictionaryEntries.map(entry => ({ ...entry, metadata: parseMetadata(entry.metadata) }));
-    }
-    const defaultDictionaryId = Sentinel?.Dictionary?.getDefaultId
-        ? await Sentinel.Dictionary.getDefaultId("sensitive_file")
-        : null;
-    const candidates = [input.dictionaryId, defaultDictionaryId, "builtin_sensitive_files_web", "Sensitive Files Web"]
-        .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-    for (const candidate of candidates) {
-        const rules = await loadStructuredDictionary(candidate);
-        if (rules.length > 0) return rules;
-    }
-    return [];
-}
-
-const FETCH_TIMEOUT_MS = 5000;
-
-async function fetchResponse(url: string, userAgent: string, method: "GET" | "HEAD" = "GET"): Promise<Response> {
-    return await fetch(url, {
-        method,
-        redirect: "manual",
-        headers: { "User-Agent": userAgent },
-        timeout: FETCH_TIMEOUT_MS,
-    });
-}
-
-async function probeStatus(url: string, userAgent: string): Promise<Response> {
-    const headResponse = await fetchResponse(url, userAgent, "HEAD");
-    if (headResponse.status === 405 || headResponse.status === 501) {
-        try {
-            await headResponse.body?.cancel();
-        } catch {
-            // Ignore body cleanup failures on fallback probes.
-        }
-        return fetchResponse(url, userAgent, "GET");
-    }
-    return headResponse;
-}
-
-async function discardResponse(response: Response | null | undefined): Promise<void> {
-    if (!response) return;
-    try {
-        await response.body?.cancel();
-    } catch {
-        // Ignore cleanup failures when the body has already been consumed.
-    }
-}
-
-function joinUrl(baseUrl: string, path: string): string {
-    return `${baseUrl}/${String(path || "").replace(/^\/+/, "")}`;
-}
-
-function extractTitle(html: string): string {
-    const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    return match?.[1]?.trim() || "";
-}
-
-function stripHtml(body: string): string {
-    return body
-        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
-        .replace(/<!--[\s\S]*?-->/g, " ")
-        .replace(/<[^>]+>/g, " ");
-}
-
-function normalizeComparableText(value: string, limit = 4000): string {
-    return stripHtml(String(value || ""))
-        .toLowerCase()
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, limit);
-}
-
-function buildHeadersObject(response: Response): Record<string, string> {
-    const headers: Record<string, string> = {};
-    response.headers.forEach((value: string, key: string) => {
-        headers[key.toLowerCase()] = value;
-    });
-    return headers;
-}
-
-function buildResponseContext(url: string, response: Response, body: string | null): ResponseContext {
-    const finalUrl = response.url || url;
-    const rawBody = body || "";
-    return {
-        url,
-        finalUrl,
-        redirected: finalUrl !== url,
-        status: response.status,
-        headers: buildHeadersObject(response),
-        contentType: response.headers.get("content-type") || "",
-        title: rawBody ? extractTitle(rawBody) : "",
-        body: rawBody,
-        bodyText: normalizeComparableText(rawBody),
-        contentLength: rawBody.length,
-    };
-}
-
-function matcherSource(context: ResponseContext, matcher: any): any {
-    const part = String(matcher?.part || "body").toLowerCase();
-    if (part === "status") return context.status;
-    if (part === "header") return context.headers[String(matcher?.key || "").toLowerCase()] || "";
-    if (part === "title") return context.title;
-    if (part === "content_type") return context.contentType;
-    if (part === "url") return context.url;
-    return context.body;
-}
-
-function matcherHit(context: ResponseContext, matcher: any): boolean {
-    const type = String(matcher?.type || "contains").toLowerCase();
-    const expected = matcher?.value;
-    const source = matcherSource(context, matcher);
-    const flags = typeof matcher?.flags === "string" && matcher.flags.trim().length > 0 ? matcher.flags : "i";
-
-    if (type === "exists") return source !== undefined && source !== null && String(source).length > 0;
-    if (type === "equals") return String(source || "") === String(expected || "");
-    if (type === "in" && Array.isArray(expected)) return expected.map(String).includes(String(source || ""));
-    if (type === "regex") {
-        try {
-            return new RegExp(String(expected || ""), flags).test(String(source || ""));
-        } catch {
-            return false;
-        }
-    }
-
-    return String(source || "").toLowerCase().includes(String(expected || "").toLowerCase());
-}
-
-function matchAll(context: ResponseContext, matchers: any[], operator?: string): boolean {
-    if (!Array.isArray(matchers) || matchers.length === 0) return false;
-    return String(operator || "and").toLowerCase() === "or"
-        ? matchers.some(matcher => matcherHit(context, matcher))
-        : matchers.every(matcher => matcherHit(context, matcher));
-}
-
-function buildNegativeMatchers(metadata: Record<string, any>): any[] {
-    return Array.isArray(metadata.negative_matchers) ? metadata.negative_matchers : [];
-}
-
-function bucketStatus(status: number): string {
-    if (status >= 200 && status < 300) return "2xx";
-    if (status >= 300 && status < 400) return "3xx";
-    if (status >= 400 && status < 500) return "4xx";
-    if (status >= 500 && status < 600) return "5xx";
-    return "other";
-}
-
-function ensureStatusBucket(stats: ScanStats, bucket: string): void {
-    stats.statusBuckets[bucket] = (stats.statusBuckets[bucket] || 0) + 1;
-}
-
-function classifyError(error: any): "timeout" | "network" {
-    const message = String(error?.message || error || "").toLowerCase();
-    if (message.includes("abort") || message.includes("timeout")) return "timeout";
-    return "network";
-}
-
-function randomProbePath(): string {
-    const seed = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
-    return `.sentinel-soft404-${seed}.txt`;
-}
-
-async function buildTargetBaseline(target: string, userAgent: string): Promise<TargetBaseline> {
-    const baselineUrl = joinUrl(target, randomProbePath());
-    let response: Response | null = null;
-    try {
-        response = await fetchResponse(baselineUrl, userAgent, "GET");
-        const body = await response.text();
-        if (response.status !== 200) {
-            return { soft404: null };
-        }
-        return {
-            soft404: buildResponseContext(baselineUrl, response, body),
-        };
-    } catch {
-        await discardResponse(response);
-        return { soft404: null };
-    }
-}
-
-function tokenizeComparableText(value: string): string[] {
-    return normalizeComparableText(value, 2000).match(/[a-z0-9_/-]{3,}/g) || [];
-}
-
-function jaccardSimilarity(left: string[], right: string[]): number {
-    if (left.length === 0 || right.length === 0) return 0;
-    const leftSet = new Set(left);
-    const rightSet = new Set(right);
-    let intersection = 0;
-    for (const token of leftSet) {
-        if (rightSet.has(token)) {
-            intersection += 1;
-        }
-    }
-    const union = new Set([...leftSet, ...rightSet]).size;
-    return union === 0 ? 0 : intersection / union;
-}
-
-function hasSoft404Markers(context: ResponseContext): boolean {
-    const probe = `${context.title} ${context.finalUrl} ${context.bodyText}`.toLowerCase();
-    return [
-        "404",
-        "not found",
-        "page not found",
-        "file not found",
-        "resource not found",
-        "does not exist",
-        "cannot be found",
-        "找不到",
-        "不存在",
-        "页面丢失",
-    ].some(marker => probe.includes(marker));
-}
-
-function looksLikeSoft404(context: ResponseContext, baseline: TargetBaseline): boolean {
-    if (context.status !== 200) return false;
-    if (context.redirected) return true;
-
-    const baseline404 = baseline.soft404;
-    if (!baseline404) {
-        return hasSoft404Markers(context);
-    }
-
-    if (context.bodyText.length > 0 && context.bodyText === baseline404.bodyText) {
-        return true;
-    }
-
-    const sameTitle = normalizeComparableText(context.title, 200) === normalizeComparableText(baseline404.title, 200);
-    const sameContentType = context.contentType.split(";")[0] === baseline404.contentType.split(";")[0];
-    const maxLength = Math.max(context.contentLength, baseline404.contentLength);
-    const lengthRatio = maxLength === 0 ? 1 : 1 - (Math.abs(context.contentLength - baseline404.contentLength) / maxLength);
-    const tokenSimilarity = jaccardSimilarity(
-        tokenizeComparableText(context.bodyText),
-        tokenizeComparableText(baseline404.bodyText),
-    );
-
-    if (sameTitle && sameContentType && lengthRatio >= 0.92 && tokenSimilarity >= 0.88) {
-        return true;
-    }
-
-    return hasSoft404Markers(context) && sameTitle && tokenSimilarity >= 0.75;
-}
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!input || typeof input !== "object") {
-            return { success: false, error: "Invalid input: expected an object payload" };
-        }
-
-        const userAgent = input.userAgent || "Sentinel-Sensitive-File-Scanner/1.0";
-                const normalizedTargets = Array.from(new Set([
-            normalizeTarget(input.url),
-            normalizeTarget(input.base_url),
-            ...(Array.isArray(input.targets) ? input.targets.map(normalizeTarget) : []),
-        ].filter((value): value is string => Boolean(value))));
-        const maxTargets = Number.isFinite(Number(input.maxTargets))
-            ? Math.max(1, Number(input.maxTargets))
-            : normalizedTargets.length;
-        const targets = normalizedTargets.slice(0, maxTargets);
-        const monitorExecution = input.__monitorExecution;
-
-        if (targets.length === 0) {
-            return { success: false, error: "At least one web target is required" };
-        }
-
-        const totalProgressUnits = targets.length + 2;
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: totalProgressUnits,
-            phase: "prepare",
-            message: "Preparing sensitive file scan",
-        });
-
-        const rules = await loadRules(input);
-        if (rules.length === 0) {
-            return {
-                success: false,
-                error: "No sensitive file rules loaded. Configure dictionaryEntries or a sensitive_file dictionary with explicit matchers.",
-            };
-        }
-        const preparedRules: PreparedRule[] = rules
-            .map((rule) => {
-                const metadata = parseMetadata(rule.metadata);
-                return {
-                    rule,
-                    metadata,
-                    path: metadata.path || rule.word,
-                    matchers: Array.isArray(metadata.matchers) ? metadata.matchers : [],
-                    negativeMatchers: buildNegativeMatchers(metadata),
-                };
-            })
-            .filter((preparedRule) => preparedRule.metadata.enabled !== false);
-        const findings: Finding[] = [];
-        const vulnerabilityFindings: any[] = [];
-        const stats: ScanStats = {
-            attemptedRequests: 0,
-            connectivityFailures: 0,
-            timeoutErrors: 0,
-            networkErrors: 0,
-            skippedTargets: 0,
-            skippedDeadTargetProbes: 0,
-            heuristicFiltered: 0,
-            soft404Filtered: 0,
-            statusBuckets: { "2xx": 0, "3xx": 0, "4xx": 0, "5xx": 0, other: 0 },
-        };
-        let completedTargets = 0;
-        await runSequentially(targets.map((target) => async () => {
-                try {
-                    const baseline = await buildTargetBaseline(target, userAgent);
-                    for (const preparedRule of preparedRules) {
-                        const { rule, metadata, path, matchers, negativeMatchers } = preparedRule;
-                        const url = joinUrl(target, path);
-                        const effectiveMatchers = matchers;
-                        const shouldReadBody = effectiveMatchers.length > 0 || negativeMatchers.length > 0;
-                        let response: Response | null = null;
-                        try {
-                            stats.attemptedRequests += 1;
-                            response = shouldReadBody
-                                ? await fetchResponse(url, userAgent)
-                                : await probeStatus(url, userAgent);
-                            let body: string | null = null;
-                            if (shouldReadBody) {
-                                body = await response.text();
-                            }
-                            ensureStatusBucket(stats, bucketStatus(response.status));
-                            if (response.status !== 200) {
-                                await discardResponse(response);
-                                continue;
-                            }
-                            if (effectiveMatchers.length === 0 && negativeMatchers.length === 0) {
-                                stats.heuristicFiltered += 1;
-                                await discardResponse(response);
-                                continue;
-                            }
-                            const context = buildResponseContext(url, response, body);
-                            if (negativeMatchers.length > 0 && matchAll(context, negativeMatchers, metadata.negative_operator || "or")) {
-                                stats.heuristicFiltered += 1;
-                                await discardResponse(response);
-                                continue;
-                            }
-                            if (effectiveMatchers.length > 0) {
-                                if (!matchAll(context, effectiveMatchers, metadata.match_operator || "and")) {
-                                    await discardResponse(response);
-                                    continue;
-                                }
-                            } else {
-                                stats.heuristicFiltered += 1;
-                                await discardResponse(response);
-                                continue;
-                            }
-                            if (looksLikeSoft404(context, baseline)) {
-                                stats.soft404Filtered += 1;
-                                await discardResponse(response);
-                                continue;
-                            }
-
-                            const finding = {
-                                title: metadata.name || `Sensitive file exposed: ${path}`,
-                                severity: metadata.severity || "medium",
-                                url,
-                                description: metadata.description || `Sensitive file exposed at ${url}`,
-                                evidence: body ? body.slice(0, 500) : undefined,
-                                cwe: metadata.cwe || "CWE-200",
-                                remediation: metadata.remediation || "Restrict public access to this resource.",
-                                tags: Array.isArray(metadata.tags) ? metadata.tags : [],
-                            };
-                            findings.push(finding);
-                            vulnerabilityFindings.push({
-                                title: finding.title,
-                                severity: finding.severity,
-                                target: url,
-                                vulnerability_type: rule.category || "sensitive_file_exposure",
-                                description: finding.description,
-                                evidence: finding.evidence,
-                                source: "sensitive_file_scanner",
-                            });
-                        } catch (error) {
-                            const kind = classifyError(error);
-                            stats.connectivityFailures += 1;
-                            if (kind === "timeout") {
-                                stats.timeoutErrors += 1;
-                            } else {
-                                stats.networkErrors += 1;
-                            }
-                            stats.skippedTargets += 1;
-                            await discardResponse(response);
-                            break;
-                        }
-                    }
-                } finally {
-                    completedTargets += 1;
-                    await reportMonitorProgress(monitorExecution, {
-                        current: completedTargets,
-                        total: totalProgressUnits,
-                        currentTarget: target,
-                        phase: "probe",
-                        message: `Scanning sensitive files on ${target}`,
-                    });
-                }
-            }));
-
-        await reportMonitorProgress(monitorExecution, {
-            current: targets.length + 1,
-            total: totalProgressUnits,
-            phase: "build",
-            message: "Building sensitive file scan results",
-        });
-
-        return {
-            success: true,
-            data: {
-                findings,
-                summary: {
-                    totalTargets: targets.length,
-                    scannedRules: rules.length,
-                    findings: findings.length,
-                    attemptedRequests: stats.attemptedRequests,
-                    connectivityFailures: stats.connectivityFailures,
-                    timeoutErrors: stats.timeoutErrors,
-                    networkErrors: stats.networkErrors,
-                    skippedTargets: stats.skippedTargets,
-                    skippedDeadTargetProbes: stats.skippedDeadTargetProbes,
-                    heuristicFiltered: stats.heuristicFiltered,
-                    soft404Filtered: stats.soft404Filtered,
-                    statusBuckets: stats.statusBuckets,
-                },
-                surface_artifacts: {
-                    findings: vulnerabilityFindings,
-                },
-            },
-        };
-    } catch (error: any) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/sensitive_file_scanner/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function confirmedMonitorFinding(finding,findingType,evidence=finding.evidence){const required=(value,field)=>{if(typeof value!=="string"||!value.trim())throw new Error(
+`Confirmed monitor finding requires ${field}`);return value.trim()};const output={title:required(finding.title,"title"),description:required(finding.description,
+"description"),finding_type:required(findingType,"finding_type"),severity:required(finding.severity,"severity"),confidence:"high",affected_url:required(finding.
+url,"affected_url")};if(finding.cwe?.trim())output.cwe_id=finding.cwe.trim();if(finding.remediation?.trim())output.remediation=finding.remediation.trim();if(finding.
+impact?.trim())output.impact=finding.impact.trim();if(finding.tags?.length)output.tags=finding.tags;if(evidence!==void 0)output.evidence=evidence;return output}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{
+taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
+started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}var pluginGlobals=globalThis;function get_input_schema(){
+return{type:"object",required:[],properties:{url:{type:"string",description:"Single target URL to scan for exposed sensitive files"},base_url:{type:"string",description:"\
+Base URL alias for a single target"},targets:{type:"array",items:{type:"string"},description:"List of target URLs to scan"},dictionaryId:{type:"string","x-contr\
+ol":"dictionary-picker","x-dictionary-type":"sensitive_file",description:"Structured dictionary ID or name used to resolve sensitive file rules"},dictionaryEntries:{
+type:"array",description:"Inline sensitive file rules that override dictionary loading",items:{type:"object",required:["word"],properties:{word:{type:"string",description:"\
+Rule key or relative path to probe"},category:{type:"string",description:"Rule category used for normalized finding type"},metadata:{description:"Rule metadata \
+object or JSON string with path, matchers, severity and tags"}}}},userAgent:{type:"string",description:"User-Agent header used when requesting candidate files",
+default:"Sentinel-Sensitive-File-Scanner/1.0"},maxTargets:{type:"integer",description:"Optional maximum number of normalized targets to scan",minimum:100,default:100,
+maximum:500}}}}function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the scan completed successfully"},data:{
+type:"object",properties:{findings:{type:"array",description:"Sensitive file exposure findings discovered during scanning",items:{type:"object",properties:{title:{
+type:"string"},severity:{type:"string"},url:{type:"string"},description:{type:"string"},evidence:{type:"string"},cwe:{type:"string"},remediation:{type:"string"},
+tags:{type:"array",items:{type:"string"}}}}},summary:{type:"object",properties:{totalTargets:{type:"integer"},scannedRules:{type:"integer"},findings:{type:"inte\
+ger"},attemptedRequests:{type:"integer"},connectivityFailures:{type:"integer"},timeoutErrors:{type:"integer"},networkErrors:{type:"integer"},skippedTargets:{type:"\
+integer"},skippedDeadTargetProbes:{type:"integer"},heuristicFiltered:{type:"integer"},soft404Filtered:{type:"integer"},statusBuckets:{type:"object"}},description:"\
+High-level scan summary"},surface_artifacts:{type:"object",description:"Normalized findings prepared for surface graph and upper-layer ingestion",properties:{findings:{
+type:"array",description:"Normalized vulnerability findings"}}}}},error:{type:"string",description:"Error message if the scan fails"}}}}pluginGlobals.get_input_schema=
+get_input_schema;pluginGlobals.get_output_schema=get_output_schema;async function runSequentially(tasks){const results=new Array(tasks.length);let nextIndex=0;const workers=Array.
+from({length:Math.min(16,tasks.length)},async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex++;results[currentIndex]=await tasks[currentIndex]()}});
+await Promise.all(workers);return results}function normalizeTarget(raw){if(!raw||typeof raw!=="string")return null;const trimmed=raw.trim().replace(/\/+$/,"");if(!trimmed)
+return null;if(!trimmed.startsWith("http://")&&!trimmed.startsWith("https://"))return null;return trimmed}function parseMetadata(value){if(!value)return{};if(typeof value===
+"string"){try{return JSON.parse(value)}catch{return{}}}return typeof value==="object"?value:{}}async function loadStructuredDictionary(idOrName){if(!Sentinel?.Dictionary?.
+getEntries)return[];try{const entries=await Sentinel.Dictionary.getEntries(idOrName,1e4);return entries.filter(item=>item&&typeof item.word==="string").map(item=>({
+word:item.word,category:item.category||null,metadata:parseMetadata(item.metadata)}))}catch{return[]}}async function loadRules(input){if(Array.isArray(input.dictionaryEntries)&&
+input.dictionaryEntries.length>0){return input.dictionaryEntries.map(entry=>({...entry,metadata:parseMetadata(entry.metadata)}))}const defaultDictionaryId=Sentinel?.
+Dictionary?.getDefaultId?await Sentinel.Dictionary.getDefaultId("sensitive_file"):null;const candidates=[input.dictionaryId,defaultDictionaryId,"builtin_sensiti\
+ve_files_web","Sensitive Files Web"].filter(value=>typeof value==="string"&&value.trim().length>0);for(const candidate of candidates){const rules=await loadStructuredDictionary(
+candidate);if(rules.length>0)return rules}return[]}var FETCH_TIMEOUT_MS=5e3;async function fetchResponse(url,userAgent,method="GET"){return await fetch(url,{method,
+redirect:"manual",headers:{"User-Agent":userAgent},timeout:FETCH_TIMEOUT_MS})}async function probeStatus(url,userAgent){const headResponse=await fetchResponse(url,
+userAgent,"HEAD");if(headResponse.status===405||headResponse.status===501){try{await headResponse.body?.cancel()}catch{}return fetchResponse(url,userAgent,"GET")}
+return headResponse}async function discardResponse(response){if(!response)return;try{await response.body?.cancel()}catch{}}function joinUrl(baseUrl,path){return`${baseUrl}\
+/${String(path||"").replace(/^\/+/,"")}`}function extractTitle(html){const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);return match?.[1]?.trim()||""}function stripHtml(body){
+return body.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi," ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi," ").replace(/<!--[\s\S]*?-->/g," ").replace(/<[^>]+>/g,
+" ")}function normalizeComparableText(value,limit=4e3){return stripHtml(String(value||"")).toLowerCase().replace(/\s+/g," ").trim().slice(0,limit)}function buildHeadersObject(response){
+const headers={};response.headers.forEach((value,key)=>{headers[key.toLowerCase()]=value});return headers}function buildResponseContext(url,response,body){const finalUrl=response.
+url||url;const rawBody=body||"";return{url,finalUrl,redirected:finalUrl!==url,status:response.status,headers:buildHeadersObject(response),contentType:response.headers.
+get("content-type")||"",title:rawBody?extractTitle(rawBody):"",body:rawBody,bodyText:normalizeComparableText(rawBody),contentLength:rawBody.length}}function matcherSource(context,matcher){
+const part=String(matcher?.part||"body").toLowerCase();if(part==="status")return context.status;if(part==="header")return context.headers[String(matcher?.key||"").
+toLowerCase()]||"";if(part==="title")return context.title;if(part==="content_type")return context.contentType;if(part==="url")return context.url;return context.
+body}function matcherHit(context,matcher){const type=String(matcher?.type||"contains").toLowerCase();const expected=matcher?.value;const source=matcherSource(context,
+matcher);const flags=typeof matcher?.flags==="string"&&matcher.flags.trim().length>0?matcher.flags:"i";if(type==="exists")return source!==void 0&&source!==null&&
+String(source).length>0;if(type==="equals")return String(source||"")===String(expected||"");if(type==="in"&&Array.isArray(expected))return expected.map(String).
+includes(String(source||""));if(type==="regex"){try{return new RegExp(String(expected||""),flags).test(String(source||""))}catch{return false}}return String(source||
+"").toLowerCase().includes(String(expected||"").toLowerCase())}function matchAll(context,matchers,operator){if(!Array.isArray(matchers)||matchers.length===0)return false;
+return String(operator||"and").toLowerCase()==="or"?matchers.some(matcher=>matcherHit(context,matcher)):matchers.every(matcher=>matcherHit(context,matcher))}function buildNegativeMatchers(metadata){
+return Array.isArray(metadata.negative_matchers)?metadata.negative_matchers:[]}function bucketStatus(status){if(status>=200&&status<300)return"2xx";if(status>=300&&
+status<400)return"3xx";if(status>=400&&status<500)return"4xx";if(status>=500&&status<600)return"5xx";return"other"}function ensureStatusBucket(stats,bucket){stats.
+statusBuckets[bucket]=(stats.statusBuckets[bucket]||0)+1}function classifyError(error){const message=String(error?.message||error||"").toLowerCase();if(message.
+includes("abort")||message.includes("timeout"))return"timeout";return"network"}function randomProbePath(){const seed=`${Date.now().toString(36)}${Math.random().
+toString(36).slice(2,10)}`;return`.sentinel-soft404-${seed}.txt`}async function buildTargetBaseline(target,userAgent){const baselineUrl=joinUrl(target,randomProbePath());
+let response=null;try{response=await fetchResponse(baselineUrl,userAgent,"GET");const body=await response.text();if(response.status!==200){return{soft404:null}}
+return{soft404:buildResponseContext(baselineUrl,response,body)}}catch{await discardResponse(response);return{soft404:null}}}function tokenizeComparableText(value){
+return normalizeComparableText(value,2e3).match(/[a-z0-9_/-]{3,}/g)||[]}function jaccardSimilarity(left,right){if(left.length===0||right.length===0)return 0;const leftSet=new Set(
+left);const rightSet=new Set(right);let intersection=0;for(const token of leftSet){if(rightSet.has(token)){intersection+=1}}const union=new Set([...leftSet,...rightSet]).
+size;return union===0?0:intersection/union}function hasSoft404Markers(context){const probe=`${context.title} ${context.finalUrl} ${context.bodyText}`.toLowerCase();
+return["404","not found","page not found","file not found","resource not found","does not exist","cannot be found","找不到","不存在","页面丢失"].some(
+marker=>probe.includes(marker))}function looksLikeSoft404(context,baseline){if(context.status!==200)return false;if(context.redirected)return true;const baseline404=baseline.
+soft404;if(!baseline404){return hasSoft404Markers(context)}if(context.bodyText.length>0&&context.bodyText===baseline404.bodyText){return true}const sameTitle=normalizeComparableText(
+context.title,200)===normalizeComparableText(baseline404.title,200);const sameContentType=context.contentType.split(";")[0]===baseline404.contentType.split(";")[0];
+const maxLength=Math.max(context.contentLength,baseline404.contentLength);const lengthRatio=maxLength===0?1:1-Math.abs(context.contentLength-baseline404.contentLength)/
+maxLength;const tokenSimilarity=jaccardSimilarity(tokenizeComparableText(context.bodyText),tokenizeComparableText(baseline404.bodyText));if(sameTitle&&sameContentType&&
+lengthRatio>=.92&&tokenSimilarity>=.88){return true}return hasSoft404Markers(context)&&sameTitle&&tokenSimilarity>=.75}async function analyze(input){try{const stream=createMonitorResultStream(
+input);const writeTarget=createMonitorTargetWriter(input,stream,normalizeTarget);if(!input||typeof input!=="object"){return{success:false,error:"Invalid input: \
+expected an object payload"}}const userAgent=input.userAgent||"Sentinel-Sensitive-File-Scanner/1.0";const normalizedTargets=Array.from(new Set([normalizeTarget(
+input.url),normalizeTarget(input.base_url),...Array.isArray(input.targets)?input.targets.map(normalizeTarget):[]].filter(value=>Boolean(value))));const maxTargets=Number.
+isFinite(Number(input.maxTargets))?Math.max(1,Number(input.maxTargets)):normalizedTargets.length;const targets=normalizedTargets.slice(0,maxTargets);const monitorExecution=input.
+__monitorExecution;if(targets.length===0){return{success:false,error:"At least one web target is required"}}const totalProgressUnits=targets.length+2;await reportMonitorProgress(
+monitorExecution,{current:0,total:totalProgressUnits,phase:"prepare",message:"Preparing sensitive file scan"});const rules=await loadRules(input);if(rules.length===
+0){return{success:false,error:"No sensitive file rules loaded. Configure dictionaryEntries or a sensitive_file dictionary with explicit matchers."}}const preparedRules=rules.
+map(rule=>{const metadata=parseMetadata(rule.metadata);return{rule,metadata,path:metadata.path||rule.word,matchers:Array.isArray(metadata.matchers)?metadata.matchers:
+[],negativeMatchers:buildNegativeMatchers(metadata)}}).filter(preparedRule=>preparedRule.metadata.enabled!==false);const findings=[];const vulnerabilityFindings=[];
+const stats={attemptedRequests:0,connectivityFailures:0,timeoutErrors:0,networkErrors:0,skippedTargets:0,skippedDeadTargetProbes:0,heuristicFiltered:0,soft404Filtered:0,
+statusBuckets:{"2xx":0,"3xx":0,"4xx":0,"5xx":0,other:0}};let completedTargets=0;for(const target of normalizedTargets.slice(targets.length))await writeTarget(target,
+"max-targets",{success:true,data:{}},{status:"skipped",complete:true});await runSequentially(targets.map(target=>async()=>{stream.assertHealthy();let targetError;
+try{const baseline=await buildTargetBaseline(target,userAgent);await writeTarget(target,"baseline",{success:true,data:{results:[{target,kind:"baseline",observed:baseline.
+soft404!==null}]}},{complete:false});for(const[ruleIndex,preparedRule]of preparedRules.entries()){stream.assertHealthy();const{rule,metadata,path,matchers,negativeMatchers}=preparedRule;
+const url=joinUrl(target,path);const effectiveMatchers=matchers;const shouldReadBody=effectiveMatchers.length>0||negativeMatchers.length>0;let response=null;let matchedFinding;
+let surfaceFinding;let ruleError;try{stats.attemptedRequests+=1;response=shouldReadBody?await fetchResponse(url,userAgent):await probeStatus(url,userAgent);let body=null;
+if(shouldReadBody){body=await response.text()}ensureStatusBucket(stats,bucketStatus(response.status));if(response.status!==200){await discardResponse(response);
+continue}if(effectiveMatchers.length===0&&negativeMatchers.length===0){stats.heuristicFiltered+=1;await discardResponse(response);continue}const context=buildResponseContext(
+url,response,body);if(negativeMatchers.length>0&&matchAll(context,negativeMatchers,metadata.negative_operator||"or")){stats.heuristicFiltered+=1;await discardResponse(
+response);continue}if(effectiveMatchers.length>0){if(!matchAll(context,effectiveMatchers,metadata.match_operator||"and")){await discardResponse(response);continue}}else{
+stats.heuristicFiltered+=1;await discardResponse(response);continue}if(looksLikeSoft404(context,baseline)){stats.soft404Filtered+=1;await discardResponse(response);
+continue}const finding={title:metadata.name||`Sensitive file exposed: ${path}`,severity:metadata.severity||"medium",url,description:metadata.description||`Sensi\
+tive file exposed at ${url}`,evidence:body?body.slice(0,500):void 0,cwe:metadata.cwe||"CWE-200",remediation:metadata.remediation||"Restrict public access to thi\
+s resource.",tags:Array.isArray(metadata.tags)?metadata.tags:[]};matchedFinding=finding;if(!stream.enabled)findings.push(finding);surfaceFinding={title:finding.
+title,severity:finding.severity,target:url,vulnerability_type:rule.category||"sensitive_file_exposure",description:finding.description,evidence:finding.evidence,
+source:"sensitive_file_scanner"};if(!stream.enabled)vulnerabilityFindings.push(surfaceFinding)}catch(error){ruleError=error instanceof Error?error.message:String(
+error);targetError=ruleError;const kind=classifyError(error);stats.connectivityFailures+=1;if(kind==="timeout"){stats.timeoutErrors+=1}else{stats.networkErrors+=
+1}stats.skippedTargets+=1;await discardResponse(response);break}finally{await writeTarget(target,`rule:${ruleIndex}:${rule.word}`,{success:true,data:{results:[{
+target,url,rule_id:rule.word,status:response?.status,matched:Boolean(matchedFinding),error:ruleError}],findings:matchedFinding?[confirmedMonitorFinding(matchedFinding,
+rule.category||"sensitive_file_exposure")]:[],summary:{attemptedRequests:1,findings:matchedFinding?1:0}}},{complete:false,status:ruleError?"failed":"ok",error:ruleError,
+failure_category:ruleError?classifyError(new Error(ruleError))==="timeout"?"timeout":"network_other":void 0})}}await writeTarget(target,"target-complete",{success:true,
+data:{}},{complete:true,status:targetError?"failed":"ok",error:targetError})}finally{completedTargets+=1;await reportMonitorProgress(monitorExecution,{current:completedTargets,
+total:totalProgressUnits,currentTarget:target,phase:"probe",message:`Scanning sensitive files on ${target}`})}}));await reportMonitorProgress(monitorExecution,{
+current:targets.length+1,total:totalProgressUnits,phase:"build",message:"Building sensitive file scan results"});return await stream.finish({success:true,data:{
+findings,summary:{totalTargets:targets.length,scannedRules:rules.length,findings:findings.length,attemptedRequests:stats.attemptedRequests,connectivityFailures:stats.
+connectivityFailures,timeoutErrors:stats.timeoutErrors,networkErrors:stats.networkErrors,skippedTargets:stats.skippedTargets,skippedDeadTargetProbes:stats.skippedDeadTargetProbes,
+heuristicFiltered:stats.heuristicFiltered,soft404Filtered:stats.soft404Filtered,statusBuckets:stats.statusBuckets},surface_artifacts:{findings:vulnerabilityFindings}}})}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

@@ -3,7 +3,7 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.8
+ * @version 1.2.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type service
@@ -12,1032 +12,156 @@
  * @category recon
  * @seed_bindings []
  * @default_severity info
- * @tags service, probe, fingerprint, banner, asm, network, dictionary, normalized, native, capability:network-scan, capability:dictionary, capability:monitor-events
+ * @tags service, probe, fingerprint, banner, asm, network, dictionary, normalized, native, capability:network-scan, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
  * @description Identify exposed services from host/port targets with the native Rust service identification engine, normalized fingerprint artifacts, and structured service evidence
  */
-
-declare const Sentinel: {
-    Dictionary?: {
-        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
-        getDefaultId?(dictType: string): Promise<string | null>;
-    };
-    Network?: {
-        probeServices?(request: {
-            targets: Array<{ host: string; port: number; protocol: string }>;
-            rules?: Array<{ id?: string; word: string; category?: string | null; metadata?: any }>;
-            dictionaryId?: string;
-            followHttpRedirects?: boolean;
-            readBanner?: boolean;
-            engine?: string;
-            monitorProgress?: MonitorExecutionContext;
-        }): Promise<{
-            success: boolean;
-            results: Array<ProbeResult>;
-            ruleCount?: number;
-            engineRequested: string;
-            engineUsed: string;
-            engineExperimental: boolean;
-            fallbackReason?: string;
-            error?: string;
-        }>;
-        getServiceProbeCapabilities?(): Promise<{
-            default_engine: string;
-            engines: Array<{
-                id: string;
-                experimental: boolean;
-                available: boolean;
-                implemented: boolean;
-            }>;
-        }>;
-    };
-};
-
-interface PortLikeTarget {
-    host_key?: string;
-    ip_or_host?: string;
-    host?: string;
-    port?: number;
-    port_number?: number;
-    transport_protocol?: string;
-    protocol?: string;
-    value?: string;
-    type?: string;
-    service_name?: string;
-}
-
-interface ToolInput {
-    targets?: Array<string | PortLikeTarget>;
-    target_objects?: Array<string | PortLikeTarget>;
-    service_targets?: Array<string | PortLikeTarget>;
-    dictionaryId?: string;
-    dictionaryEntries?: RuleEntry[];
-    followHttpRedirects?: boolean;
-    readBanner?: boolean;
-    serviceProbeEngine?: string;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface RuleEntry {
-    id?: string;
-    word: string;
-    category?: string | null;
-    metadata?: any;
-}
-
-interface ProbeResult {
-    target: string;
-    success: boolean;
-    available: boolean;
-    host: string;
-    port: number;
-    protocol: string;
-    serviceName?: string;
-    productName?: string;
-    vendor?: string;
-    version?: string;
-    banner?: string;
-    serverHeader?: string;
-    title?: string;
-    statusCode?: number;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        results: ProbeResult[];
-        snapshots: Record<string, ServiceSnapshot>;
-        summary: {
-            totalTargets: number;
-            successfulChecks: number;
-            failedChecks: number;
-            reachableServices: number;
-            unreachableServices: number;
-            identifiedProducts: number;
-            matchedFingerprints: number;
-            scannedRules: number;
-            probeEngineRequested: string;
-            probeEngineUsed: string;
-            probeEngineExperimental: boolean;
-            probeEngineFallbackReason?: string;
-        };
-        surface_artifacts?: Record<string, any[]>;
-    };
-    error?: string;
-}
-
-interface ServiceProbeEngineCapability {
-    id: string;
-    experimental: boolean;
-    available: boolean;
-    implemented: boolean;
-}
-
-interface ServiceProbeCapabilitiesResponse {
-    default_engine: string;
-    engines: ServiceProbeEngineCapability[];
-}
-
-interface ResolvedServiceProbeEngine {
-    requested: string;
-    used: string;
-    experimental: boolean;
-    fallbackReason?: string;
-}
-
-interface NativeServiceProbeResponse {
-    success: boolean;
-    results: ProbeResult[];
-    ruleCount?: number;
-    engineRequested: string;
-    engineUsed: string;
-    engineExperimental: boolean;
-    fallbackReason?: string;
-    error?: string;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-const HTTP_PORTS = new Set([80, 81, 443, 8000, 8080, 8081, 8443, 8888, 9000]);
-const TLS_PORTS = new Set([443, 8443, 9443]);
-
-const DEFAULT_SERVICE_NAMES: Record<number, string> = {
-    21: "ftp",
-    22: "ssh",
-    23: "telnet",
-    25: "smtp",
-    53: "dns",
-    80: "http",
-    110: "pop3",
-    143: "imap",
-    443: "https",
-    445: "smb",
-    993: "imaps",
-    995: "pop3s",
-    1433: "mssql",
-    1521: "oracle",
-    3306: "mysql",
-    3389: "rdp",
-    5432: "postgresql",
-    5900: "vnc",
-    6379: "redis",
-    8080: "http",
-    8443: "https",
-    9200: "elasticsearch",
-    27017: "mongodb",
-};
-
-const pluginGlobals = globalThis as typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-function parseMetadata(value: any): Record<string, any> {
-    if (!value) return {};
-    if (typeof value === "string") {
-        try {
-            return JSON.parse(value);
-        } catch {
-            return {};
-        }
-    }
-    return typeof value === "object" ? value : {};
-}
-
-async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
-    if (!Sentinel?.Dictionary?.getEntries) return [];
-    try {
-        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-        return entries
-            .filter((item: any) => item && typeof item.word === "string")
-            .map((item: any) => ({
-                id: typeof item.id === "string" ? item.id : undefined,
-                word: item.word,
-                category: typeof item.category === "string" ? item.category : null,
-                metadata: parseMetadata(item.metadata),
-            }));
-    } catch {
-        return [];
-    }
-}
-
-async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
-        return input.dictionaryEntries.map((entry) => ({
-            ...entry,
-            metadata: parseMetadata(entry.metadata),
-        }));
-    }
-
-    const resolvedDictionaryId = await resolveRuleDictionaryId(input);
-    const candidates = [
-        input.dictionaryId,
-        resolvedDictionaryId,
-        "builtin_service_fingerprint_rules",
-        "Service Fingerprint Rules",
-    ].filter((value, index, array): value is string =>
-        typeof value === "string"
-        && value.trim().length > 0
-        && array.indexOf(value) === index
-    );
-
-    for (const candidate of candidates) {
-        const rules = await loadDictionaryEntries(candidate);
-        if (rules.length > 0) {
-            return rules;
-        }
-    }
-
-    return [];
-}
-
-async function resolveRuleDictionaryId(input: ToolInput): Promise<string | null> {
-    if (typeof input.dictionaryId === "string" && input.dictionaryId.trim()) {
-        return input.dictionaryId.trim();
-    }
-
-    try {
-        const defaultId = await Sentinel?.Dictionary?.getDefaultId?.("service_probe_rule");
-        if (typeof defaultId === "string" && defaultId.trim()) {
-            return defaultId.trim();
-        }
-    } catch {
-        // ignore and keep fallback chain below
-    }
-
-    try {
-        const fallbackId = await Sentinel?.Dictionary?.getDefaultId?.("fingerprint_rule");
-        if (typeof fallbackId === "string" && fallbackId.trim()) {
-            return fallbackId.trim();
-        }
-    } catch {
-        // ignore and keep fallback chain below
-    }
-
-    return "builtin_service_fingerprint_rules";
-}
-
-function normalizeTarget(raw: string | PortLikeTarget): { host: string; port: number; protocol: string } | null {
-    if (typeof raw === "string") {
-        const trimmed = raw.trim();
-        if (!trimmed) return null;
-
-        try {
-            const normalized = trimmed.includes("://") ? trimmed : `tcp://${trimmed}`;
-            const parsed = new URL(normalized);
-            const protocol = parsed.protocol.replace(":", "") || "tcp";
-            const port = Number(parsed.port || (protocol === "https" ? 443 : protocol === "http" ? 80 : 0));
-            if (!parsed.hostname || !port) return null;
-            return { host: parsed.hostname, port, protocol };
-        } catch {
-            const [hostPart, portPart] = trimmed.split(":");
-            const port = Number(portPart || 0);
-            if (!hostPart || !port) return null;
-            return { host: hostPart, port, protocol: "tcp" };
-        }
-    }
-
-    if (typeof raw.value === "string" && raw.value.trim()) {
-        return normalizeTarget(raw.value);
-    }
-
-    const host = String(raw.ip_or_host || raw.host || raw.host_key || "").trim();
-    const port = Number(raw.port ?? raw.port_number ?? 0);
-    const protocol = String(raw.transport_protocol || raw.protocol || "tcp").trim().toLowerCase();
-    if (!host || !port) return null;
-    return { host, port, protocol };
-}
-
-function collectRawTargets(input: ToolInput): Array<string | PortLikeTarget> {
-    const rawTargets = [
-        ...(Array.isArray(input.service_targets) ? input.service_targets : []),
-        ...(Array.isArray(input.target_objects) ? input.target_objects : []),
-        ...(Array.isArray(input.targets) ? input.targets : []),
-    ];
-
-    return rawTargets.filter((target) => {
-        if (typeof target === "string") {
-            return target.trim().length > 0;
-        }
-        if (!target || typeof target !== "object") {
-            return false;
-        }
-        return !target.type || target.type === "service";
-    });
-}
-
-function serviceKey(host: string, port: number): string {
-    return `${host}:${port}`;
-}
-
-function dedupeTargets(targets: Array<{ host: string; port: number; protocol: string }>): Array<{ host: string; port: number; protocol: string }> {
-    const deduped = new Map<string, { host: string; port: number; protocol: string }>();
-    for (const target of targets) {
-        const key = serviceKey(target.host, target.port);
-        const existing = deduped.get(key);
-        if (!existing) {
-            deduped.set(key, target);
-            continue;
-        }
-
-        const existingPriority = existing.protocol === "https" ? 3 : existing.protocol === "http" ? 2 : 1;
-        const currentPriority = target.protocol === "https" ? 3 : target.protocol === "http" ? 2 : 1;
-        if (currentPriority > existingPriority) {
-            deduped.set(key, target);
-        }
-    }
-
-    return Array.from(deduped.values());
-}
-
-function inferServiceName(port: number, protocol: string, banner?: string, serverHeader?: string): string {
-    const normalizedBanner = `${banner || ""} ${serverHeader || ""}`.toLowerCase();
-    if (normalizedBanner.includes("ssh")) return "ssh";
-    if (normalizedBanner.includes("smtp")) return "smtp";
-    if (normalizedBanner.includes("redis")) return "redis";
-    if (normalizedBanner.includes("mysql")) return "mysql";
-    if (normalizedBanner.includes("postgres")) return "postgresql";
-    if (normalizedBanner.includes("mongodb")) return "mongodb";
-    if (normalizedBanner.includes("elasticsearch")) return "elasticsearch";
-    if (HTTP_PORTS.has(port) || normalizedBanner.includes("http")) {
-        return TLS_PORTS.has(port) || protocol === "https" ? "https" : "http";
-    }
-    return DEFAULT_SERVICE_NAMES[port] || protocol || "unknown";
-}
-
-function extractProductInfo(banner?: string, serverHeader?: string): {
-    productName?: string;
-    vendor?: string;
-    version?: string;
-} {
-    const source = `${serverHeader || ""} ${banner || ""}`.trim();
-    if (!source) return {};
-
-    const patterns = [
-        /(?<product>nginx)\/(?<version>[\d.]+)/i,
-        /(?<product>apache(?: httpd)?)\/(?<version>[\d.]+)/i,
-        /(?<product>microsoft-iis)\/(?<version>[\d.]+)/i,
-        /(?<product>openssh)[-_](?<version>[\d.p]+)/i,
-        /(?<product>redis)[-_ ]server v=(?<version>[\d.]+)/i,
-        /(?<product>postgres(?:ql)?)\s+(?<version>[\d.]+)/i,
-        /(?<product>mysql)[-_ ](?<version>[\d.]+)/i,
-        /(?<product>elasticsearch)\/(?<version>[\d.]+)/i,
-    ];
-
-    for (const pattern of patterns) {
-        const match = source.match(pattern);
-        if (!match?.groups?.product) continue;
-        const productName = match.groups.product.toLowerCase();
-        let vendor: string | undefined;
-        if (productName.includes("nginx")) vendor = "NGINX";
-        if (productName.includes("apache")) vendor = "Apache";
-        if (productName.includes("iis")) vendor = "Microsoft";
-        if (productName.includes("openssh")) vendor = "OpenSSH";
-        if (productName.includes("redis")) vendor = "Redis";
-        if (productName.includes("mysql")) vendor = "Oracle";
-        if (productName.includes("postgres")) vendor = "PostgreSQL";
-        if (productName.includes("elasticsearch")) vendor = "Elastic";
-        return {
-            productName,
-            vendor,
-            version: match.groups.version,
-        };
-    }
-
-    return {
-        productName: source.split(/[ /]/)[0]?.toLowerCase(),
-    };
-}
-
-const SERVICE_FETCH_TIMEOUT_MS = 3000;
-
-async function fingerprintHttp(
-    host: string,
-    port: number,
-    followHttpRedirects: boolean,
-): Promise<Partial<ProbeResult>> {
-    const protocol = TLS_PORTS.has(port) ? "https" : "http";
-    const url = `${protocol}://${host}:${port}/`;
-    const response = await fetch(
-        url,
-        {
-            method: "HEAD",
-            redirect: followHttpRedirects ? "follow" : "manual",
-            timeout: SERVICE_FETCH_TIMEOUT_MS,
-        },
-    );
-
-    return {
-        protocol,
-        statusCode: response.status,
-    };
-}
-
-async function fingerprintTcp(
-    host: string,
-    port: number,
-    readBanner: boolean,
-): Promise<Partial<ProbeResult>> {
-    // @ts-ignore
-    const conn = await Deno.connect({ hostname: host, port, transport: "tcp" });
-    try {
-        const buffer = new Uint8Array(512);
-        // @ts-ignore
-        if (!readBanner) {
-            return {};
-        }
-
-        const bytesRead = await conn.read(buffer);
-        if (!bytesRead || bytesRead <= 0) {
-            return {};
-        }
-
-        const banner = new TextDecoder().decode(buffer.subarray(0, bytesRead))
-            .replace(/[\x00-\x08\x0b-\x1f]/g, " ")
-            .trim()
-            .slice(0, 240);
-
-        return { banner };
-    } finally {
-        conn.close();
-    }
-}
-
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
-        while (nextIndex < tasks.length) {
-            const currentIndex = nextIndex++;
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    });
-    await Promise.all(workers);
-    return results;
-}
-
-function isIpLiteral(value: string): boolean {
-    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
-}
-
-function buildServiceSnapshot(result: ProbeResult, timestamp: string): ServiceSnapshot {
-    return {
-        target: result.target,
-        host: result.host,
-        port: result.port,
-        protocol: result.protocol,
-        serviceName: result.serviceName || "unknown",
-        productName: result.productName,
-        vendor: result.vendor,
-        version: result.version,
-        banner: result.banner,
-        serverHeader: result.serverHeader,
-        title: result.title,
-        statusCode: result.statusCode,
-        lastChecked: timestamp,
-    };
-}
-
-function serviceMatcherHit(ctx: Record<string, any>, matcher: any): boolean {
-    const part = String(matcher?.part || "banner").toLowerCase();
-    const type = String(matcher?.type || "contains").toLowerCase();
-    const value = String(matcher?.value || "");
-
-    const source = part === "header"
-        ? String(ctx.serverHeader || "")
-        : part === "product"
-            ? String(ctx.productName || "")
-            : part === "service"
-                ? String(ctx.serviceName || "")
-                : String(ctx.banner || "");
-
-    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
-    if (type === "regex") {
-        try {
-            return new RegExp(value, "i").test(source);
-        } catch {
-            return false;
-        }
-    }
-    return source.toLowerCase().includes(value.toLowerCase());
-}
-
-function matchServiceRule(result: ProbeResult, rules: RuleEntry[]): RuleEntry | undefined {
-    for (const rule of rules) {
-        const metadata = parseMetadata(rule.metadata);
-        const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
-        if (matchers.length > 0) {
-            const operator = String(metadata.operator || "or").toLowerCase();
-            const matched = operator === "and"
-                ? matchers.every((matcher: any) => serviceMatcherHit(result, matcher))
-                : matchers.some((matcher: any) => serviceMatcherHit(result, matcher));
-            if (matched) {
-                return rule;
-            }
-            continue;
-        }
-
-        const probe = `${result.productName || ""} ${result.serviceName || ""} ${result.serverHeader || ""} ${result.banner || ""}`.toLowerCase();
-        if (probe.includes(rule.word.toLowerCase())) {
-            return rule;
-        }
-    }
-
-    return undefined;
-}
-
-async function resolveServiceProbeEngine(requestedEngine?: string): Promise<ResolvedServiceProbeEngine> {
-    const normalizedRequested = String(requestedEngine || "native").trim().toLowerCase() || "native";
-    if (normalizedRequested === "native") {
-        return {
-            requested: normalizedRequested,
-            used: "native",
-            experimental: false,
-        };
-    }
-
-    if (normalizedRequested === "builtin" || normalizedRequested === "pistol") {
-        return {
-            requested: normalizedRequested,
-            used: "native",
-            experimental: false,
-            fallbackReason: `Legacy service probe engine '${normalizedRequested}' was migrated to native`,
-        };
-    }
-
-    return {
-        requested: normalizedRequested,
-        used: "native",
-        experimental: false,
-        fallbackReason: `Unknown service probe engine: ${normalizedRequested}; using native`,
-    };
-}
-
-async function probeServicesWithNativeEngine(
-    targets: Array<{ host: string; port: number; protocol: string }>,
-    dictionaryId: string | null,
-    rules: RuleEntry[],
-    followHttpRedirects: boolean,
-    readBanner: boolean,
-    engine: string,
-    monitorExecution?: MonitorExecutionContext,
-): Promise<NativeServiceProbeResponse | null> {
-    if (
-        typeof Sentinel === "undefined"
-        || !Sentinel.Network
-        || typeof Sentinel.Network.probeServices !== "function"
-    ) {
-        return null;
-    }
-
-    return await Sentinel.Network.probeServices({
-        targets,
-        rules,
-        dictionaryId: dictionaryId || undefined,
-        followHttpRedirects,
-        readBanner,
-        engine,
-        monitorProgress: monitorExecution ? {
-            taskId: monitorExecution.task_id,
-            taskName: monitorExecution.task_name,
-            programId: monitorExecution.program_id,
-            executionMode: monitorExecution.execution_mode,
-            startedAt: monitorExecution.started_at,
-            currentPlugin: monitorExecution.current_plugin,
-            currentPluginIndex: monitorExecution.current_plugin_index,
-            completedSteps: monitorExecution.completed_steps,
-            totalSteps: monitorExecution.total_steps,
-            importedAssets: monitorExecution.imported_assets ?? 0,
-        } : undefined,
-    }) as NativeServiceProbeResponse;
-}
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        properties: {
-            targets: {
-                type: "array",
-                description: "Port targets as strings like host:port or surface service objects",
-            },
-            target_objects: {
-                type: "array",
-                description: "Structured monitor targets. Service entries are preferred when present.",
-            },
-            service_targets: {
-                type: "array",
-                description: "Structured service endpoints with host, port, and protocol fields",
-            },
-            dictionaryId: {
-                type: "string",
-                "x-control": "dictionary-picker",
-                "x-dictionary-type": "service_probe_rule",
-                description: "Structured service fingerprint dictionary ID or name",
-            },
-            dictionaryEntries: {
-                type: "array",
-                description: "Structured service fingerprint rule entries injected by workflow",
-            },
-            followHttpRedirects: {
-                type: "boolean",
-                default: true,
-            },
-            readBanner: {
-                type: "boolean",
-                default: false,
-            },
-            serviceProbeEngine: {
-                type: "string",
-                enum: ["native"],
-                default: "native",
-                description: "Service probe engine. Native is the built-in Rust service identification engine.",
-            },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean" },
-            data: {
-                type: "object",
-                properties: {
-                    results: { type: "array" },
-                    snapshots: { type: "object" },
-                    summary: { type: "object" },
-                    surface_artifacts: {
-                        type: "object",
-                        description: "Structured service probe and fingerprint artifacts",
-                        properties: {
-                            services: { type: "array" },
-                            fingerprints: { type: "array" },
-                            evidences: { type: "array" },
-                            relations: { type: "array" },
-                        },
-                    },
-                },
-            },
-            error: { type: "string" },
-        },
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        const rawTargets = collectRawTargets(input);
-        if (rawTargets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: service targets are required",
-            };
-        }
-
-        const normalizedTargets = dedupeTargets(rawTargets
-            .map(normalizeTarget)
-            .filter((target): target is NonNullable<typeof target> => Boolean(target)));
-
-        if (normalizedTargets.length === 0) {
-            return {
-                success: false,
-                error: "No valid service targets provided",
-            };
-        }
-
-        const followHttpRedirects = input.followHttpRedirects !== false;
-        const readBanner = input.readBanner === true;
-        const monitorExecution = input.__monitorExecution;
-        const dictionaryId = await resolveRuleDictionaryId(input);
-        const explicitRules = Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0
-            ? await loadRules(input)
-            : [];
-        const timestamp = new Date().toISOString();
-        const requestedProbeEngine = await resolveServiceProbeEngine(input.serviceProbeEngine);
-        const nativeProbe = await probeServicesWithNativeEngine(
-            normalizedTargets,
-            dictionaryId,
-            explicitRules,
-            followHttpRedirects,
-            readBanner,
-            requestedProbeEngine.used,
-            monitorExecution,
-        ).catch(() => null);
-        const probeEngine = nativeProbe
-            ? {
-                requested: nativeProbe.engineRequested || requestedProbeEngine.requested,
-                used: nativeProbe.engineUsed || requestedProbeEngine.used,
-                experimental: nativeProbe.engineExperimental ?? requestedProbeEngine.experimental,
-                fallbackReason: nativeProbe.fallbackReason || requestedProbeEngine.fallbackReason,
-            }
-            : requestedProbeEngine;
-        const sanitizedResults = (nativeProbe?.results?.length ? nativeProbe.results : []).map((result) => ({
-            ...result,
-            title: undefined,
-        }));
-        const rules = sanitizedResults.length > 0
-            ? explicitRules
-            : await loadRules({
-                ...input,
-                dictionaryId: dictionaryId || input.dictionaryId,
-            });
-
-        let results: ProbeResult[];
-        if (sanitizedResults.length > 0) {
-            results = sanitizedResults;
-        } else {
-            const tasks = normalizedTargets.map((target) => async (): Promise<ProbeResult> => {
-                const key = serviceKey(target.host, target.port);
-                try {
-                    let details: Partial<ProbeResult>;
-                    if (HTTP_PORTS.has(target.port) || target.protocol === "http" || target.protocol === "https") {
-                        details = await fingerprintHttp(target.host, target.port, followHttpRedirects);
-                    } else {
-                        details = await fingerprintTcp(target.host, target.port, readBanner);
-                    }
-
-                    const protocol = String(details.protocol || target.protocol || "tcp");
-                    const serviceName = inferServiceName(
-                        target.port,
-                        protocol,
-                        details.banner,
-                        details.serverHeader,
-                    );
-                    const productInfo = extractProductInfo(details.banner, details.serverHeader);
-
-                    return {
-                        target: key,
-                        success: true,
-                        available: true,
-                        host: target.host,
-                        port: target.port,
-                        protocol,
-                        serviceName,
-                        banner: details.banner,
-                        serverHeader: details.serverHeader,
-                        statusCode: details.statusCode,
-                        productName: productInfo.productName,
-                        vendor: productInfo.vendor,
-                        version: productInfo.version,
-                    };
-                } catch (error: any) {
-                    return {
-                        target: key,
-                        success: false,
-                        available: false,
-                        host: target.host,
-                        port: target.port,
-                        protocol: target.protocol,
-                        serviceName: DEFAULT_SERVICE_NAMES[target.port] || target.protocol || "unknown",
-                        error: error instanceof Error ? error.message : String(error),
-                    };
-                }
-            });
-
-            results = await runSequentially(tasks);
-        }
-
-        await reportMonitorProgress(monitorExecution, {
-            current: normalizedTargets.length + 1,
-            total: normalizedTargets.length + 2,
-            phase: "compare",
-            message: "Comparing probe results",
-        });
-
-        let successfulChecks = 0;
-        let failedChecks = 0;
-        let reachableServices = 0;
-        let unreachableServices = 0;
-        const snapshots: Record<string, ServiceSnapshot> = {};
-
-        for (const result of results) {
-            if (result.available) {
-                successfulChecks += 1;
-                reachableServices += 1;
-            } else {
-                failedChecks += 1;
-                unreachableServices += 1;
-            }
-            snapshots[result.target] = buildServiceSnapshot(result, timestamp);
-        }
-
-        const successfulResults = results.filter((result) => result.available);
-        const services = successfulResults.map((result) => ({
-            host_key: result.host,
-            ip_or_host: result.host,
-            port: result.port,
-            transport_protocol: "tcp",
-            protocol_name: result.protocol,
-            application_service_name: result.serviceName,
-            product_name: result.productName,
-            vendor: result.vendor,
-            version: result.version,
-            banner: result.banner || result.serverHeader,
-            source: "service_probe",
-            confidence: 0.92,
-            experimental: probeEngine.experimental,
-            probe_engine: probeEngine.used,
-        }));
-
-        const fingerprints = successfulResults.flatMap((result) => {
-            const key = serviceKey(result.host, result.port);
-            const matchedRule = matchServiceRule(result, rules);
-            if (!matchedRule) {
-                return [];
-            }
-
-            const ruleMetadata = parseMetadata(matchedRule.metadata);
-            const normalizedProduct = ruleMetadata.product || result.productName;
-            const normalizedCategory = ruleMetadata.asset_category;
-            if (!normalizedProduct || !normalizedCategory) {
-                return [];
-            }
-
-            const normalizedVendor = ruleMetadata.vendor || result.vendor;
-            const normalizedFamily = ruleMetadata.asset_family || undefined;
-            const ruleBase = (matchedRule.word || normalizedProduct)
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, "_")
-                .replace(/^_+|_+$/g, "") || "unknown";
-            const ruleId = ruleMetadata.rule_id || matchedRule.id || `service_rule:${ruleBase}`;
-            const ruleWord = matchedRule.word || ruleBase;
-            const ruleName = ruleMetadata.name || matchedRule.word || normalizedProduct;
-            const fingerprintItems: any[] = [];
-
-            if (result.banner) {
-                fingerprintItems.push({
-                    asset_type: "service",
-                    asset_key: key,
-                    fingerprint_type: "banner",
-                    fingerprint_key: "banner",
-                    fingerprint_value: result.banner,
-                    rule_id: ruleId,
-                    rule_word: ruleWord,
-                    rule_name: ruleName,
-                    normalized_product: normalizedProduct,
-                    normalized_vendor: normalizedVendor,
-                    normalized_category: normalizedCategory,
-                    normalized_family: normalizedFamily,
-                    version: result.version,
-                    confidence: 0.88,
-                    evidence: result.banner,
-                    source: "service_probe",
-                });
-            }
-
-            if (result.productName) {
-                fingerprintItems.push({
-                    asset_type: "service",
-                    asset_key: key,
-                    fingerprint_type: "product",
-                    fingerprint_key: "product_name",
-                    fingerprint_value: `${result.productName}${result.version ? ` ${result.version}` : ""}`,
-                    rule_id: ruleId,
-                    rule_word: ruleWord,
-                    rule_name: ruleName,
-                    normalized_product: normalizedProduct,
-                    normalized_vendor: normalizedVendor,
-                    normalized_category: normalizedCategory,
-                    normalized_family: normalizedFamily,
-                    version: result.version,
-                    confidence: 0.9,
-                    source: "service_probe",
-                });
-            }
-
-            if (fingerprintItems.length === 0) {
-                fingerprintItems.push({
-                    asset_type: "service",
-                    asset_key: key,
-                    fingerprint_type: "service",
-                    fingerprint_key: "service_name",
-                    fingerprint_value: result.serviceName || "unknown",
-                    rule_id: ruleId,
-                    rule_word: ruleWord,
-                    rule_name: ruleName,
-                    normalized_product: normalizedProduct,
-                    normalized_vendor: normalizedVendor,
-                    normalized_category: normalizedCategory,
-                    normalized_family: normalizedFamily,
-                    version: result.version,
-                    confidence: 0.86,
-                    source: "service_probe",
-                });
-            }
-
-            return fingerprintItems;
-        });
-
-        const evidences = results.map((result) => ({
-            asset_type: "service",
-            asset_key: result.target,
-            evidence_type: "service_probe_snapshot",
-            title: `Service Probe Snapshot: ${result.target}`,
-            content_text: result.available
-                ? `${result.serviceName || "unknown"} ${result.productName || ""} ${result.version || ""}`.trim()
-                : (result.error || "Service unreachable"),
-            content_json: {
-                ...result,
-                probe_engine: probeEngine.used,
-                probe_engine_requested: probeEngine.requested,
-                probe_engine_experimental: probeEngine.experimental,
-                probe_engine_fallback_reason: probeEngine.fallbackReason,
-            },
-            source: "service_probe",
-        }));
-
-        const relations = successfulResults.map((result) => ({
-            from_type: isIpLiteral(result.host) ? "ip" : "domain",
-            from_key: result.host,
-            to_type: "service",
-            to_key: result.target,
-            relation_type: "exposes_service",
-            source: "service_probe",
-            confidence: 0.92,
-        }));
-
-        await reportMonitorProgress(monitorExecution, {
-            current: normalizedTargets.length + 2,
-            total: normalizedTargets.length + 2,
-            phase: "build",
-            message: "Building service probe results",
-        });
-
-        return {
-            success: true,
-            data: {
-                results,
-                snapshots,
-                summary: {
-                    totalTargets: normalizedTargets.length,
-                    successfulChecks,
-                    failedChecks,
-                    reachableServices,
-                    unreachableServices,
-                    identifiedProducts: successfulResults.filter((result) => Boolean(result.productName)).length,
-                    matchedFingerprints: fingerprints.length,
-                    scannedRules: nativeProbe?.ruleCount ?? rules.length,
-                    probeEngineRequested: probeEngine.requested,
-                    probeEngineUsed: probeEngine.used,
-                    probeEngineExperimental: probeEngine.experimental,
-                    probeEngineFallbackReason: probeEngine.fallbackReason,
-                },
-                surface_artifacts: {
-                    services,
-                    fingerprints,
-                    evidences,
-                    relations,
-                },
-            },
-        };
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/service_probe/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}var pluginGlobals=globalThis;function parseMetadata(value){if(!value)return{};if(typeof value==="string"){try{return JSON.parse(value)}catch{return{}}}return typeof value===
+"object"?value:{}}async function loadDictionaryEntries(idOrName){if(typeof Sentinel?.Dictionary?.getEntries!=="function")throw new Error("Native service rule di\
+ctionary API is unavailable");const entries=await Sentinel.Dictionary.getEntries(idOrName,1e4);if(!Array.isArray(entries)||!entries.length)throw new Error("Serv\
+ice rule dictionary is empty or invalid");return entries.map(entry=>{if(!entry||typeof entry.word!=="string"||!entry.word.trim())throw new Error("Service rule d\
+ictionary contains an invalid entry");return{id:entry.id,word:entry.word,category:entry.category,metadata:parseMetadata(entry.metadata)}})}async function loadRules(input){
+if(Array.isArray(input.dictionaryEntries)&&input.dictionaryEntries.length){return input.dictionaryEntries.map(entry=>({...entry,metadata:parseMetadata(entry.metadata)}))}
+return await loadDictionaryEntries(await resolveRuleDictionaryId(input))}async function resolveRuleDictionaryId(input){if(input.dictionaryId!==void 0){if(typeof input.
+dictionaryId!=="string"||!input.dictionaryId||input.dictionaryId.trim()!==input.dictionaryId)throw new Error("Service rule dictionary ID must be an unpadded str\
+ing");return input.dictionaryId}if(typeof Sentinel?.Dictionary?.getDefaultId!=="function")throw new Error("Native service rule default dictionary API is unavail\
+able");const id=await Sentinel.Dictionary.getDefaultId("service_probe_rule");if(typeof id!=="string"||!id||id.trim()!==id)throw new Error("No default service ru\
+le dictionary is configured");return id}function normalizeTarget(raw){if(typeof raw==="string"){if(!raw||raw.trim()!==raw)return null;try{const explicitUrl=raw.
+includes("://");const suffix=!explicitUrl?raw.match(/\/(tcp|udp)$/)?.[1]:void 0;const value=suffix?raw.slice(0,-(suffix.length+1)):raw;const parsed=new URL(explicitUrl?
+value:`tcp://${value}`);const protocol=suffix||parsed.protocol.slice(0,-1);const port=Number(parsed.port||(protocol==="https"?443:protocol==="http"?80:0));if(!parsed.
+hostname||!["tcp","http","https"].includes(protocol)||!Number.isInteger(port)||port<=0||port>65535||parsed.username||parsed.password||parsed.search||parsed.hash||
+parsed.pathname&&parsed.pathname!=="/")return null;return{host:parsed.hostname.replace(/^\[|\]$/g,"").toLowerCase(),port,protocol}}catch{return null}}if(!raw||typeof raw!==
+"object")return null;const hostValue=raw.ip_or_host??raw.host??raw.host_key;const portValue=raw.port??raw.port_number;let identity;if(hostValue!==void 0||portValue!==
+void 0){const host=String(hostValue||"").trim().replace(/^\[|\]$/g,"").toLowerCase();const port=Number(portValue);if(!host||!Number.isInteger(port)||port<=0||port>
+65535)return null;identity={host,port,protocol:"tcp"}}else{identity=typeof raw.value==="string"?normalizeTarget(raw.value):null}if(!identity)return null;const transport=raw.
+transport_protocol??(raw.protocol==="tcp"||raw.protocol==="udp"?raw.protocol:"tcp");if(transport!=="tcp")return null;const application=[raw.protocol,raw.service_name].
+find(value=>value==="http"||value==="https");return{...identity,protocol:application||identity.protocol}}function collectRawTargets(input){const rawTargets=[...Array.
+isArray(input.service_targets)?input.service_targets:[],...Array.isArray(input.target_objects)?input.target_objects:[],...Array.isArray(input.targets)?input.targets:
+[]];return rawTargets.filter(target=>{if(typeof target==="string"){return target.trim().length>0}if(!target||typeof target!=="object"){return false}return!target.
+type||target.type==="service"})}function serviceKey(host,port){return`${host.includes(":")?`[${host}]`:host}:${port}`}function serviceArtifactKey(host,port){return`${serviceKey(
+host,port)}/tcp`}function dedupeTargets(targets){const deduped=new Map;for(const target of targets){const key=serviceKey(target.host,target.port);const existing=deduped.
+get(key);if(!existing){deduped.set(key,target);continue}const existingPriority=existing.protocol==="https"?3:existing.protocol==="http"?2:1;const currentPriority=target.
+protocol==="https"?3:target.protocol==="http"?2:1;if(currentPriority>existingPriority){deduped.set(key,target)}}return Array.from(deduped.values())}async function runSequentially(tasks){const results=new Array(tasks.length);let nextIndex=0;const workers=Array.from({length:Math.min(16,tasks.length)},async()=>{
+while(nextIndex<tasks.length){const currentIndex=nextIndex++;results[currentIndex]=await tasks[currentIndex]()}});await Promise.all(workers);return results}function isIpLiteral(value){
+return/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)||value.includes(":")}function buildServiceSnapshot(result,timestamp){return{target:result.target,host:result.host,
+port:result.port,protocol:result.protocol,serviceName:result.serviceName||"unknown",productName:result.productName,vendor:result.vendor,version:result.version,banner:result.
+banner,serverHeader:result.serverHeader,title:result.title,statusCode:result.statusCode,lastChecked:timestamp}}function serviceMatcherHit(ctx,matcher){const part=String(
+matcher?.part||"banner").toLowerCase();const type=String(matcher?.type||"contains").toLowerCase();const value=String(matcher?.value||"");const source=part==="he\
+ader"?String(ctx.serverHeader||""):part==="product"?String(ctx.productName||""):part==="service"?String(ctx.serviceName||""):String(ctx.banner||"");if(type==="e\
+quals")return source.toLowerCase()===value.toLowerCase();if(type==="regex"){try{return new RegExp(value,"i").test(source)}catch{return false}}return source.toLowerCase().
+includes(value.toLowerCase())}function matchServiceRule(result,rules){for(const rule of rules){const metadata=parseMetadata(rule.metadata);const matchers=Array.
+isArray(metadata.matchers)?metadata.matchers:[];if(matchers.length>0){const operator=String(metadata.operator||"or").toLowerCase();const matched=operator==="and"?
+matchers.every(matcher=>serviceMatcherHit(result,matcher)):matchers.some(matcher=>serviceMatcherHit(result,matcher));if(matched){return rule}continue}const probe=`${result.
+productName||""} ${result.serviceName||""} ${result.serverHeader||""} ${result.banner||""}`.toLowerCase();if(probe.includes(rule.word.toLowerCase())){return rule}}
+return void 0}async function resolveServiceProbeEngine(requestedEngine){const requested=requestedEngine??"native";if(requested!=="native")throw new Error(`Unsup\
+ported service probe engine: ${requested}`);return{requested,used:"native",experimental:false}}async function probeServicesWithNativeEngine(targets,dictionaryId,rules,followHttpRedirects,readBanner,engine,monitorExecution){
+if(typeof Sentinel==="undefined"||!Sentinel.Network||typeof Sentinel.Network.probeServices!=="function"){throw new Error("Native service probing engine is not a\
+vailable")}return await Sentinel.Network.probeServices({targets,rules,dictionaryId:dictionaryId||void 0,followHttpRedirects,readBanner,engine,monitorProgress:monitorExecution?
+{taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
+started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets??0}:void 0})}function get_input_schema(){return{type:"object",properties:{
+targets:{type:"array",description:"Port targets as strings like host:port or surface service objects"},target_objects:{type:"array",description:"Structured moni\
+tor targets. Service entries are preferred when present."},service_targets:{type:"array",description:"Structured service endpoints with host, port, and protocol\
+ fields"},dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionary-type":"service_probe_rule",description:"Structured service fingerprint dicti\
+onary ID or name"},dictionaryEntries:{type:"array",description:"Structured service fingerprint rule entries injected by workflow"},followHttpRedirects:{type:"bo\
+olean",default:true},readBanner:{type:"boolean",default:false},serviceProbeEngine:{type:"string",enum:["native"],default:"native",description:"Service probe eng\
+ine. Native is the built-in Rust service identification engine."}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"ob\
+ject",properties:{success:{type:"boolean"},data:{type:"object",properties:{results:{type:"array"},snapshots:{type:"object"},summary:{type:"object"},surface_artifacts:{
+type:"object",description:"Structured service probe and fingerprint artifacts",properties:{services:{type:"array"},fingerprints:{type:"array"},evidences:{type:"\
+array"},relations:{type:"array"}}}}},error:{type:"string"}}}}pluginGlobals.get_output_schema=get_output_schema;function projectServiceProbeOutput(results,rules,timestamp,probeEngine,ruleCount){
+let successfulChecks=0;let failedChecks=0;let reachableServices=0;let unreachableServices=0;const snapshots={};for(const result of results){if(result.available){
+successfulChecks+=1;reachableServices+=1}else{failedChecks+=1;unreachableServices+=1}if(result.success)snapshots[result.target]=buildServiceSnapshot(result,timestamp)}
+const successfulResults=results.filter(result=>result.available);const services=successfulResults.map(result=>({host_key:result.host,ip_or_host:result.host,port:result.
+port,transport_protocol:"tcp",protocol_name:result.protocol,application_service_name:result.serviceName,product_name:result.productName,vendor:result.vendor,version:result.
+version,banner:result.banner||result.serverHeader,source:"service_probe",confidence:.92,experimental:probeEngine.experimental,probe_engine:probeEngine.used}));const fingerprints=successfulResults.
+flatMap(result=>{const key=serviceArtifactKey(result.host,result.port);const matchedRule=matchServiceRule(result,rules);if(!matchedRule){return[]}const ruleMetadata=parseMetadata(
+matchedRule.metadata);const normalizedProduct=ruleMetadata.product||result.productName;const normalizedCategory=ruleMetadata.asset_category;if(!normalizedProduct||
+!normalizedCategory){return[]}const normalizedVendor=ruleMetadata.vendor||result.vendor;const normalizedFamily=ruleMetadata.asset_family||void 0;const ruleBase=(matchedRule.
+word||normalizedProduct).toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_+|_+$/g,"")||"unknown";const ruleId=ruleMetadata.rule_id||matchedRule.id||`service_\
+rule:${ruleBase}`;const ruleWord=matchedRule.word||ruleBase;const ruleName=ruleMetadata.name||matchedRule.word||normalizedProduct;const fingerprintItems=[];if(result.
+banner){fingerprintItems.push({asset_type:"service",asset_key:key,fingerprint_type:"banner",fingerprint_key:"banner",fingerprint_value:result.banner,rule_id:ruleId,
+rule_word:ruleWord,rule_name:ruleName,normalized_product:normalizedProduct,normalized_vendor:normalizedVendor,normalized_category:normalizedCategory,normalized_family:normalizedFamily,
+version:result.version,confidence:.88,evidence:result.banner,source:"service_probe"})}if(result.productName){fingerprintItems.push({asset_type:"service",asset_key:key,
+fingerprint_type:"product",fingerprint_key:"product_name",fingerprint_value:`${result.productName}${result.version?` ${result.version}`:""}`,rule_id:ruleId,rule_word:ruleWord,
+rule_name:ruleName,normalized_product:normalizedProduct,normalized_vendor:normalizedVendor,normalized_category:normalizedCategory,normalized_family:normalizedFamily,
+version:result.version,confidence:.9,source:"service_probe"})}if(fingerprintItems.length===0){fingerprintItems.push({asset_type:"service",asset_key:key,fingerprint_type:"\
+service",fingerprint_key:"service_name",fingerprint_value:result.serviceName||"unknown",rule_id:ruleId,rule_word:ruleWord,rule_name:ruleName,normalized_product:normalizedProduct,
+normalized_vendor:normalizedVendor,normalized_category:normalizedCategory,normalized_family:normalizedFamily,version:result.version,confidence:.86,source:"servi\
+ce_probe"})}return fingerprintItems});const evidences=results.map(result=>({asset_type:"service",asset_key:serviceArtifactKey(result.host,result.port),evidence_type:"\
+service_probe_snapshot",title:`Service Probe Snapshot: ${result.target}`,content_text:result.available?`${result.serviceName||"unknown"} ${result.productName||""}\
+ ${result.version||""}`.trim():result.error||"Service unreachable",content_json:{...result,probe_engine:probeEngine.used,probe_engine_requested:probeEngine.requested,
+probe_engine_experimental:probeEngine.experimental,probe_engine_fallback_reason:probeEngine.fallbackReason},source:"service_probe"}));const relations=successfulResults.
+map(result=>({from_type:isIpLiteral(result.host)?"ip":"domain",from_key:result.host,to_type:"service",to_key:serviceArtifactKey(result.host,result.port),relation_type:"\
+exposes_service",source:"service_probe",confidence:.92}));return{success:true,data:{results,snapshots,summary:{totalTargets:results.length,successfulChecks,failedChecks,
+reachableServices,unreachableServices,identifiedProducts:successfulResults.filter(result=>Boolean(result.productName)).length,matchedFingerprints:fingerprints.length,
+scannedRules:ruleCount,probeEngineRequested:probeEngine.requested,probeEngineUsed:probeEngine.used,probeEngineExperimental:probeEngine.experimental,probeEngineFallbackReason:probeEngine.
+fallbackReason},surface_artifacts:{services,fingerprints,evidences,relations}}}}async function analyze(input){try{const stream=createMonitorResultStream(input);
+const writeTarget=createMonitorTargetWriter(input,stream,value=>{const parsed=normalizeTarget(value);return parsed?serviceKey(parsed.host,parsed.port):""});const rawTargets=collectRawTargets(
+input);if(rawTargets.length===0){return{success:false,error:"Invalid input: service targets are required"}}const normalizedTargets=dedupeTargets(rawTargets.map(
+normalizeTarget).filter(target=>Boolean(target)));if(normalizedTargets.length===0){return{success:false,error:"No valid service targets provided"}}const followHttpRedirects=input.
+followHttpRedirects!==false;const readBanner=input.readBanner===true;const monitorExecution=input.__monitorExecution;const explicitRules=Array.isArray(input.dictionaryEntries)&&
+input.dictionaryEntries.length>0?await loadRules(input):[];const dictionaryId=explicitRules.length?null:await resolveRuleDictionaryId(input);const timestamp=new Date().
+toISOString();const requestedProbeEngine=await resolveServiceProbeEngine(input.serviceProbeEngine);const rules=explicitRules.length?explicitRules:await loadRules(
+{...input,dictionaryId:dictionaryId||input.dictionaryId});const probeEngine=requestedProbeEngine;let ruleCount=rules.length;const results=[];await runSequentially(
+normalizedTargets.map((target,index)=>async()=>{stream.assertHealthy();const nativeProbe=await probeServicesWithNativeEngine([target],null,rules,followHttpRedirects,
+readBanner,requestedProbeEngine.used,monitorExecution);if(!nativeProbe||!Array.isArray(nativeProbe.results)||nativeProbe.results.length!==1){throw new Error(nativeProbe?.
+error||"Native service probe returned no authoritative endpoint result")}const result={...nativeProbe.results[0],target:serviceKey(nativeProbe.results[0].host,nativeProbe.
+results[0].port),title:void 0};if(result.host!==target.host||result.port!==target.port||result.target!==serviceKey(target.host,target.port))throw new Error("Nat\
+ive service probe returned an unrelated endpoint");ruleCount=nativeProbe.ruleCount??rules.length;await writeTarget(serviceKey(target.host,target.port),"native-s\
+ervice-endpoint",projectServiceProbeOutput([result],rules,timestamp,probeEngine,ruleCount),{status:result.success?"ok":"failed",error:result.error});if(!stream.
+enabled)results[index]=result}));return await stream.finish(stream.enabled?{success:true}:projectServiceProbeOutput(results,rules,timestamp,probeEngine,ruleCount))}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

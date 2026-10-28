@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build:monitors": "node scripts/build_monitor_plugins.mjs",
-    "check:monitors": "node scripts/build_monitor_plugins.mjs --check"
+    "check:monitors": "node scripts/build_monitor_plugins.mjs --check",
+    "test:monitor-results": "node --disable-warning=ExperimentalWarning --test scripts/monitor_results_test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.21.5"

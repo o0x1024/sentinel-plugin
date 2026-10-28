@@ -1,5 +1,5 @@
 /** Deterministic native-bridge fixture; never resolves DNS or reads a wordlist. */
-export function nativeSubdomainBruteFixture(request: Record<string, unknown>, timestamp = "2026-10-28T00:00:00Z") {
+export async function nativeSubdomainBruteFixture(request: Record<string, unknown>, timestamp = "2026-10-28T00:00:00Z") {
     const targets = request.targets as string[];
     const subdomains = targets.map(domain => `api.${domain}`);
     const previous = request.previous_snapshots as Record<string, unknown> | undefined;
@@ -8,7 +8,7 @@ export function nativeSubdomainBruteFixture(request: Record<string, unknown>, ti
         title: `Discovered ${subdomains[index]}`, description: "Native bridge fixture", old_value: null, new_value: subdomains[index],
         detection_method: "subdomain_brute", tags: ["dns"], auto_trigger_enabled: false, risk_score: 0, metadata: { root_domain: domain },
     }));
-    return {
+    const output = {
         success: true,
         data: {
             targets, subdomains,
@@ -25,4 +25,35 @@ export function nativeSubdomainBruteFixture(request: Record<string, unknown>, ti
             },
         },
     };
+    const context = request.__monitorExecution as { result_stream?: { protocol?: string; targets?: string[] } } | undefined;
+    if (!context) return output;
+    if (context.result_stream?.protocol !== "monitor-results-v1") throw new Error("Native monitor fixture requires monitor-results-v1");
+    const commit = (globalThis as any).Sentinel?.Monitor?.commitResults;
+    if (typeof commit !== "function") throw new Error("Native monitor fixture requires commitResults");
+    let sequence = 0;
+    const submit = async (target: string, key: string, complete: boolean, data: Record<string, unknown>) => {
+        const request = { sequence: ++sequence, work: [{ target, key, status: "ok", complete }], output: { success: true, data } };
+        const ack = await commit(request);
+        if (ack?.ok !== true || ack.sequence !== sequence) throw new Error("Native monitor fixture commit was not acknowledged");
+    };
+    for (const [index, target] of targets.entries()) {
+        if (!context.result_stream.targets?.includes(target)) throw new Error("Native monitor fixture target ownership mismatch");
+        await submit(target, "dns-responses:2:1", false, {
+            results: [output.data.results[index]], subdomains: [subdomains[index]],
+            summary: { total_discovered: 1 },
+            surface_artifacts: {
+                domains: [output.data.surface_artifacts.domains[index]],
+                ips: output.data.surface_artifacts.ips,
+                relations: [output.data.surface_artifacts.relations[index]],
+                evidences: [{ ...output.data.surface_artifacts.evidences[0], asset_type: "domain", asset_key: target }],
+            },
+        });
+        await submit(target, "root-complete", true, {
+            snapshots: { [target]: output.data.snapshots[target] },
+            changeEvents: [change_events[index]], surface_artifacts: { changes: [change_events[index]] },
+        });
+    }
+    return { success: true, data: { ...output.data, stream_complete: true,
+        subdomains: [], results: [], change_events: [], changeEvents: [], snapshots: {},
+        surface_artifacts: { domains: [], ips: [], relations: [], evidences: [], changes: [] } } };
 }

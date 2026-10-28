@@ -3,7 +3,7 @@
  *
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.6
+ * @version 1.1.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type content
@@ -12,582 +12,117 @@
  * @category monitor
  * @seed_bindings []
  * @default_severity low
- * @tags content, monitor, change-detection, fingerprint, hash, capability:fetch, capability:monitor-events
+ * @tags content, monitor, change-detection, fingerprint, hash, capability:fetch, capability:monitor-events, monitor:results-stream-v1
  * @description Monitor web pages for content changes, generating ChangeEvents for workflow automation
  */
-
-interface ToolInput {
-    targets: string[];  // List of URLs to monitor
-    userAgent?: string;
-    includeHeaders?: boolean;
-    excludePatterns?: string[];  // Patterns to exclude from hash (e.g., timestamps)
-    previousSnapshots?: Record<string, ContentSnapshot>;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface ContentSnapshot {
-    url: string;
-    contentHash: string;
-    contentLength: number;
-    statusCode: number;
-    title?: string;
-    headers?: Record<string, string>;
-    lastChecked: string;
-}
-
-interface ChangeEvent {
-    id: string;
-    assetId: string;
-    eventType: string;
-    severity: "low" | "medium" | "high" | "critical";
-    title: string;
-    description: string;
-    oldValue?: string;
-    newValue?: string;
-    detectionMethod: string;
-    tags: string[];
-    autoTriggerEnabled: boolean;
-    riskScore: number;
-    metadata: Record<string, any>;
-}
-
-interface ContentResult {
-    url: string;
-    success: boolean;
-    snapshot?: ContentSnapshot;
-    changed?: boolean;
-    changeType?: string;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        results: ContentResult[];
-        changeEvents: ChangeEvent[];
-        snapshots: Record<string, ContentSnapshot>;
-        summary: {
-            totalTargets: number;
-            successfulChecks: number;
-            failedChecks: number;
-            contentChanges: number;
-            statusChanges: number;
-            newPages: number;
-        };
-    };
-    error?: string;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-const PAGE_FETCH_TIMEOUT_MS = 12000;
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-// Generate UUID
-function generateId(): string {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-}
-
-async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
-        while (nextIndex < tasks.length) {
-            const currentIndex = nextIndex++;
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    });
-    await Promise.all(workers);
-    return results;
-}
-
-// Calculate content hash
-async function calculateHash(content: string): Promise<string> {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(content);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-// Extract page title
-function extractTitle(html: string): string | undefined {
-    const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    return match ? match[1].trim() : undefined;
-}
-
-// Normalize content (remove dynamic parts)
-function normalizeContent(content: string, excludePatterns: string[]): string {
-    let normalized = content;
-    
-    // Remove common dynamic elements
-    const defaultPatterns = [
-        // Timestamps
-        /\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/g,
-        /\b\d{10,13}\b/g,  // Unix timestamps
-        // Session tokens
-        /csrf[_-]?token["\s:=]+["'][^"']+["']/gi,
-        /nonce["\s:=]+["'][^"']+["']/gi,
-        // Random IDs
-        /[a-f0-9]{32}/gi,  // MD5-like
-        /[a-f0-9]{64}/gi,  // SHA256-like
-        // Cache busters
-        /\?v=[\d.]+/g,
-        /\?t=\d+/g,
-        /\?_=\d+/g,
-    ];
-    
-    // Apply default patterns
-    for (const pattern of defaultPatterns) {
-        normalized = normalized.replace(pattern, '[DYNAMIC]');
-    }
-    
-    // Apply custom patterns
-    for (const patternStr of excludePatterns) {
-        try {
-            const pattern = new RegExp(patternStr, 'gi');
-            normalized = normalized.replace(pattern, '[EXCLUDED]');
-        } catch {
-            // Invalid regex, skip
-        }
-    }
-    
-    // Normalize whitespace
-    normalized = normalized.replace(/\s+/g, ' ').trim();
-    
-    return normalized;
-}
-
-// Calculate risk score
-function calculateRiskScore(severity: string, eventType: string): number {
-    let score = 0;
-    
-    switch (severity) {
-        case "critical": score += 40; break;
-        case "high": score += 30; break;
-        case "medium": score += 20; break;
-        case "low": score += 10; break;
-    }
-    
-    switch (eventType) {
-        case "content_change": score += 10; break;
-        case "significant_change": score += 20; break;
-        case "status_change": score += 15; break;
-        case "title_change": score += 10; break;
-        case "page_discovered": score += 15; break;
-    }
-    
-    return Math.min(score, 100);
-}
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["targets"],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "List of URLs to monitor for content changes"
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            includeHeaders: {
-                type: "boolean",
-                description: "Include response headers in snapshot",
-                default: false
-            },
-            excludePatterns: {
-                type: "array",
-                items: { type: "string" },
-                description: "Regex patterns to exclude from content hash (e.g., timestamps)"
-            },
-            previousSnapshots: {
-                type: "object",
-                description: "Previous content snapshots for comparison"
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    results: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                url: { type: "string" },
-                                success: { type: "boolean" },
-                                snapshot: { type: "object" },
-                                changed: { type: "boolean" },
-                                changeType: { type: "string" }
-                            }
-                        },
-                        description: "Content check results"
-                    },
-                    changeEvents: { type: "array", description: "Change events detected" },
-                    snapshots: { type: "object", description: "Content snapshots by URL" },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTargets: { type: "integer" },
-                            contentChanges: { type: "integer" },
-                            statusChanges: { type: "integer" },
-                            newPages: { type: "integer" }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!input.targets || !Array.isArray(input.targets)) {
-            return {
-                success: false,
-                error: "Invalid input: targets array is required"
-            };
-        }
-        
-        // Filter out empty strings
-        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
-        if (validTargets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: targets array must contain at least one non-empty string"
-            };
-        }
-        
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-                const includeHeaders = input.includeHeaders || false;
-        const excludePatterns = input.excludePatterns || [];
-        const previousSnapshots = input.previousSnapshots || {};
-        const monitorExecution = input.__monitorExecution;
-        const totalProgressUnits = validTargets.length + 2;
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: totalProgressUnits,
-            phase: "prepare",
-            message: "Preparing content checks",
-        });
-        
-        const results: ContentResult[] = [];
-        const changeEvents: ChangeEvent[] = [];
-        const newSnapshots: Record<string, ContentSnapshot> = {};
-        
-        let successfulChecks = 0;
-        let failedChecks = 0;
-        let contentChanges = 0;
-        let statusChanges = 0;
-        let newPages = 0;
-        let completedTargets = 0;
-        
-        const targetTasks = validTargets.map((target) => async () => {
-            let url = target;
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                url = `https://${url}`;
-            }
-            
-            const result: ContentResult = {
-                url,
-                success: false,
-            };
-            
-            try {
-                const response = await fetch(url, {
-                    method: "GET",
-                    headers: {
-                        "User-Agent": userAgent,
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    },
-                    timeout: PAGE_FETCH_TIMEOUT_MS,
-                });
-                
-                const content = await response.text();
-                const normalizedContent = normalizeContent(content, excludePatterns);
-                const contentHash = await calculateHash(normalizedContent);
-                const title = extractTitle(content);
-                
-                result.success = true;
-                successfulChecks++;
-                
-                // Create snapshot
-                const snapshot: ContentSnapshot = {
-                    url,
-                    contentHash,
-                    contentLength: content.length,
-                    statusCode: response.status,
-                    title,
-                    lastChecked: new Date().toISOString(),
-                };
-                
-                if (includeHeaders) {
-                    snapshot.headers = {};
-                    response.headers.forEach((value, key) => {
-                        snapshot.headers![key] = value;
-                    });
-                }
-                
-                result.snapshot = snapshot;
-                newSnapshots[url] = snapshot;
-                
-                // Check for changes
-                const prevSnapshot = previousSnapshots[url];
-                if (prevSnapshot) {
-                    // Content hash changed
-                    if (prevSnapshot.contentHash !== contentHash) {
-                        contentChanges++;
-                        result.changed = true;
-                        result.changeType = "content";
-                        
-                        // Calculate change magnitude
-                        const sizeDiff = Math.abs(content.length - prevSnapshot.contentLength);
-                        const sizeChangePercent = prevSnapshot.contentLength > 0 
-                            ? (sizeDiff / prevSnapshot.contentLength) * 100 
-                            : 100;
-                        
-                        const isSignificant = sizeChangePercent > 20;
-                        const severity = isSignificant ? "medium" : "low";
-                        const eventType = isSignificant ? "significant_change" : "content_change";
-                        
-                        const event: ChangeEvent = {
-                            id: generateId(),
-                            assetId: url,
-                            eventType,
-                            severity,
-                            title: `Content Changed: ${new URL(url).hostname}${new URL(url).pathname}`,
-                            description: `The content of ${url} has changed. Size difference: ${sizeDiff} bytes (${sizeChangePercent.toFixed(1)}% change).`,
-                            oldValue: prevSnapshot.contentHash,
-                            newValue: contentHash,
-                            detectionMethod: "content_monitor",
-                            tags: ["content", "change", isSignificant ? "significant" : "minor"],
-                            autoTriggerEnabled: isSignificant,
-                            riskScore: 0,
-                            metadata: {
-                                previousSize: prevSnapshot.contentLength,
-                                newSize: content.length,
-                                sizeChangePercent: sizeChangePercent.toFixed(2),
-                                previousTitle: prevSnapshot.title,
-                                newTitle: title,
-                            },
-                        };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                        changeEvents.push(event);
-                    }
-                    
-                    // Status code changed
-                    if (prevSnapshot.statusCode !== response.status) {
-                        statusChanges++;
-                        
-                        let severity: "low" | "medium" | "high" | "critical" = "low";
-                        if (response.status >= 500) {
-                            severity = "high";
-                        } else if (response.status >= 400) {
-                            severity = "medium";
-                        } else if (prevSnapshot.statusCode >= 400 && response.status < 400) {
-                            severity = "medium"; // Recovered from error
-                        }
-                        
-                        const event: ChangeEvent = {
-                            id: generateId(),
-                            assetId: url,
-                            eventType: "status_change",
-                            severity,
-                            title: `Status Code Changed: ${new URL(url).hostname}`,
-                            description: `HTTP status code changed from ${prevSnapshot.statusCode} to ${response.status} for ${url}.`,
-                            oldValue: prevSnapshot.statusCode.toString(),
-                            newValue: response.status.toString(),
-                            detectionMethod: "content_monitor",
-                            tags: ["status", "http", "change"],
-                            autoTriggerEnabled: severity !== "low",
-                            riskScore: 0,
-                            metadata: {
-                                url,
-                                previousStatus: prevSnapshot.statusCode,
-                                newStatus: response.status,
-                            },
-                        };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                        changeEvents.push(event);
-                    }
-                    
-                    // Title changed
-                    if (prevSnapshot.title !== title && prevSnapshot.title && title) {
-                        const event: ChangeEvent = {
-                            id: generateId(),
-                            assetId: url,
-                            eventType: "title_change",
-                            severity: "low",
-                            title: `Page Title Changed: ${new URL(url).hostname}`,
-                            description: `The page title changed from "${prevSnapshot.title}" to "${title}".`,
-                            oldValue: prevSnapshot.title,
-                            newValue: title,
-                            detectionMethod: "content_monitor",
-                            tags: ["title", "change"],
-                            autoTriggerEnabled: false,
-                            riskScore: 0,
-                            metadata: { url },
-                        };
-                        event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                        changeEvents.push(event);
-                    }
-                } else {
-                    // New page discovered
-                    newPages++;
-                    result.changed = true;
-                    result.changeType = "new";
-                    
-                    const event: ChangeEvent = {
-                        id: generateId(),
-                        assetId: url,
-                        eventType: "page_discovered",
-                        severity: "low",
-                        title: `New Page Discovered: ${new URL(url).hostname}${new URL(url).pathname}`,
-                        description: `New page discovered at ${url}. Title: "${title || 'N/A'}". Size: ${content.length} bytes.`,
-                        newValue: contentHash,
-                        detectionMethod: "content_monitor",
-                        tags: ["discovery", "new", "page"],
-                        autoTriggerEnabled: false,
-                        riskScore: 0,
-                        metadata: {
-                            title,
-                            contentLength: content.length,
-                            statusCode: response.status,
-                        },
-                    };
-                    event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                    changeEvents.push(event);
-                }
-                
-            } catch (error: any) {
-                result.error = error.message || String(error);
-                failedChecks++;
-            }
-            
-            results.push(result);
-            completedTargets += 1;
-            await reportMonitorProgress(monitorExecution, {
-                current: completedTargets,
-                total: totalProgressUnits,
-                currentTarget: url,
-                phase: "probe",
-                message: `Checking content for ${url}`,
-            });
-        });
-
-        await runSequentially(targetTasks);
-
-        await reportMonitorProgress(monitorExecution, {
-            current: validTargets.length + 1,
-            total: totalProgressUnits,
-            phase: "compare",
-            message: "Comparing content snapshots",
-        });
-
-        await reportMonitorProgress(monitorExecution, {
-            current: totalProgressUnits,
-            total: totalProgressUnits,
-            phase: "build",
-            message: "Building content results",
-        });
-        
-        return {
-            success: true,
-            data: {
-                results,
-                changeEvents,
-                snapshots: newSnapshots,
-                summary: {
-                    totalTargets: input.targets.length,
-                    successfulChecks,
-                    failedChecks,
-                    contentChanges,
-                    statusChanges,
-                    newPages,
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/content_monitor/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function webMonitorChanges(events,source){return events.map(event=>({asset_key:event.assetId,asset_type:"web",change_type:event.eventType,severity:event.severity,
+title:event.title,description:event.description,old_value:event.oldValue,new_value:event.newValue,risk_score:event.riskScore,source,metadata:event.metadata}))}var pluginGlobals=globalThis;var PAGE_FETCH_TIMEOUT_MS=12e3;async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{
+return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.
+program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.
+current_plugin_index,completedSteps:monitorExecution.completed_steps,totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{
+return false}}function generateId(){return"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;const v=c==="x"?r:r&3|8;return v.
+toString(16)})}async function runSequentially(tasks){const results=new Array(tasks.length);let nextIndex=0;const workers=Array.from({length:Math.min(16,tasks.length)},
+async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex++;results[currentIndex]=await tasks[currentIndex]()}});await Promise.all(workers);return results}
+async function calculateHash(content){const encoder=new TextEncoder;const data=encoder.encode(content);const hashBuffer=await crypto.subtle.digest("SHA-256",data);
+const hashArray=Array.from(new Uint8Array(hashBuffer));return hashArray.map(b=>b.toString(16).padStart(2,"0")).join("")}function extractTitle(html){const match=html.
+match(/<title[^>]*>([^<]+)<\/title>/i);return match?match[1].trim():void 0}function normalizeContent(content,excludePatterns){let normalized=content;const defaultPatterns=[
+/\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/g,/\b\d{10,13}\b/g,/csrf[_-]?token["\s:=]+["'][^"']+["']/gi,/nonce["\s:=]+["'][^"']+["']/gi,/[a-f0-9]{32}/gi,/[a-f0-9]{64}/gi,
+/\?v=[\d.]+/g,/\?t=\d+/g,/\?_=\d+/g];for(const pattern of defaultPatterns){normalized=normalized.replace(pattern,"[DYNAMIC]")}for(const patternStr of excludePatterns){
+try{const pattern=new RegExp(patternStr,"gi");normalized=normalized.replace(pattern,"[EXCLUDED]")}catch{}}normalized=normalized.replace(/\s+/g," ").trim();return normalized}
+function calculateRiskScore(severity,eventType){let score=0;switch(severity){case"critical":score+=40;break;case"high":score+=30;break;case"medium":score+=20;break;case"\
+low":score+=10;break}switch(eventType){case"content_change":score+=10;break;case"significant_change":score+=20;break;case"status_change":score+=15;break;case"ti\
+tle_change":score+=10;break;case"page_discovered":score+=15;break}return Math.min(score,100)}function get_input_schema(){return{type:"object",required:["targets"],
+properties:{targets:{type:"array",items:{type:"string"},description:"List of URLs to monitor for content changes"},userAgent:{type:"string",description:"Custom \
+User-Agent header"},includeHeaders:{type:"boolean",description:"Include response headers in snapshot",default:false},excludePatterns:{type:"array",items:{type:"\
+string"},description:"Regex patterns to exclude from content hash (e.g., timestamps)"},previousSnapshots:{type:"object",description:"Previous content snapshots \
+for comparison"}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"\
+Whether the operation succeeded"},data:{type:"object",properties:{results:{type:"array",items:{type:"object",properties:{url:{type:"string"},success:{type:"bool\
+ean"},snapshot:{type:"object"},changed:{type:"boolean"},changeType:{type:"string"}}},description:"Content check results"},changeEvents:{type:"array",description:"\
+Change events detected"},snapshots:{type:"object",description:"Content snapshots by URL"},summary:{type:"object",properties:{totalTargets:{type:"integer"},contentChanges:{
+type:"integer"},statusChanges:{type:"integer"},newPages:{type:"integer"}}}}},error:{type:"string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=
+get_output_schema;async function analyze(input){try{const stream=createMonitorResultStream(input);if(!input.targets||!Array.isArray(input.targets)){return{success:false,
+error:"Invalid input: targets array is required"}}const validTargets=input.targets.filter(t=>typeof t==="string"&&t.trim().length>0);if(validTargets.length===0){
+return{success:false,error:"Invalid input: targets array must contain at least one non-empty string"}}const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT \
+10.0; Win64; x64) AppleWebKit/537.36";const includeHeaders=input.includeHeaders||false;const excludePatterns=input.excludePatterns||[];const previousSnapshots=input.
+previousSnapshots||{};const monitorExecution=input.__monitorExecution;const totalProgressUnits=validTargets.length+2;await reportMonitorProgress(monitorExecution,
+{current:0,total:totalProgressUnits,phase:"prepare",message:"Preparing content checks"});const results=[];const changeEvents=[];const newSnapshots={};let successfulChecks=0;
+let failedChecks=0;let contentChanges=0;let statusChanges=0;let newPages=0;let completedTargets=0;const targetTasks=validTargets.map(target=>async()=>{stream.assertHealthy();
+const targetChanges=[];let url=target;if(!url.startsWith("http://")&&!url.startsWith("https://")){url=`https://${url}`}const result={url,success:false};try{const response=await fetch(
+url,{method:"GET",headers:{"User-Agent":userAgent,"Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},timeout:PAGE_FETCH_TIMEOUT_MS});const content=await response.
+text();const normalizedContent=normalizeContent(content,excludePatterns);const contentHash=await calculateHash(normalizedContent);const title=extractTitle(content);
+result.success=true;successfulChecks++;const snapshot={url,contentHash,contentLength:content.length,statusCode:response.status,title,lastChecked:new Date().toISOString()};
+if(includeHeaders){snapshot.headers={};response.headers.forEach((value,key)=>{snapshot.headers[key]=value})}result.snapshot=snapshot;if(!stream.enabled)newSnapshots[url]=
+snapshot;const prevSnapshot=previousSnapshots[url];if(prevSnapshot){if(prevSnapshot.contentHash!==contentHash){contentChanges++;result.changed=true;result.changeType=
+"content";const sizeDiff=Math.abs(content.length-prevSnapshot.contentLength);const sizeChangePercent=prevSnapshot.contentLength>0?sizeDiff/prevSnapshot.contentLength*
+100:100;const isSignificant=sizeChangePercent>20;const severity=isSignificant?"medium":"low";const eventType=isSignificant?"significant_change":"content_change";
+const event={id:generateId(),assetId:url,eventType,severity,title:`Content Changed: ${new URL(url).hostname}${new URL(url).pathname}`,description:`The content o\
+f ${url} has changed. Size difference: ${sizeDiff} bytes (${sizeChangePercent.toFixed(1)}% change).`,oldValue:prevSnapshot.contentHash,newValue:contentHash,detectionMethod:"\
+content_monitor",tags:["content","change",isSignificant?"significant":"minor"],autoTriggerEnabled:isSignificant,riskScore:0,metadata:{previousSize:prevSnapshot.
+contentLength,newSize:content.length,sizeChangePercent:sizeChangePercent.toFixed(2),previousTitle:prevSnapshot.title,newTitle:title}};event.riskScore=calculateRiskScore(
+event.severity,event.eventType);if(!stream.enabled)changeEvents.push(event);targetChanges.push(event)}if(prevSnapshot.statusCode!==response.status){statusChanges++;
+let severity="low";if(response.status>=500){severity="high"}else if(response.status>=400){severity="medium"}else if(prevSnapshot.statusCode>=400&&response.status<
+400){severity="medium"}const event={id:generateId(),assetId:url,eventType:"status_change",severity,title:`Status Code Changed: ${new URL(url).hostname}`,description:`\
+HTTP status code changed from ${prevSnapshot.statusCode} to ${response.status} for ${url}.`,oldValue:prevSnapshot.statusCode.toString(),newValue:response.status.
+toString(),detectionMethod:"content_monitor",tags:["status","http","change"],autoTriggerEnabled:severity!=="low",riskScore:0,metadata:{url,previousStatus:prevSnapshot.
+statusCode,newStatus:response.status}};event.riskScore=calculateRiskScore(event.severity,event.eventType);if(!stream.enabled)changeEvents.push(event);targetChanges.
+push(event)}if(prevSnapshot.title!==title&&prevSnapshot.title&&title){const event={id:generateId(),assetId:url,eventType:"title_change",severity:"low",title:`Pa\
+ge Title Changed: ${new URL(url).hostname}`,description:`The page title changed from "${prevSnapshot.title}" to "${title}".`,oldValue:prevSnapshot.title,newValue:title,
+detectionMethod:"content_monitor",tags:["title","change"],autoTriggerEnabled:false,riskScore:0,metadata:{url}};event.riskScore=calculateRiskScore(event.severity,
+event.eventType);if(!stream.enabled)changeEvents.push(event);targetChanges.push(event)}}else{newPages++;result.changed=true;result.changeType="new";const event={
+id:generateId(),assetId:url,eventType:"page_discovered",severity:"low",title:`New Page Discovered: ${new URL(url).hostname}${new URL(url).pathname}`,description:`\
+New page discovered at ${url}. Title: "${title||"N/A"}". Size: ${content.length} bytes.`,newValue:contentHash,detectionMethod:"content_monitor",tags:["discovery",
+"new","page"],autoTriggerEnabled:false,riskScore:0,metadata:{title,contentLength:content.length,statusCode:response.status}};event.riskScore=calculateRiskScore(
+event.severity,event.eventType);if(!stream.enabled)changeEvents.push(event);targetChanges.push(event)}}catch(error){result.error=error.message||String(error);failedChecks++}
+if(!stream.enabled)results.push(result);await stream.record(target,url,{success:true,data:{results:[result],changeEvents:targetChanges,surface_artifacts:{changes:webMonitorChanges(
+targetChanges,"content_monitor")},snapshots:result.success&&result.snapshot?{[url]:result.snapshot}:{},summary:{totalTargets:1,successfulChecks:result.success?1:
+0,failedChecks:result.success?0:1}}},{status:result.success?"ok":"failed",error:result.error,complete:true});completedTargets+=1;await reportMonitorProgress(monitorExecution,
+{current:completedTargets,total:totalProgressUnits,currentTarget:url,phase:"probe",message:`Checking content for ${url}`})});await runSequentially(targetTasks);
+await reportMonitorProgress(monitorExecution,{current:validTargets.length+1,total:totalProgressUnits,phase:"compare",message:"Comparing content snapshots"});await reportMonitorProgress(
+monitorExecution,{current:totalProgressUnits,total:totalProgressUnits,phase:"build",message:"Building content results"});return await stream.finish({success:true,
+data:{results,changeEvents,snapshots:newSnapshots,summary:{totalTargets:input.targets.length,successfulChecks,failedChecks,contentChanges,statusChanges,newPages}}})}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

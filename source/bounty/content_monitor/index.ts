@@ -1,0 +1,609 @@
+/**
+ * Web Content Change Monitor
+ *
+ * @plugin content_monitor
+ * @name Content Monitor
+ * @version 1.1.7
+ * @author Sentinel Team
+ * @main_category bounty
+ * @monitor_type content
+ * @input_mode asset
+ * @target_asset_types ["web"]
+ * @category monitor
+ * @seed_bindings []
+ * @default_severity low
+ * @tags content, monitor, change-detection, fingerprint, hash, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @description Monitor web pages for content changes, generating ChangeEvents for workflow automation
+ */
+import { createMonitorResultStream } from '../../shared/monitor_results.ts';
+import { webMonitorChanges } from '../../shared/monitor_changes.ts';
+
+
+interface ToolInput {
+    targets: string[];  // List of URLs to monitor
+    userAgent?: string;
+    includeHeaders?: boolean;
+    excludePatterns?: string[];  // Patterns to exclude from hash (e.g., timestamps)
+    previousSnapshots?: Record<string, ContentSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
+}
+
+interface ContentSnapshot {
+    url: string;
+    contentHash: string;
+    contentLength: number;
+    statusCode: number;
+    title?: string;
+    headers?: Record<string, string>;
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
+interface ContentResult {
+    url: string;
+    success: boolean;
+    snapshot?: ContentSnapshot;
+    changed?: boolean;
+    changeType?: string;
+    error?: string;
+}
+
+interface ToolOutput {
+    success: boolean;
+    data?: {
+        results: ContentResult[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, ContentSnapshot>;
+        summary: {
+            totalTargets: number;
+            successfulChecks: number;
+            failedChecks: number;
+            contentChanges: number;
+            statusChanges: number;
+            newPages: number;
+        };
+    };
+    error?: string;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
+const PAGE_FETCH_TIMEOUT_MS = 12000;
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
+
+// Generate UUID
+function generateId(): string {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+}
+
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex++;
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
+// Calculate content hash
+async function calculateHash(content: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(content);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Extract page title
+function extractTitle(html: string): string | undefined {
+    const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    return match ? match[1].trim() : undefined;
+}
+
+// Normalize content (remove dynamic parts)
+function normalizeContent(content: string, excludePatterns: string[]): string {
+    let normalized = content;
+
+    // Remove common dynamic elements
+    const defaultPatterns = [
+        // Timestamps
+        /\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/g,
+        /\b\d{10,13}\b/g,  // Unix timestamps
+        // Session tokens
+        /csrf[_-]?token["\s:=]+["'][^"']+["']/gi,
+        /nonce["\s:=]+["'][^"']+["']/gi,
+        // Random IDs
+        /[a-f0-9]{32}/gi,  // MD5-like
+        /[a-f0-9]{64}/gi,  // SHA256-like
+        // Cache busters
+        /\?v=[\d.]+/g,
+        /\?t=\d+/g,
+        /\?_=\d+/g,
+    ];
+
+    // Apply default patterns
+    for (const pattern of defaultPatterns) {
+        normalized = normalized.replace(pattern, '[DYNAMIC]');
+    }
+
+    // Apply custom patterns
+    for (const patternStr of excludePatterns) {
+        try {
+            const pattern = new RegExp(patternStr, 'gi');
+            normalized = normalized.replace(pattern, '[EXCLUDED]');
+        } catch {
+            // Invalid regex, skip
+        }
+    }
+
+    // Normalize whitespace
+    normalized = normalized.replace(/\s+/g, ' ').trim();
+
+    return normalized;
+}
+
+// Calculate risk score
+function calculateRiskScore(severity: string, eventType: string): number {
+    let score = 0;
+
+    switch (severity) {
+        case "critical": score += 40; break;
+        case "high": score += 30; break;
+        case "medium": score += 20; break;
+        case "low": score += 10; break;
+    }
+
+    switch (eventType) {
+        case "content_change": score += 10; break;
+        case "significant_change": score += 20; break;
+        case "status_change": score += 15; break;
+        case "title_change": score += 10; break;
+        case "page_discovered": score += 15; break;
+    }
+
+    return Math.min(score, 100);
+}
+
+/**
+ * Export input schema
+ */
+export function get_input_schema() {
+    return {
+        type: "object",
+        required: ["targets"],
+        properties: {
+            targets: {
+                type: "array",
+                items: { type: "string" },
+                description: "List of URLs to monitor for content changes"
+            },
+            userAgent: {
+                type: "string",
+                description: "Custom User-Agent header"
+            },
+            includeHeaders: {
+                type: "boolean",
+                description: "Include response headers in snapshot",
+                default: false
+            },
+            excludePatterns: {
+                type: "array",
+                items: { type: "string" },
+                description: "Regex patterns to exclude from content hash (e.g., timestamps)"
+            },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous content snapshots for comparison"
+            }
+        }
+    };
+}
+
+pluginGlobals.get_input_schema = get_input_schema;
+
+/**
+ * Export output schema
+ */
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean", description: "Whether the operation succeeded" },
+            data: {
+                type: "object",
+                properties: {
+                    results: {
+                        type: "array",
+                        items: {
+                            type: "object",
+                            properties: {
+                                url: { type: "string" },
+                                success: { type: "boolean" },
+                                snapshot: { type: "object" },
+                                changed: { type: "boolean" },
+                                changeType: { type: "string" }
+                            }
+                        },
+                        description: "Content check results"
+                    },
+                    changeEvents: { type: "array", description: "Change events detected" },
+                    snapshots: { type: "object", description: "Content snapshots by URL" },
+                    summary: {
+                        type: "object",
+                        properties: {
+                            totalTargets: { type: "integer" },
+                            contentChanges: { type: "integer" },
+                            statusChanges: { type: "integer" },
+                            newPages: { type: "integer" }
+                        }
+                    }
+                }
+            },
+            error: { type: "string", description: "Error message if failed" }
+        }
+    };
+}
+
+pluginGlobals.get_output_schema = get_output_schema;
+
+/**
+ * Main analysis function
+ */
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
+    try {
+        const stream = createMonitorResultStream(input);
+        if (!input.targets || !Array.isArray(input.targets)) {
+            return {
+                success: false,
+                error: "Invalid input: targets array is required"
+            };
+        }
+
+        // Filter out empty strings
+        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        if (validTargets.length === 0) {
+            return {
+                success: false,
+                error: "Invalid input: targets array must contain at least one non-empty string"
+            };
+        }
+
+        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+                const includeHeaders = input.includeHeaders || false;
+        const excludePatterns = input.excludePatterns || [];
+        const previousSnapshots = input.previousSnapshots || {};
+        const monitorExecution = input.__monitorExecution;
+        const totalProgressUnits = validTargets.length + 2;
+
+        await reportMonitorProgress(monitorExecution, {
+            current: 0,
+            total: totalProgressUnits,
+            phase: "prepare",
+            message: "Preparing content checks",
+        });
+
+        const results: ContentResult[] = [];
+        const changeEvents: ChangeEvent[] = [];
+        const newSnapshots: Record<string, ContentSnapshot> = {};
+
+        let successfulChecks = 0;
+        let failedChecks = 0;
+        let contentChanges = 0;
+        let statusChanges = 0;
+        let newPages = 0;
+        let completedTargets = 0;
+
+        const targetTasks = validTargets.map((target) => async () => {
+            stream.assertHealthy();
+            const targetChanges: ChangeEvent[] = [];
+            let url = target;
+            if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                url = `https://${url}`;
+            }
+
+            const result: ContentResult = {
+                url,
+                success: false,
+            };
+
+            try {
+                const response = await fetch(url, {
+                    method: "GET",
+                    headers: {
+                        "User-Agent": userAgent,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    },
+                    timeout: PAGE_FETCH_TIMEOUT_MS,
+                });
+
+                const content = await response.text();
+                const normalizedContent = normalizeContent(content, excludePatterns);
+                const contentHash = await calculateHash(normalizedContent);
+                const title = extractTitle(content);
+
+                result.success = true;
+                successfulChecks++;
+
+                // Create snapshot
+                const snapshot: ContentSnapshot = {
+                    url,
+                    contentHash,
+                    contentLength: content.length,
+                    statusCode: response.status,
+                    title,
+                    lastChecked: new Date().toISOString(),
+                };
+
+                if (includeHeaders) {
+                    snapshot.headers = {};
+                    response.headers.forEach((value, key) => {
+                        snapshot.headers![key] = value;
+                    });
+                }
+
+                result.snapshot = snapshot;
+                if (!stream.enabled) newSnapshots[url] = snapshot;
+
+                // Check for changes
+                const prevSnapshot = previousSnapshots[url];
+                if (prevSnapshot) {
+                    // Content hash changed
+                    if (prevSnapshot.contentHash !== contentHash) {
+                        contentChanges++;
+                        result.changed = true;
+                        result.changeType = "content";
+
+                        // Calculate change magnitude
+                        const sizeDiff = Math.abs(content.length - prevSnapshot.contentLength);
+                        const sizeChangePercent = prevSnapshot.contentLength > 0
+                            ? (sizeDiff / prevSnapshot.contentLength) * 100
+                            : 100;
+
+                        const isSignificant = sizeChangePercent > 20;
+                        const severity = isSignificant ? "medium" : "low";
+                        const eventType = isSignificant ? "significant_change" : "content_change";
+
+                        const event: ChangeEvent = {
+                            id: generateId(),
+                            assetId: url,
+                            eventType,
+                            severity,
+                            title: `Content Changed: ${new URL(url).hostname}${new URL(url).pathname}`,
+                            description: `The content of ${url} has changed. Size difference: ${sizeDiff} bytes (${sizeChangePercent.toFixed(1)}% change).`,
+                            oldValue: prevSnapshot.contentHash,
+                            newValue: contentHash,
+                            detectionMethod: "content_monitor",
+                            tags: ["content", "change", isSignificant ? "significant" : "minor"],
+                            autoTriggerEnabled: isSignificant,
+                            riskScore: 0,
+                            metadata: {
+                                previousSize: prevSnapshot.contentLength,
+                                newSize: content.length,
+                                sizeChangePercent: sizeChangePercent.toFixed(2),
+                                previousTitle: prevSnapshot.title,
+                                newTitle: title,
+                            },
+                        };
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType);
+                        if (!stream.enabled) changeEvents.push(event);
+                        targetChanges.push(event);
+                    }
+
+                    // Status code changed
+                    if (prevSnapshot.statusCode !== response.status) {
+                        statusChanges++;
+
+                        let severity: "low" | "medium" | "high" | "critical" = "low";
+                        if (response.status >= 500) {
+                            severity = "high";
+                        } else if (response.status >= 400) {
+                            severity = "medium";
+                        } else if (prevSnapshot.statusCode >= 400 && response.status < 400) {
+                            severity = "medium"; // Recovered from error
+                        }
+
+                        const event: ChangeEvent = {
+                            id: generateId(),
+                            assetId: url,
+                            eventType: "status_change",
+                            severity,
+                            title: `Status Code Changed: ${new URL(url).hostname}`,
+                            description: `HTTP status code changed from ${prevSnapshot.statusCode} to ${response.status} for ${url}.`,
+                            oldValue: prevSnapshot.statusCode.toString(),
+                            newValue: response.status.toString(),
+                            detectionMethod: "content_monitor",
+                            tags: ["status", "http", "change"],
+                            autoTriggerEnabled: severity !== "low",
+                            riskScore: 0,
+                            metadata: {
+                                url,
+                                previousStatus: prevSnapshot.statusCode,
+                                newStatus: response.status,
+                            },
+                        };
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType);
+                        if (!stream.enabled) changeEvents.push(event);
+                        targetChanges.push(event);
+                    }
+
+                    // Title changed
+                    if (prevSnapshot.title !== title && prevSnapshot.title && title) {
+                        const event: ChangeEvent = {
+                            id: generateId(),
+                            assetId: url,
+                            eventType: "title_change",
+                            severity: "low",
+                            title: `Page Title Changed: ${new URL(url).hostname}`,
+                            description: `The page title changed from "${prevSnapshot.title}" to "${title}".`,
+                            oldValue: prevSnapshot.title,
+                            newValue: title,
+                            detectionMethod: "content_monitor",
+                            tags: ["title", "change"],
+                            autoTriggerEnabled: false,
+                            riskScore: 0,
+                            metadata: { url },
+                        };
+                        event.riskScore = calculateRiskScore(event.severity, event.eventType);
+                        if (!stream.enabled) changeEvents.push(event);
+                        targetChanges.push(event);
+                    }
+                } else {
+                    // New page discovered
+                    newPages++;
+                    result.changed = true;
+                    result.changeType = "new";
+
+                    const event: ChangeEvent = {
+                        id: generateId(),
+                        assetId: url,
+                        eventType: "page_discovered",
+                        severity: "low",
+                        title: `New Page Discovered: ${new URL(url).hostname}${new URL(url).pathname}`,
+                        description: `New page discovered at ${url}. Title: "${title || 'N/A'}". Size: ${content.length} bytes.`,
+                        newValue: contentHash,
+                        detectionMethod: "content_monitor",
+                        tags: ["discovery", "new", "page"],
+                        autoTriggerEnabled: false,
+                        riskScore: 0,
+                        metadata: {
+                            title,
+                            contentLength: content.length,
+                            statusCode: response.status,
+                        },
+                    };
+                    event.riskScore = calculateRiskScore(event.severity, event.eventType);
+                    if (!stream.enabled) changeEvents.push(event);
+                        targetChanges.push(event);
+                }
+
+            } catch (error: any) {
+                result.error = error.message || String(error);
+                failedChecks++;
+            }
+
+            if (!stream.enabled) results.push(result);
+            await stream.record(target, url, { success: true, data: {
+                results: [result], changeEvents: targetChanges,
+                surface_artifacts: { changes: webMonitorChanges(targetChanges, "content_monitor") },
+                snapshots: result.success && result.snapshot ? { [url]: result.snapshot } : {},
+                summary: { totalTargets: 1, successfulChecks: result.success ? 1 : 0, failedChecks: result.success ? 0 : 1 },
+            } }, { status: result.success ? "ok" : "failed", error: result.error, complete: true });
+            completedTargets += 1;
+            await reportMonitorProgress(monitorExecution, {
+                current: completedTargets,
+                total: totalProgressUnits,
+                currentTarget: url,
+                phase: "probe",
+                message: `Checking content for ${url}`,
+            });
+        });
+
+        await runSequentially(targetTasks);
+
+        await reportMonitorProgress(monitorExecution, {
+            current: validTargets.length + 1,
+            total: totalProgressUnits,
+            phase: "compare",
+            message: "Comparing content snapshots",
+        });
+
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits,
+            total: totalProgressUnits,
+            phase: "build",
+            message: "Building content results",
+        });
+
+        return await stream.finish({
+            success: true,
+            data: {
+                results,
+                changeEvents,
+                snapshots: newSnapshots,
+                summary: {
+                    totalTargets: input.targets.length,
+                    successfulChecks,
+                    failedChecks,
+                    contentChanges,
+                    statusChanges,
+                    newPages,
+                },
+            },
+        });
+
+    } catch (error: any) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+pluginGlobals.analyze = analyze;

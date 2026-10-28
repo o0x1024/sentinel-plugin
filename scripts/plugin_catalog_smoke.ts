@@ -1,6 +1,7 @@
 import { validateMonitorMetadata, validateMonitorSchema } from "./plugin_monitor_contract.ts";
 import type { MonitorPluginMetadata } from "./plugin_monitor_contract.ts";
 import { nativeSubdomainBruteFixture } from "./subdomain_brute_fixture.ts";
+import { monitorExecution } from "./monitor_stream_fixture.ts";
 
 interface ManifestPlugin extends MonitorPluginMetadata {
     id: string;
@@ -54,6 +55,11 @@ const iconBytes = Uint8Array.from([0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0, 
 const nowIso = new Date().toISOString();
 
 const dictionaryEntriesById: Record<string, Array<Record<string, unknown>>> = {
+    builtin_service_probe_rules: [{
+        id: "owned-nginx-service", word: "nginx", category: "web_server",
+        metadata: { name: "nginx", product: "nginx", asset_category: "web_server",
+            matchers: [{ part: "header", type: "contains", value: "nginx" }] },
+    }],
     builtin_web_fingerprint_rules: [
         {
             id: "fingerprint-nextjs",
@@ -378,6 +384,7 @@ function installRuntimeStubs(): void {
                 if (dictType === "fingerprint_rule") return "builtin_web_fingerprint_rules";
                 if (dictType === "poc_rule") return "builtin_safe_poc_rules";
                 if (dictType === "sensitive_file") return "builtin_sensitive_files_web";
+                if (dictType === "service_probe_rule") return "builtin_service_probe_rules";
                 if (dictType === "service_fingerprint") return null;
                 return null;
             },
@@ -388,6 +395,14 @@ function installRuntimeStubs(): void {
         Monitor: {
             async reportProgress() {
                 return true;
+            },
+        },
+        AST: {
+            parse(code: string) {
+                // Deterministic AST-bridge fixture for the synthetic bundles above.
+                const literals = [...code.matchAll(/(?:fetch\(|:\s*)["']([^"']+)["']/g)]
+                    .map(match => ({ type: "string", value: match[1], line: 1, column: 0 }));
+                return { literals, errors: [] };
             },
         },
         Network: {
@@ -411,7 +426,7 @@ function installRuntimeStubs(): void {
                     engineUsed: "native",
                     engineExperimental: false,
                     results: request.targets.map((target) => ({
-                        target: `${target.host}:${target.port}/${target.protocol}`,
+                        target: `${target.host}:${target.port}`,
                         success: true,
                         available: true,
                         host: target.host,
@@ -445,9 +460,9 @@ function installRuntimeStubs(): void {
                         issuer: "CN=Smoke CA",
                         validFrom: nowIso,
                         validTo: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-                        fingerprint: "AA:BB:CC:DD",
+                        fingerprintSha256: Array(32).fill("AA").join(":"),
                         serialNumber: "01AB",
-                        altNames: [domain, `www.${domain}`],
+                        subjectAltNames: [domain, `www.${domain}`],
                         protocol: "TLSv1.3",
                         cipher: "TLS_AES_128_GCM_SHA256",
                     },
@@ -651,10 +666,10 @@ function buildMonitorAssetInput(
     const value = type === "domain" ? "example.com"
         : type === "ip" ? "203.0.113.10"
         : type === "ip_range" ? "203.0.113.0/30"
-        : type === "service" ? "example.com:443" : "https://example.com";
+        : type === "service" ? "example.com:443/tcp" : "https://example.com";
     const descriptor = type === "service"
-        ? { type, value, host: "example.com", port: 443, protocol: "https" }
-        : { type, value };
+        ? { type, value, host: "example.com", port: 443, protocol: "tcp", service_name: "https", source: "surface_asset", asset_id: "owned-service" }
+        : { type, value, source: "surface_asset", asset_id: `owned-${type}` };
     if (assetType === "api") {
         input.api_paths = ["https://example.com/api/users"];
     } else {
@@ -669,6 +684,53 @@ function buildMonitorAssetInput(
         if (key in properties) input[key] = value;
     }
     return input;
+}
+
+function monitorTargets(input: Record<string, any>): string[] {
+    const values = ["targets", "domains", "urls", "api_paths", "ips", "subdomains"]
+        .flatMap(key => Array.isArray(input[key]) ? input[key].filter((value: unknown) => typeof value === "string") : []);
+    if (!values.length) {
+        for (const key of ["domain", "url", "ip"]) if (typeof input[key] === "string") values.push(input[key]);
+    }
+    if (!values.length && Array.isArray(input.service_targets)) {
+        for (const target of input.service_targets) {
+            values.push(typeof target === "string" ? target
+                : target.value || `${target.host}:${target.port}/${target.protocol || "tcp"}`);
+        }
+    }
+    return [...new Set(values)] as string[];
+}
+
+async function runStreamingFixture(plugin: ManifestPlugin, module: any, input: Record<string, any>): Promise<void> {
+    const targets = monitorTargets(input);
+    if (!targets.length) throw new Error("Streaming fixture has no host targets");
+    const monitor = (globalThis as any).Sentinel.Monitor;
+    const originalCommit = monitor.commitResults;
+    const chunks: any[] = [];
+    const seen = new Set<string>();
+    const completed = new Set<string>();
+    monitor.commitResults = async (request: any) => {
+        if (request.sequence !== chunks.length + 1) throw new Error("Streaming sequence is not ordered");
+        if (!Array.isArray(request.work) || request.work.length < 1 || request.work.length > 32) throw new Error("Invalid work batch size");
+        if (encoder.encode(JSON.stringify(request)).length > 2 * 1024 * 1024) throw new Error("Streaming batch exceeds byte bound");
+        for (const work of request.work) {
+            const key = JSON.stringify([work.target, work.key]);
+            if (!targets.includes(work.target) || seen.has(key) || completed.has(work.target)) throw new Error("Unexpected, repeated or completed work target");
+            seen.add(key);
+            if (work.complete) completed.add(work.target);
+        }
+        chunks.push(structuredClone(request));
+        return { ok: true, sequence: request.sequence };
+    };
+    try {
+        const result = await module.analyze({ ...input, __monitorExecution: monitorExecution(targets, { pluginId: plugin.id }) });
+        if (result?.success !== true) throw new Error(result?.error || "Streaming analyze failed");
+        if (result.data?.stream_complete !== true) throw new Error("Streaming analyze did not return stream_complete");
+        if (completed.size !== targets.length) throw new Error(`Streaming completed ${completed.size}/${targets.length} host targets`);
+        if (!chunks.length) throw new Error("Streaming analyze saved no work results");
+        const fixtures = ((globalThis as any).__sentinelBountyStreamFixtures ||= []);
+        fixtures.push({ id: plugin.id, targets, requests: chunks });
+    } finally { monitor.commitResults = originalCommit; }
 }
 
 async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
@@ -755,6 +817,16 @@ async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
                 }
             }
         }
+        let streamedInputs = 0;
+        if (plugin.main_category === "bounty") {
+            const inputs = plugin.input_mode === "asset"
+                ? (plugin.target_asset_types ?? []).map(type => buildMonitorAssetInput(plugin, type, inputSchema.properties))
+                : [buildInputForPlugin(plugin)];
+            for (const input of inputs) {
+                await runStreamingFixture(plugin, module, input);
+                streamedInputs++;
+            }
+        }
 
         return {
             id: plugin.id,
@@ -762,7 +834,7 @@ async function runManifestPlugin(plugin: ManifestPlugin): Promise<SmokeResult> {
             mainCategory: plugin.main_category,
             localPath: localUrl.pathname,
             status: "passed",
-            detail: "analyze and declared monitor asset inputs ok",
+            detail: `analyze, declared asset inputs and ${streamedInputs} acknowledged monitor contexts ok`,
         };
     } catch (error) {
         return {

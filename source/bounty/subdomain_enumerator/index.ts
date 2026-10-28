@@ -3,7 +3,7 @@
  *
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.7
+ * @version 2.2.8
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -12,9 +12,11 @@
  * @target_asset_types []
  * @seed_bindings [{"seed_type":"root_domain","input_key":"domains"},{"seed_type":"domain","input_key":"domains"}]
  * @default_severity info
- * @tags subdomain, reconnaissance, domain, enumeration, dns, osint, certificate-transparency, threat-intelligence, passive-dns, api, capability:fetch
+ * @tags subdomain, reconnaissance, domain, enumeration, dns, osint, certificate-transparency, threat-intelligence, passive-dns, api, capability:fetch, capability:monitor-events, monitor:results-stream-v1
  * @description Enumerate subdomains using multiple data sources (crt.sh, HackerTarget, RapidDNS, AlienVault, VirusTotal, URLScan, etc.)
  */
+import { createMonitorResultStream } from "../../shared/monitor_results.ts";
+import { createMonitorTargetWriter } from "../../shared/monitor_target_writer.ts";
 import { extractSubdomains, queryCrtsh, queryHackerTarget, queryRapidDNS, queryAlienVault, queryVirusTotal, queryURLScan, queryAnubis, queryDNSDumpster, querySublist3r, queryCertSpotter, queryThreatMiner, queryNetcraft, queryRiddler, queryRobtex, querySiteDossier, queryDNSGrep, queryBeVigil, queryCensys, queryVirusTotalAPI, querySecurityTrails, queryShodan, queryGitHub, queryBinaryEdge, queryFullHunt, queryGoogleCT, queryMySSL, queryIP138, queryRiskIQ, queryThreatBook, queryFOFA, queryHunter, queryQuake, queryZoomEye, querySpyse, queryChinaz, queryCeBaidu, queryQianxun, queryWindvane, queryRacent, queryCDX, queryArchive, queryChinazAPI, queryCIRCL, queryCloudflare, queryDNSDB, queryIPv4Info, queryPassiveDNS, queryBingAPI, queryGoogleAPI, queryGitee } from './sources.ts';
 
 interface ToolInput {
@@ -673,7 +675,8 @@ async function querySource(
             source,
             subdomains: [],
             count: 0,
-            error: error.message || String(error),
+            error: Object.values(apiConfig || {}).filter((value): value is string => typeof value === "string" && value.length > 0)
+                .reduce((message, value) => message.replaceAll(value, "[REDACTED]").replaceAll(encodeURIComponent(value), "[REDACTED]"), error.message || String(error)),
             responseTime: Math.round(responseTime)
         };
     }
@@ -692,19 +695,9 @@ async function runSourceTasksWithConcurrency(tasks: Array<() => Promise<SourceRe
         workers.push((async () => {
             while (nextIndex < tasks.length) {
                 const currentIndex = nextIndex++;
-                try {
-                    const result = await tasks[currentIndex]();
-                    logSourceResult(result);
-                    results[currentIndex] = result;
-                } catch (err: any) {
-                    results[currentIndex] = {
-                        source: "unknown",
-                        subdomains: [],
-                        count: 0,
-                        error: err?.message || String(err),
-                        responseTime: 0,
-                    };
-                }
+                const result = await tasks[currentIndex]();
+                logSourceResult(result);
+                results[currentIndex] = result;
             }
         })());
     }
@@ -715,7 +708,7 @@ async function runSourceTasksWithConcurrency(tasks: Array<() => Promise<SourceRe
 /**
  * Main analysis function
  */
-async function analyzeDomain(input: ToolInput, domain: string): Promise<ToolOutput> {
+async function analyzeDomain(input: ToolInput, domain: string, stream: ReturnType<typeof createMonitorResultStream>, writeTarget: ReturnType<typeof createMonitorTargetWriter>): Promise<ToolOutput> {
     try {
 
         if (!domain) {
@@ -772,7 +765,19 @@ async function analyzeDomain(input: ToolInput, domain: string): Promise<ToolOutp
         } catch {
             // Ignore logging failures.
         }
-        const tasks = sources.map(source => () => querySource(source, domain, input.apiConfig));
+        const tasks = sources.map(source => async () => {
+            stream.assertHealthy();
+            const result = await querySource(source, domain, input.apiConfig);
+            await writeTarget(domain, `source:${source}`, { success: true, data: {
+                sourceResults: [result],
+                surface_artifacts: {
+                    domains: [...new Set([domain, ...result.subdomains])].map(fqdn => ({ fqdn, root_domain: domain, main_domain: domain, source: "subdomain_enumerator", confidence: 0.8 })),
+                    relations: result.subdomains.map(subdomain => ({ from_type: "domain", from_key: domain, to_type: "domain", to_key: subdomain,
+                        relation_type: "contains_subdomain", source: "subdomain_enumerator", confidence: 0.8 })),
+                },
+            } }, { complete: false, status: result.error ? "failed" : "ok", error: result.error });
+            return result;
+        });
         const sourceResults = await runSourceTasksWithConcurrency(tasks);
 
         const allSubdomains: string[] = [];
@@ -824,7 +829,7 @@ async function analyzeDomain(input: ToolInput, domain: string): Promise<ToolOutp
         }
 
         const successful = sourcesSucceeded > 0;
-        return {
+        const output: ToolOutput = {
             success: successful,
             ...(successful ? {} : { error: `All ${sources.length} sources failed for ${domain}: ${[...new Set(sourceResults.map(result => result.error).filter(Boolean))].slice(0, 3).join("; ")}` }),
             data: {
@@ -887,6 +892,10 @@ async function analyzeDomain(input: ToolInput, domain: string): Promise<ToolOutp
                 }
             }
         };
+        await writeTarget(domain, "domain-complete", { success: true, data: successful ? output.data! : {
+            results: [{ domain, status: "failed", error: output.error }],
+        } } as any, { status: successful ? "ok" : "failed", error: output.error });
+        return output;
 
     } catch (error: any) {
         return {
@@ -899,6 +908,8 @@ async function analyzeDomain(input: ToolInput, domain: string): Promise<ToolOutp
 
 /** Enumerate every injected domain; scalar aliases never truncate list input. */
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
+    const stream = createMonitorResultStream(input);
+        const writeTarget = createMonitorTargetWriter(input, stream, target => target.toLowerCase().trim());
     const domains = resolveInputDomains(input);
     if (domains.length === 0) return { success: false, error: "Invalid input: domain parameter is required" };
     const results: ToolOutput[] = new Array(domains.length);
@@ -920,7 +931,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const index = nextDomain++;
             const domain = domains[index];
             await report(domain);
-            results[index] = await analyzeDomain(input, domain);
+            stream.assertHealthy();
+            const result = await analyzeDomain(input, domain, stream, writeTarget);
+            results[index] = stream.enabled ? { success: result.success, ...(result.error ? { error: result.error } : {}) } : result;
+            stream.assertHealthy();
             completed += 1;
             await report(domain);
         }
@@ -936,7 +950,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             (surface_artifacts[key] ||= []).push(...values);
         }
     }
-    return {
+    return await stream.finish({
         success: failed.length === 0,
         ...(failed.length ? { error: `Subdomain enumeration failed for ${failed.length}/${domains.length} domains: ${failed.map(result => result.error).join("; ")}` } : {}),
         data: {
@@ -958,5 +972,5 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             },
             surface_artifacts,
         },
-    };
+    });
 }

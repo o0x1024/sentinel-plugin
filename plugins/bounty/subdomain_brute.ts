@@ -3,7 +3,7 @@
  *
  * @plugin subdomain_brute
  * @name Subdomain Brute Force
- * @version 1.0.0
+ * @version 1.0.1
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -12,172 +12,100 @@
  * @target_asset_types []
  * @seed_bindings [{"seed_type":"root_domain","input_key":"targets"},{"seed_type":"domain","input_key":"targets"}]
  * @default_severity info
- * @tags subdomain, dns, bruteforce, dictionary, native, asm, surface, capability:network-scan, capability:monitor-events
+ * @tags subdomain, dns, bruteforce, dictionary, native, asm, surface, capability:network-scan, capability:monitor-events, monitor:results-stream-v1
  * @description Batch dictionary-based DNS discovery through the native Rust engine; defaults to UDP and reports transport failures explicitly
  */
-
-type QueryType = "a" | "aaaa" | "cname" | "mx" | "ns" | "txt";
-type Transport = "udp" | "ethernet";
-interface Snapshot {
-    domain: string;
-    subdomains: string[];
-    last_checked?: string;
-    lastChecked?: string;
-}
-interface ToolInput {
-    targets?: string[];
-    domain?: string;
-    domains?: string[];
-    dictionary_id?: string;
-    dictionary?: string[];
-    resolvers?: string[];
-    skip_wildcard?: boolean;
-    bandwidth_limit?: string | null;
-    verify_mode?: boolean;
-    max_retries?: number;
-    dns_timeout_seconds?: number;
-    max_wait_seconds?: number;
-    verify_timeout_seconds?: number;
-    verify_concurrency?: number;
-    resolve_records?: boolean;
-    query_types?: QueryType[];
-    raw_records?: boolean;
-    device?: string | null;
-    transport?: Transport;
-    previous_snapshots?: Record<string, Snapshot>;
-    previousSnapshots?: Record<string, Snapshot>;
-    __monitorExecution?: Record<string, unknown>;
-}
-interface NativeData {
-    targets: string[];
-    subdomains: string[];
-    results: unknown[];
-    change_events: unknown[];
-    snapshots: Record<string, unknown>;
-    summary: Record<string, unknown>;
-    surface_artifacts: Record<string, unknown>;
-    [key: string]: unknown;
-}
-interface ToolOutput {
-    success: boolean;
-    data?: NativeData & { changeEvents?: unknown[] };
-    error?: string;
-    cancelled?: boolean;
-    [key: string]: unknown;
-}
-declare const Sentinel: {
-    Network?: {
-        bruteForceSubdomains?: (request: Record<string, unknown>) => Promise<ToolOutput>;
-    };
-};
-
-const nativeKeys = [
-    "dictionary_id", "dictionary", "resolvers", "skip_wildcard", "bandwidth_limit", "verify_mode",
-    "max_retries", "dns_timeout_seconds", "max_wait_seconds", "verify_timeout_seconds", "verify_concurrency",
-    "resolve_records", "query_types", "raw_records", "device", "__monitorExecution",
-] as const;
-const acceptedKeys = new Set<string>([...nativeKeys, "targets", "domain", "domains", "transport", "previous_snapshots", "previousSnapshots"]);
-const stringArray = (description: string) => ({ type: "array", items: { type: "string" }, description });
-
-export function get_input_schema() {
-    const snapshot = {
-        type: "object", required: ["domain", "subdomains"],
-        properties: { domain: { type: "string" }, subdomains: stringArray("Previously discovered subdomains"), last_checked: { type: "string" }, lastChecked: { type: "string", description: "Legacy monitor timestamp alias" } },
-    };
-    return {
-        type: "object", additionalProperties: false,
-        anyOf: [{ required: ["targets"] }, { required: ["domain"] }, { required: ["domains"] }],
-        properties: {
-            targets: { ...stringArray("Root domains supplied by monitor seed bindings; the complete batch runs in one native call"), minItems: 1 },
-            domain: { type: "string", minLength: 1, description: "Single-domain compatibility alias; merged with the target list" },
-            domains: stringArray("Legacy monitor domain-list alias; merged without truncating targets"),
-            dictionary_id: { type: "string", minLength: 1, description: "Platform subdomain dictionary ID. The native host reads its complete wordlist; the plugin never transfers platform dictionary words into JavaScript." },
-            dictionary: stringArray("Optional inline subdomain prefixes, forwarded unchanged. Native selection uses inline entries, the selected platform dictionary, or the configured default dictionary."),
-            resolvers: stringArray("DNS resolver IPs or IP:port values; native engine validates and normalizes them"),
-            skip_wildcard: { type: "boolean", default: true },
-            bandwidth_limit: { type: ["string", "null"], default: "3M", description: "Global native engine bandwidth limit, for example 3M" },
-            verify_mode: { type: "boolean", default: false, description: "Enable native HTTP verification of discovered subdomains" },
-            max_retries: { type: "integer", minimum: 1, maximum: 10, default: 5 },
-            dns_timeout_seconds: { type: "integer", minimum: 1, maximum: 300, default: 10 },
-            max_wait_seconds: { type: "integer", minimum: 1, maximum: 3600, default: 10, description: "Response wait window after the initial batch has been sent. The host execution deadline covers the complete run. Unanswered queries fail rather than producing a successful empty snapshot." },
-            verify_timeout_seconds: { type: "integer", minimum: 1, maximum: 300, default: 10 },
-            verify_concurrency: { type: "integer", minimum: 1, maximum: 1000, default: 50 },
-            resolve_records: { type: "boolean", default: true },
-            query_types: { type: "array", items: { type: "string", enum: ["a", "aaaa", "cname", "mx", "ns", "txt"] }, default: ["a"] },
-            raw_records: { type: "boolean", default: false },
-            device: { type: ["string", "null"], description: "Explicit network device for ethernet transport where supported" },
-            transport: { type: "string", enum: ["udp", "ethernet"], default: "udp", description: "UDP works with normal desktop permissions. Ethernet is an explicit raw-packet choice and must be supported; failures are not silently downgraded." },
-            previousSnapshots: { type: "object", additionalProperties: snapshot, readOnly: true, description: "Host-injected previous snapshots; adapted to native previous_snapshots internally" },
-            __monitorExecution: { type: "object", readOnly: true, description: "Host-injected monitor context. Passed through unchanged and checked by the native host; plugins cannot impersonate another monitor task." },
-        },
-    };
-}
-
-export function get_output_schema() {
-    return {
-        type: "object", required: ["success"],
-        properties: {
-            success: { type: "boolean" }, error: { type: "string" }, cancelled: { type: "boolean" },
-            data: {
-                type: "object", required: ["targets", "subdomains", "results", "change_events", "changeEvents", "snapshots", "summary", "surface_artifacts"],
-                properties: {
-                    targets: stringArray("Complete native batch"), subdomains: stringArray("Native discovered domains"),
-                    results: { type: "array", items: { type: "object" } },
-                    change_events: { type: "array", items: { type: "object" } },
-                    changeEvents: { type: "array", items: { type: "object" }, description: "Monitor-compatible alias referencing the same native change_events array" },
-                    snapshots: { type: "object", description: "Native snapshots keyed by root domain, retaining snake_case last_checked" },
-                    summary: { type: "object", properties: { total_targets: { type: "integer" }, dictionary_size: { type: "integer" }, dictionary_source: { type: "string" }, total_discovered: { type: "integer" } } },
-                    surface_artifacts: { type: "object", properties: Object.fromEntries(["domains", "ips", "relations", "evidences", "changes"].map(key => [key, { type: "array", items: { type: "object" } }])) },
-                },
-            },
-        },
-    };
-}
-
-function previousSnapshots(input: ToolInput): Record<string, unknown> | undefined {
-    const snapshots = input.previous_snapshots ?? input.previousSnapshots;
-    if (snapshots === undefined) return undefined;
-    if (!snapshots || typeof snapshots !== "object" || Array.isArray(snapshots)) throw new Error("previous_snapshots must be an object");
-    return Object.fromEntries(Object.entries(snapshots).map(([domain, snapshot]) => {
-        if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) throw new Error(`Invalid previous snapshot for ${domain}`);
-        const { lastChecked, ...native } = snapshot;
-        return [domain, { ...native, ...(native.last_checked === undefined && lastChecked !== undefined ? { last_checked: lastChecked } : {}) }];
-    }));
-}
-
-function buildRequest(input: ToolInput): Record<string, unknown> {
-    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Input must be an object");
-    const unknownKeys = Object.keys(input).filter(key => !acceptedKeys.has(key));
-    if (unknownKeys.length) throw new Error(`Unsupported subdomain_brute input fields: ${unknownKeys.join(", ")}`);
-    if (input.transport !== undefined && input.transport !== "udp" && input.transport !== "ethernet") throw new Error("transport must be udp or ethernet");
-    if (input.targets !== undefined && !Array.isArray(input.targets) || input.domains !== undefined && !Array.isArray(input.domains)) throw new Error("targets and domains must be string arrays");
-    if (input.domain !== undefined && typeof input.domain !== "string") throw new Error("domain must be a string");
-    const targets = [...(input.targets ?? []), ...(input.domains ?? []), ...(input.domain === undefined ? [] : [input.domain])];
-    if (!targets.length || targets.some(target => typeof target !== "string" || !target.trim())) throw new Error("Provide at least one root domain in targets");
-    const request: Record<string, unknown> = { targets, transport: input.transport ?? "udp" };
-    for (const key of nativeKeys) if (input[key] !== undefined) request[key] = input[key];
-    const snapshots = previousSnapshots(input);
-    if (snapshots !== undefined) request.previous_snapshots = snapshots;
-    return request;
-}
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        const request = buildRequest(input);
-        const network = typeof Sentinel === "undefined" ? undefined : Sentinel.Network;
-        if (typeof network?.bruteForceSubdomains !== "function") throw new Error("Native Sentinel.Network.bruteForceSubdomains is unavailable; update the Sentinel host. No JavaScript DNS fallback was used.");
-        const output = await network.bruteForceSubdomains(request);
-        if (!output || typeof output !== "object" || typeof output.success !== "boolean") throw new Error("Invalid native subdomain brute force response");
-        if (!output.success || output.cancelled === true) return { ...output, success: false, error: output.error || (output.cancelled ? "Native subdomain brute force was cancelled" : "Native subdomain brute force failed") };
-        const data = output.data;
-        if (!data || !Array.isArray(data.targets) || !Array.isArray(data.subdomains) || !Array.isArray(data.results) || !Array.isArray(data.change_events) || !data.snapshots || !data.summary || !data.surface_artifacts) throw new Error("Native subdomain brute force response is missing standard result fields");
-        return { ...output, data: { ...data, changeEvents: data.change_events } };
-    } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-    }
-}
-
-const pluginGlobals = globalThis as typeof globalThis & { get_input_schema?: typeof get_input_schema; get_output_schema?: typeof get_output_schema; analyze?: typeof analyze };
-pluginGlobals.get_input_schema = get_input_schema;
-pluginGlobals.get_output_schema = get_output_schema;
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/subdomain_brute/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var nativeKeys=["dictionary_id","dictionary","resolvers","skip_wildcard","bandwidth_limit","verify_mode","max_retries","dns_timeout_seconds","max_wait_seconds",
+"verify_timeout_seconds","verify_concurrency","resolve_records","query_types","raw_records","device","__monitorExecution"];var acceptedKeys=new Set([...nativeKeys,
+"targets","domain","domains","transport","previous_snapshots","previousSnapshots"]);var stringArray=description=>({type:"array",items:{type:"string"},description});
+function get_input_schema(){const snapshot={type:"object",required:["domain","subdomains"],properties:{domain:{type:"string"},subdomains:stringArray("Previously\
+ discovered subdomains"),last_checked:{type:"string"},lastChecked:{type:"string",description:"Legacy monitor timestamp alias"}}};return{type:"object",additionalProperties:false,
+anyOf:[{required:["targets"]},{required:["domain"]},{required:["domains"]}],properties:{targets:{...stringArray("Root domains supplied by monitor seed bindings;\
+ the complete batch runs in one native call"),minItems:1},domain:{type:"string",minLength:1,description:"Single-domain compatibility alias; merged with the targ\
+et list"},domains:stringArray("Legacy monitor domain-list alias; merged without truncating targets"),dictionary_id:{type:"string",minLength:1,description:"Platf\
+orm subdomain dictionary ID. The native host reads its complete wordlist; the plugin never transfers platform dictionary words into JavaScript."},dictionary:stringArray(
+"Optional inline subdomain prefixes, forwarded unchanged. Native selection uses inline entries, the selected platform dictionary, or the configured default dict\
+ionary."),resolvers:stringArray("DNS resolver IPs or IP:port values; native engine validates and normalizes them"),skip_wildcard:{type:"boolean",default:true},bandwidth_limit:{
+type:["string","null"],default:"3M",description:"Global native engine bandwidth limit, for example 3M"},verify_mode:{type:"boolean",default:false,description:"E\
+nable native HTTP verification of discovered subdomains"},max_retries:{type:"integer",minimum:1,maximum:10,default:5},dns_timeout_seconds:{type:"integer",minimum:1,
+maximum:300,default:10},max_wait_seconds:{type:"integer",minimum:1,maximum:3600,default:10,description:"Response wait window after the initial batch has been se\
+nt. The host execution deadline covers the complete run. Unanswered queries fail rather than producing a successful empty snapshot."},verify_timeout_seconds:{type:"\
+integer",minimum:1,maximum:300,default:10},verify_concurrency:{type:"integer",minimum:1,maximum:1e3,default:50},resolve_records:{type:"boolean",default:true},query_types:{
+type:"array",items:{type:"string",enum:["a","aaaa","cname","mx","ns","txt"]},default:["a"]},raw_records:{type:"boolean",default:false},device:{type:["string","n\
+ull"],description:"Explicit network device for ethernet transport where supported"},transport:{type:"string",enum:["udp","ethernet"],default:"udp",description:"\
+UDP works with normal desktop permissions. Ethernet is an explicit raw-packet choice and must be supported; failures are not silently downgraded."},previousSnapshots:{
+type:"object",additionalProperties:snapshot,readOnly:true,description:"Host-injected previous snapshots; adapted to native previous_snapshots internally"},__monitorExecution:{
+type:"object",readOnly:true,description:"Host-injected monitor context. Passed through unchanged and checked by the native host; plugins cannot impersonate anot\
+her monitor task."}}}}function get_output_schema(){return{type:"object",required:["success"],properties:{success:{type:"boolean"},error:{type:"string"},cancelled:{
+type:"boolean"},data:{type:"object",required:["targets","subdomains","results","change_events","changeEvents","snapshots","summary","surface_artifacts"],properties:{
+stream_complete:{type:"boolean"},targets:stringArray("Complete native batch"),subdomains:stringArray("Native discovered domains"),results:{type:"array",items:{type:"\
+object"}},change_events:{type:"array",items:{type:"object"}},changeEvents:{type:"array",items:{type:"object"},description:"Monitor-compatible alias referencing \
+the same native change_events array"},snapshots:{type:"object",description:"Native snapshots keyed by root domain, retaining snake_case last_checked"},summary:{
+type:"object",properties:{total_targets:{type:"integer"},dictionary_size:{type:"integer"},dictionary_source:{type:"string"},total_discovered:{type:"integer"}}},
+surface_artifacts:{type:"object",properties:Object.fromEntries(["domains","ips","relations","evidences","changes"].map(key=>[key,{type:"array",items:{type:"obje\
+ct"}}]))}}}}}}function previousSnapshots(input){const snapshots=input.previous_snapshots??input.previousSnapshots;if(snapshots===void 0)return void 0;if(!snapshots||
+typeof snapshots!=="object"||Array.isArray(snapshots))throw new Error("previous_snapshots must be an object");return Object.fromEntries(Object.entries(snapshots).
+map(([domain,snapshot])=>{if(!snapshot||typeof snapshot!=="object"||Array.isArray(snapshot))throw new Error(`Invalid previous snapshot for ${domain}`);const{lastChecked,
+...native}=snapshot;return[domain,{...native,...native.last_checked===void 0&&lastChecked!==void 0?{last_checked:lastChecked}:{}}]}))}function buildRequest(input){
+if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Input must be an object");const unknownKeys=Object.keys(input).filter(key=>!acceptedKeys.
+has(key));if(unknownKeys.length)throw new Error(`Unsupported subdomain_brute input fields: ${unknownKeys.join(", ")}`);if(input.transport!==void 0&&input.transport!==
+"udp"&&input.transport!=="ethernet")throw new Error("transport must be udp or ethernet");if(input.targets!==void 0&&!Array.isArray(input.targets)||input.domains!==
+void 0&&!Array.isArray(input.domains))throw new Error("targets and domains must be string arrays");if(input.domain!==void 0&&typeof input.domain!=="string")throw new Error(
+"domain must be a string");const targets=[...input.targets??[],...input.domains??[],...input.domain===void 0?[]:[input.domain]];if(!targets.length||targets.some(
+target=>typeof target!=="string"||!target.trim()))throw new Error("Provide at least one root domain in targets");const request={targets,transport:input.transport??
+"udp"};for(const key of nativeKeys)if(input[key]!==void 0)request[key]=input[key];const snapshots=previousSnapshots(input);if(snapshots!==void 0)request.previous_snapshots=
+snapshots;return request}async function analyze(input){try{const stream=createMonitorResultStream(input);const request=buildRequest(input);const network=typeof Sentinel===
+"undefined"?void 0:Sentinel.Network;if(typeof network?.bruteForceSubdomains!=="function")throw new Error("Native Sentinel.Network.bruteForceSubdomains is unavai\
+lable; update the Sentinel host. No JavaScript DNS fallback was used.");const output=await network.bruteForceSubdomains(request);if(!output||typeof output!=="ob\
+ject"||typeof output.success!=="boolean")throw new Error("Invalid native subdomain brute force response");if(!output.success||output.cancelled===true)return{...output,
+success:false,error:output.error||(output.cancelled?"Native subdomain brute force was cancelled":"Native subdomain brute force failed")};const data=output.data;
+if(!data||!Array.isArray(data.targets)||!Array.isArray(data.subdomains)||!Array.isArray(data.results)||!Array.isArray(data.change_events)||!data.snapshots||!data.
+summary||!data.surface_artifacts)throw new Error("Native subdomain brute force response is missing standard result fields");if(stream.enabled&&data.stream_complete!==
+true)throw new Error("Native subdomain monitor did not acknowledge a complete result stream");return{...output,data:{...data,changeEvents:data.change_events}}}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}var pluginGlobals=globalThis;pluginGlobals.get_input_schema=get_input_schema;pluginGlobals.
+get_output_schema=get_output_schema;pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

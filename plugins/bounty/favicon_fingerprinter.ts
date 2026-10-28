@@ -3,7 +3,7 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.3.6
+ * @version 1.3.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -12,811 +12,170 @@
  * @category recon
  * @seed_bindings []
  * @default_severity info
- * @tags favicon, icon-hash, fingerprint, web, asm, surface, dictionary, capability:fetch, capability:dictionary, capability:monitor-events
+ * @tags favicon, icon-hash, fingerprint, web, asm, surface, dictionary, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
  * @description Fetch favicons from website targets, discover or enrich web assets, and emit favicon fingerprints/evidence
  */
-
-declare const Sentinel: {
-    Dictionary?: {
-        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
-        getDefaultId?(dictType: string): Promise<string | null>;
-    };
-    Monitor?: {
-        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
-    };
-};
-
-interface ToolInput {
-    targets: string[];
-    dictionaryId?: string;
-    dictionaryEntries?: RuleEntry[];
-    concurrency?: number;
-    followRedirects?: boolean;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-interface RuleEntry {
-    id?: string;
-    word: string;
-    category?: string | null;
-    metadata?: any;
-}
-
-interface FingerprintResult {
-    target: string;
-    success: boolean;
-    pageUrl?: string;
-    iconUrl?: string;
-    faviconHash?: string;
-    httpStatusCode?: number;
-    siteTitle?: string;
-    contentType?: string;
-    bytes?: number;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        targets: string[];
-        results: FingerprintResult[];
-        summary: {
-            totalTargets: number;
-            successfulFingerprints: number;
-            failedFingerprints: number;
-            emittedWebAssets: number;
-        };
-        surface_artifacts?: Record<string, any[]>;
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-const PAGE_FETCH_TIMEOUT_MS = 5000;
-const ICON_FETCH_TIMEOUT_MS = 3000;
-const DEFAULT_CONCURRENCY = 32;
-const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 32;
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.max(min, Math.min(Math.floor(parsed), max));
-}
-
-function parseMetadata(value: any): Record<string, any> {
-    if (!value) return {};
-    if (typeof value === "string") {
-        try {
-            return JSON.parse(value);
-        } catch {
-            return {};
-        }
-    }
-    return typeof value === "object" ? value : {};
-}
-
-async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
-    if (!Sentinel?.Dictionary?.getEntries) return [];
-    try {
-        const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-        return entries
-            .filter((item: any) => item && typeof item.word === "string")
-            .map((item: any) => ({
-                id: typeof item.id === "string" ? item.id : undefined,
-                word: item.word,
-                category: typeof item.category === "string" ? item.category : null,
-                metadata: parseMetadata(item.metadata),
-            }));
-    } catch {
-        return [];
-    }
-}
-
-async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
-        return input.dictionaryEntries.map(entry => ({
-            ...entry,
-            metadata: parseMetadata(entry.metadata),
-        }));
-    }
-
-    const candidates = [input.dictionaryId, "builtin_favicon_fingerprint_rules", "Favicon Fingerprint Rules"]
-        .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-
-    for (const candidate of candidates) {
-        const rules = await loadDictionaryEntries(candidate);
-        if (rules.length > 0) {
-            return rules;
-        }
-    }
-
-    return [];
-}
-
-function normalizeWebAssetKey(value: string): string {
-    const trimmed = String(value || "").trim();
-    if (!trimmed) return "";
-    try {
-        const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
-        if (url.pathname === "/") {
-            url.pathname = "";
-        }
-        if (!url.search && !url.hash) {
-            return url.toString().replace(/\/$/, "");
-        }
-        return url.toString();
-    } catch {
-        return "";
-    }
-}
-
-function normalizeTarget(value: string): string {
-    const trimmed = String(value || "").trim();
-    if (!trimmed) return "";
-    if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)) {
-        return normalizeWebAssetKey(trimmed);
-    }
-    return trimmed.replace(/\/+$/, "");
-}
-
-function hasExplicitScheme(value: string): boolean {
-    return /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value.trim());
-}
-
-function buildPageCandidates(target: string): string[] {
-    const trimmed = String(target || "").trim();
-    if (!trimmed) return [];
-    if (hasExplicitScheme(trimmed)) {
-        return [normalizeWebAssetKey(trimmed)].filter(Boolean);
-    }
-
-    const candidates = [`https://${trimmed}`, `http://${trimmed}`]
-        .map(candidate => normalizeWebAssetKey(candidate))
-        .filter(Boolean);
-    return Array.from(new Set(candidates));
-}
-
-function extractTitle(html: string): string | undefined {
-    const match = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-    if (!match?.[1]) return undefined;
-    const normalized = match[1].replace(/\s+/g, " ").trim();
-    return normalized || undefined;
-}
-
-function headersToObject(headers: Headers): Record<string, string> {
-    const result: Record<string, string> = {};
-    headers.forEach((value, key) => {
-        result[key] = value;
-    });
-    return result;
-}
-
-function buildDefaultIconCandidates(baseUrl: URL): string[] {
-    return [
-        new URL("/favicon.ico", baseUrl).toString(),
-        new URL("/favicon.png", baseUrl).toString(),
-        new URL("/apple-touch-icon.png", baseUrl).toString(),
-        new URL("/apple-touch-icon-precomposed.png", baseUrl).toString(),
-    ];
-}
-
-function parseHtmlAttributes(tagSource: string): Record<string, string> {
-    const attributes: Record<string, string> = {};
-    const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(tagSource)) !== null) {
-        const key = String(match[1] || "").toLowerCase();
-        if (!key) continue;
-        const value = match[2] ?? match[3] ?? match[4] ?? "";
-        attributes[key] = value;
-    }
-    return attributes;
-}
-
-function buildWebArtifact(
-    pageUrl: URL,
-    statusCode: number,
-    headers: Record<string, string>,
-    title: string | undefined,
-    faviconHash: string,
-): Record<string, unknown> {
-    return {
-        canonical_url: normalizeWebAssetKey(pageUrl.toString()),
-        scheme: pageUrl.protocol.replace(":", ""),
-        hostname: pageUrl.hostname,
-        port: Number(pageUrl.port || (pageUrl.protocol === "https:" ? 443 : 80)),
-        site_title: title || null,
-        http_status_code: statusCode,
-        response_headers: headers,
-        content_summary: title || `${statusCode} ${pageUrl.hostname}`,
-        favicon_hash: faviconHash,
-        source: "favicon_fingerprinter",
-        confidence: 0.95,
-    };
-}
-
-function toWrappedBase64(buffer: ArrayBuffer): string {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-    for (const byte of bytes) {
-        binary += String.fromCharCode(byte);
-    }
-    const base64 = btoa(binary);
-    return `${base64.match(/.{1,76}/g)?.join("\n") || ""}\n`;
-}
-
-function murmurHash3X86_32(value: string, seed = 0): number {
-    let remainder = value.length & 3;
-    const bytes = value.length - remainder;
-    let hash = seed;
-    let cursor = 0;
-    const c1 = 0xcc9e2d51;
-    const c2 = 0x1b873593;
-
-    while (cursor < bytes) {
-        let k1 =
-            (value.charCodeAt(cursor) & 0xff)
-            | ((value.charCodeAt(cursor + 1) & 0xff) << 8)
-            | ((value.charCodeAt(cursor + 2) & 0xff) << 16)
-            | ((value.charCodeAt(cursor + 3) & 0xff) << 24);
-        cursor += 4;
-
-        k1 = Math.imul(k1, c1);
-        k1 = (k1 << 15) | (k1 >>> 17);
-        k1 = Math.imul(k1, c2);
-
-        hash ^= k1;
-        hash = (hash << 13) | (hash >>> 19);
-        hash = (Math.imul(hash, 5) + 0xe6546b64) | 0;
-    }
-
-    let k1 = 0;
-    switch (remainder) {
-        case 3:
-            k1 ^= (value.charCodeAt(cursor + 2) & 0xff) << 16;
-        case 2:
-            k1 ^= (value.charCodeAt(cursor + 1) & 0xff) << 8;
-        case 1:
-            k1 ^= value.charCodeAt(cursor) & 0xff;
-            k1 = Math.imul(k1, c1);
-            k1 = (k1 << 15) | (k1 >>> 17);
-            k1 = Math.imul(k1, c2);
-            hash ^= k1;
-    }
-
-    hash ^= value.length;
-    hash ^= hash >>> 16;
-    hash = Math.imul(hash, 0x85ebca6b);
-    hash ^= hash >>> 13;
-    hash = Math.imul(hash, 0xc2b2ae35);
-    hash ^= hash >>> 16;
-
-    return hash | 0;
-}
-
-function computeFofaIconHash(buffer: ArrayBuffer): string {
-    return String(murmurHash3X86_32(toWrappedBase64(buffer), 0));
-}
-
-function isDirectIconTarget(url: URL, contentType: string | null): boolean {
-    const normalizedContentType = String(contentType || "").toLowerCase();
-    if (normalizedContentType.startsWith("image/")) {
-        return true;
-    }
-
-    const pathname = url.pathname.toLowerCase();
-    return pathname.endsWith(".ico")
-        || pathname.endsWith(".png")
-        || pathname.endsWith(".svg")
-        || pathname.endsWith(".gif")
-        || pathname.endsWith(".jpg")
-        || pathname.endsWith(".jpeg")
-        || pathname.endsWith(".webp")
-        || pathname.endsWith(".bmp");
-}
-
-function buildFingerprintSuccessResult(
-    target: string,
-    pageUrl: URL,
-    assetKey: string,
-    iconUrl: string,
-    buffer: ArrayBuffer,
-    contentType: string | null,
-    rules: RuleEntry[],
-    webArtifact?: Record<string, unknown>,
-    statusCode?: number,
-    siteTitle?: string,
-): FingerprintResult & { fingerprint?: any; evidence?: any } {
-    const faviconHash = computeFofaIconHash(buffer);
-    const matchedRule = matchFaviconRule(faviconHash, iconUrl, rules);
-    const metadata = parseMetadata(matchedRule?.metadata);
-    const resolvedWebArtifact = webArtifact || buildWebArtifact(
-        pageUrl,
-        statusCode || 200,
-        {},
-        siteTitle,
-        faviconHash,
-    );
-    resolvedWebArtifact.favicon_hash = faviconHash;
-    return {
-        target,
-        success: true,
-        pageUrl: assetKey,
-        iconUrl,
-        faviconHash,
-        httpStatusCode: statusCode,
-        siteTitle,
-        contentType: contentType || undefined,
-        bytes: buffer.byteLength,
-        webArtifact: resolvedWebArtifact,
-        fingerprint: matchedRule && metadata.product && metadata.asset_category
-            ? {
-                asset_type: "web",
-                asset_key: assetKey,
-                fingerprint_type: "favicon",
-                fingerprint_key: iconUrl,
-                fingerprint_value: faviconHash,
-                rule_id: metadata.rule_id || matchedRule.id || `favicon_rule:${matchedRule.word}`,
-                rule_word: matchedRule.word,
-                rule_name: metadata.name || matchedRule.word,
-                normalized_product: metadata.product,
-                normalized_vendor: metadata.vendor,
-                normalized_category: metadata.asset_category,
-                normalized_family: metadata.asset_family,
-                confidence: 0.95,
-                evidence: `Fetched favicon from ${iconUrl}`,
-            }
-            : undefined,
-        evidence: {
-            asset_type: "web",
-            asset_key: assetKey,
-            evidence_type: "favicon_metadata",
-            title: `Favicon fingerprint for ${pageUrl.hostname}`,
-            content_json: {
-                page_url: assetKey,
-                icon_url: iconUrl,
-                icon_hash: faviconHash,
-                content_type: contentType,
-                size_bytes: buffer.byteLength,
-            },
-        },
-    };
-}
-
-function extractIconCandidates(baseUrl: URL, html: string): string[] {
-    const candidates: string[] = [];
-    const pattern = /<link\b[^>]*>/gi;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(html)) !== null) {
-        const attrs = parseHtmlAttributes(match[0] || "");
-        const rel = String(attrs.rel || "").toLowerCase();
-        if (!rel.includes("icon")) continue;
-        const rawHref = String(attrs.href || "").trim();
-        if (!rawHref) continue;
-        try {
-            candidates.push(new URL(rawHref, baseUrl).toString());
-        } catch {
-            continue;
-        }
-    }
-
-    candidates.push(...buildDefaultIconCandidates(baseUrl));
-    return Array.from(new Set(candidates));
-}
-
-function matchFaviconRule(faviconHash: string, iconUrl: string, rules: RuleEntry[]): RuleEntry | undefined {
-    for (const rule of rules) {
-        const metadata = parseMetadata(rule.metadata);
-        const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
-        if (matchers.length > 0) {
-            const operator = String(metadata.operator || "or").toLowerCase();
-            const matched = operator === "and"
-                ? matchers.every((matcher: any) => {
-                    const part = String(matcher?.part || "").toLowerCase();
-                    const type = String(matcher?.type || "contains").toLowerCase();
-                    const source = part.includes("url") ? iconUrl : faviconHash;
-                    const value = String(matcher?.value || "");
-                    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
-                    if (type === "regex") {
-                        try {
-                            return new RegExp(value, "i").test(source);
-                        } catch {
-                            return false;
-                        }
-                    }
-                    return source.toLowerCase().includes(value.toLowerCase());
-                })
-                : matchers.some((matcher: any) => {
-                    const part = String(matcher?.part || "").toLowerCase();
-                    const type = String(matcher?.type || "contains").toLowerCase();
-                    const source = part.includes("url") ? iconUrl : faviconHash;
-                    const value = String(matcher?.value || "");
-                    if (type === "equals") return source.toLowerCase() === value.toLowerCase();
-                    if (type === "regex") {
-                        try {
-                            return new RegExp(value, "i").test(source);
-                        } catch {
-                            return false;
-                        }
-                    }
-                    return source.toLowerCase().includes(value.toLowerCase());
-                });
-            if (matched) {
-                return rule;
-            }
-            continue;
-        }
-
-        if (faviconHash.toLowerCase().includes(rule.word.toLowerCase())) {
-            return rule;
-        }
-    }
-
-    return undefined;
-}
-
-async function fingerprintTarget(
-    target: string,
-    followRedirects: boolean,
-    rules: RuleEntry[],
-): Promise<FingerprintResult & { fingerprint?: any; evidence?: any; webArtifact?: any }> {
-    const pageCandidates = buildPageCandidates(target);
-    if (pageCandidates.length === 0) {
-        return {
-            target,
-            success: false,
-            error: "Invalid target",
-        };
-    }
-
-    const errors: string[] = [];
-    for (const candidate of pageCandidates) {
-        try {
-            const requestedUrl = new URL(candidate);
-            const pageResponse = await fetch(
-                requestedUrl.toString(),
-                {
-                    method: "GET",
-                    redirect: followRedirects ? "follow" : "manual",
-                    timeout: PAGE_FETCH_TIMEOUT_MS,
-                },
-            );
-            const responseUrl = new URL(pageResponse.url || requestedUrl.toString());
-            const responseContentType = pageResponse.headers.get("content-type");
-            const assetKey = normalizeWebAssetKey(responseUrl.toString());
-
-            if (pageResponse.ok && isDirectIconTarget(responseUrl, responseContentType)) {
-                const buffer = await pageResponse.arrayBuffer();
-                if (!buffer || buffer.byteLength === 0) {
-                    errors.push(`${candidate}: fetched favicon is empty`);
-                    continue;
-                }
-                return buildFingerprintSuccessResult(
-                    target,
-                    new URL(`${responseUrl.protocol}//${responseUrl.host}`),
-                    normalizeWebAssetKey(`${responseUrl.protocol}//${responseUrl.host}`),
-                    responseUrl.toString(),
-                    buffer,
-                    responseContentType,
-                    rules,
-                    undefined,
-                    pageResponse.status,
-                    undefined,
-                );
-            }
-
-            const html = await pageResponse.text();
-            const siteTitle = extractTitle(html);
-            const headerObject = headersToObject(pageResponse.headers);
-            const webArtifactBase = buildWebArtifact(
-                responseUrl,
-                pageResponse.status,
-                headerObject,
-                siteTitle,
-                "",
-            );
-            const candidates = extractIconCandidates(responseUrl, html);
-
-            for (const iconUrl of candidates) {
-                try {
-                    const iconResponse = await fetch(
-                        iconUrl,
-                        {
-                            method: "GET",
-                            redirect: followRedirects ? "follow" : "manual",
-                            timeout: ICON_FETCH_TIMEOUT_MS,
-                        },
-                    );
-                    if (!iconResponse.ok) continue;
-                    const buffer = await iconResponse.arrayBuffer();
-                    if (!buffer || buffer.byteLength === 0) continue;
-                    return buildFingerprintSuccessResult(
-                        target,
-                        responseUrl,
-                        assetKey,
-                        iconUrl,
-                        buffer,
-                        iconResponse.headers.get("content-type"),
-                        rules,
-                        webArtifactBase,
-                        pageResponse.status,
-                        siteTitle,
-                    );
-                } catch (error) {
-                    errors.push(`${iconUrl}: ${error instanceof Error ? error.message : String(error)}`);
-                    continue;
-                }
-            }
-
-            errors.push(`${candidate}: no favicon candidates responded successfully`);
-        } catch (error) {
-            errors.push(`${candidate}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-
-    return {
-        target,
-        success: false,
-        error: errors[0] || "No favicon could be fetched",
-    };
-}
-
-async function runConcurrently<T>(
-    tasks: Array<() => Promise<T>>,
-    concurrency: number,
-): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workerCount = Math.min(concurrency, tasks.length);
-
-    async function worker() {
-        while (nextIndex < tasks.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            results[index] = await tasks[index]();
-        }
-    }
-
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return results;
-}
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["targets"],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "HTTP or HTTPS website URLs, or direct favicon file URLs, to fingerprint",
-            },
-            dictionaryId: {
-                type: "string",
-                "x-control": "dictionary-picker",
-                "x-dictionary-type": "fingerprint_rule",
-                description: "Structured fingerprint dictionary ID or name",
-            },
-            dictionaryEntries: {
-                type: "array",
-                description: "Structured rule entries injected by workflow",
-                items: {
-                    type: "object",
-                    properties: {
-                        id: { type: "string" },
-                        word: { type: "string" },
-                        category: { type: "string" },
-                        metadata: { type: "object" },
-                    },
-                    required: ["word"],
-                },
-            },
-            concurrency: {
-                type: "integer",
-                description: "Maximum concurrent favicon fetches",
-                default: DEFAULT_CONCURRENCY,
-                minimum: MIN_CONCURRENCY,
-                maximum: MAX_CONCURRENCY,
-            },
-            followRedirects: {
-                type: "boolean",
-                description: "Follow HTTP redirects",
-                default: true,
-            },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean" },
-            data: {
-                type: "object",
-                properties: {
-                    targets: { type: "array", items: { type: "string" } },
-                    results: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                target: { type: "string" },
-                                success: { type: "boolean" },
-                                pageUrl: { type: "string" },
-                                iconUrl: { type: "string" },
-                                faviconHash: { type: "string" },
-                                httpStatusCode: { type: "number" },
-                                siteTitle: { type: "string" },
-                                contentType: { type: "string" },
-                                bytes: { type: "number" },
-                                error: { type: "string" },
-                            },
-                            required: ["target", "success"],
-                        },
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTargets: { type: "number" },
-                            successfulFingerprints: { type: "number" },
-                            failedFingerprints: { type: "number" },
-                            emittedWebAssets: { type: "number" },
-                        },
-                        required: ["totalTargets", "successfulFingerprints", "failedFingerprints", "emittedWebAssets"],
-                    },
-                    surface_artifacts: {
-                        type: "object",
-                        description: "Favicon-driven web discovery plus fingerprint and evidence artifacts",
-                        properties: {
-                            webs: {
-                                type: "array",
-                                description: "Discovered or refreshed web assets keyed by canonical URL",
-                                items: { type: "object" },
-                            },
-                            fingerprints: {
-                                type: "array",
-                                description: "Strict favicon fingerprint artifacts with explicit rule_* and normalized_* fields",
-                                items: { type: "object" },
-                            },
-                            evidences: {
-                                type: "array",
-                                description: "Structured favicon evidence artifacts",
-                                items: { type: "object" },
-                            },
-                        },
-                    },
-                },
-            },
-            error: { type: "string" },
-        },
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!Array.isArray(input.targets) || input.targets.length === 0) {
-            return { success: false, error: "Invalid input: targets array is required" };
-        }
-
-        const targets = Array.from(new Set(input.targets.map(normalizeTarget).filter(Boolean)));
-        if (targets.length === 0) {
-            return { success: false, error: "No valid web targets provided" };
-        }
-
-        const concurrency = clampInteger(
-            input.concurrency,
-            DEFAULT_CONCURRENCY,
-            MIN_CONCURRENCY,
-            MAX_CONCURRENCY,
-        );
-        const rules = await loadRules(input);
-        const monitorExecution = input.__monitorExecution;
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: targets.length,
-            phase: "prepare",
-            message: `Preparing favicon fingerprints (${targets.length} targets, concurrency ${concurrency})`,
-        });
-
-        let completedTargets = 0;
-        const tasks = targets.map((target) => async () => {
-            try {
-                return await fingerprintTarget(target, input.followRedirects !== false, rules);
-            } finally {
-                completedTargets += 1;
-                await reportMonitorProgress(monitorExecution, {
-                    current: completedTargets,
-                    total: targets.length,
-                    currentTarget: target,
-                    phase: "fingerprint",
-                    message: `Fetched favicon fingerprint for ${target}`,
-                });
-            }
-        });
-        const fingerprints = await runConcurrently(tasks, concurrency);
-
-        return {
-            success: true,
-            data: {
-                targets,
-                results: fingerprints.map(({ fingerprint, evidence, webArtifact, ...result }) => result),
-                summary: {
-                    totalTargets: targets.length,
-                    successfulFingerprints: fingerprints.filter((item) => item.success).length,
-                    failedFingerprints: fingerprints.filter((item) => !item.success).length,
-                    emittedWebAssets: fingerprints.filter((item) => item.success && item.webArtifact).length,
-                },
-                surface_artifacts: {
-                    webs: fingerprints
-                        .map((item) => item.webArtifact)
-                        .filter(Boolean),
-                    fingerprints: fingerprints
-                        .map((item) => item.fingerprint)
-                        .filter(Boolean),
-                    evidences: fingerprints
-                        .map((item) => item.evidence)
-                        .filter(Boolean),
-                },
-            },
-        };
-    } catch (error) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/favicon_fingerprinter/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}var pluginGlobals=globalThis;var PAGE_FETCH_TIMEOUT_MS=5e3;var ICON_FETCH_TIMEOUT_MS=3e3;var DEFAULT_CONCURRENCY=32;var MIN_CONCURRENCY=1;var MAX_CONCURRENCY=32;
+async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{
+taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
+started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}function clampInteger(value,fallback,min,max){
+const parsed=Number(value);if(!Number.isFinite(parsed))return fallback;return Math.max(min,Math.min(Math.floor(parsed),max))}function parseMetadata(value){if(!value)
+return{};if(typeof value==="string"){try{return JSON.parse(value)}catch{return{}}}return typeof value==="object"?value:{}}async function loadDictionaryEntries(idOrName){
+if(!Sentinel?.Dictionary?.getEntries)return[];try{const entries=await Sentinel.Dictionary.getEntries(idOrName,1e4);return entries.filter(item=>item&&typeof item.
+word==="string").map(item=>({id:typeof item.id==="string"?item.id:void 0,word:item.word,category:typeof item.category==="string"?item.category:null,metadata:parseMetadata(
+item.metadata)}))}catch{return[]}}async function loadRules(input){if(Array.isArray(input.dictionaryEntries)&&input.dictionaryEntries.length>0){return input.dictionaryEntries.
+map(entry=>({...entry,metadata:parseMetadata(entry.metadata)}))}const candidates=[input.dictionaryId,"builtin_favicon_fingerprint_rules","Favicon Fingerprint Ru\
+les"].filter(value=>typeof value==="string"&&value.trim().length>0);for(const candidate of candidates){const rules=await loadDictionaryEntries(candidate);if(rules.
+length>0){return rules}}return[]}function normalizeWebAssetKey(value){const trimmed=String(value||"").trim();if(!trimmed)return"";try{const url=new URL(trimmed.
+includes("://")?trimmed:`https://${trimmed}`);if(url.pathname==="/"){url.pathname=""}if(!url.search&&!url.hash){return url.toString().replace(/\/$/,"")}return url.
+toString()}catch{return""}}function normalizeTarget(value){const trimmed=String(value||"").trim();if(!trimmed)return"";if(/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(trimmed)){
+return normalizeWebAssetKey(trimmed)}return trimmed.replace(/\/+$/,"")}function hasExplicitScheme(value){return/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value.trim())}
+function buildPageCandidates(target){const trimmed=String(target||"").trim();if(!trimmed)return[];if(hasExplicitScheme(trimmed)){return[normalizeWebAssetKey(trimmed)].
+filter(Boolean)}const candidates=[`https://${trimmed}`,`http://${trimmed}`].map(candidate=>normalizeWebAssetKey(candidate)).filter(Boolean);return Array.from(new Set(
+candidates))}function extractTitle(html){const match=/<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);if(!match?.[1])return void 0;const normalized=match[1].replace(
+/\s+/g," ").trim();return normalized||void 0}function headersToObject(headers){const result={};headers.forEach((value,key)=>{result[key]=value});return result}function buildDefaultIconCandidates(baseUrl){
+return[new URL("/favicon.ico",baseUrl).toString(),new URL("/favicon.png",baseUrl).toString(),new URL("/apple-touch-icon.png",baseUrl).toString(),new URL("/apple\
+-touch-icon-precomposed.png",baseUrl).toString()]}function parseHtmlAttributes(tagSource){const attributes={};const pattern=/([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+let match;while((match=pattern.exec(tagSource))!==null){const key=String(match[1]||"").toLowerCase();if(!key)continue;const value=match[2]??match[3]??match[4]??
+"";attributes[key]=value}return attributes}function buildWebArtifact(pageUrl,statusCode,headers,title,faviconHash){return{canonical_url:normalizeWebAssetKey(pageUrl.
+toString()),scheme:pageUrl.protocol.replace(":",""),hostname:pageUrl.hostname,port:Number(pageUrl.port||(pageUrl.protocol==="https:"?443:80)),site_title:title||
+null,http_status_code:statusCode,response_headers:headers,content_summary:title||`${statusCode} ${pageUrl.hostname}`,favicon_hash:faviconHash,source:"favicon_fi\
+ngerprinter",confidence:.95}}function toWrappedBase64(buffer){const bytes=new Uint8Array(buffer);let binary="";for(const byte of bytes){binary+=String.fromCharCode(
+byte)}const base64=btoa(binary);return`${base64.match(/.{1,76}/g)?.join("\n")||""}
+`}function murmurHash3X86_32(value,seed=0){let remainder=value.length&3;const bytes=value.length-remainder;let hash=seed;let cursor=0;const c1=3432918353;const c2=461845907;
+while(cursor<bytes){let k12=value.charCodeAt(cursor)&255|(value.charCodeAt(cursor+1)&255)<<8|(value.charCodeAt(cursor+2)&255)<<16|(value.charCodeAt(cursor+3)&255)<<
+24;cursor+=4;k12=Math.imul(k12,c1);k12=k12<<15|k12>>>17;k12=Math.imul(k12,c2);hash^=k12;hash=hash<<13|hash>>>19;hash=Math.imul(hash,5)+3864292196|0}let k1=0;switch(remainder){case 3:
+k1^=(value.charCodeAt(cursor+2)&255)<<16;case 2:k1^=(value.charCodeAt(cursor+1)&255)<<8;case 1:k1^=value.charCodeAt(cursor)&255;k1=Math.imul(k1,c1);k1=k1<<15|k1>>>
+17;k1=Math.imul(k1,c2);hash^=k1}hash^=value.length;hash^=hash>>>16;hash=Math.imul(hash,2246822507);hash^=hash>>>13;hash=Math.imul(hash,3266489909);hash^=hash>>>
+16;return hash|0}function computeFofaIconHash(buffer){return String(murmurHash3X86_32(toWrappedBase64(buffer),0))}function isDirectIconTarget(url,contentType){const normalizedContentType=String(
+contentType||"").toLowerCase();if(normalizedContentType.startsWith("image/")){return true}const pathname=url.pathname.toLowerCase();return pathname.endsWith(".i\
+co")||pathname.endsWith(".png")||pathname.endsWith(".svg")||pathname.endsWith(".gif")||pathname.endsWith(".jpg")||pathname.endsWith(".jpeg")||pathname.endsWith(
+".webp")||pathname.endsWith(".bmp")}function buildFingerprintSuccessResult(target,pageUrl,assetKey,iconUrl,buffer,contentType,rules,webArtifact,statusCode,siteTitle){
+const faviconHash=computeFofaIconHash(buffer);const matchedRule=matchFaviconRule(faviconHash,iconUrl,rules);const metadata=parseMetadata(matchedRule?.metadata);
+const resolvedWebArtifact=webArtifact||buildWebArtifact(pageUrl,statusCode||200,{},siteTitle,faviconHash);resolvedWebArtifact.favicon_hash=faviconHash;return{target,
+success:true,pageUrl:assetKey,iconUrl,faviconHash,httpStatusCode:statusCode,siteTitle,contentType:contentType||void 0,bytes:buffer.byteLength,webArtifact:resolvedWebArtifact,
+fingerprint:matchedRule&&metadata.product&&metadata.asset_category?{asset_type:"web",asset_key:assetKey,fingerprint_type:"favicon",fingerprint_key:iconUrl,fingerprint_value:faviconHash,
+rule_id:metadata.rule_id||matchedRule.id||`favicon_rule:${matchedRule.word}`,rule_word:matchedRule.word,rule_name:metadata.name||matchedRule.word,normalized_product:metadata.
+product,normalized_vendor:metadata.vendor,normalized_category:metadata.asset_category,normalized_family:metadata.asset_family,confidence:.95,evidence:`Fetched f\
+avicon from ${iconUrl}`}:void 0,evidence:{asset_type:"web",asset_key:assetKey,evidence_type:"favicon_metadata",title:`Favicon fingerprint for ${pageUrl.hostname}`,
+content_json:{page_url:assetKey,icon_url:iconUrl,icon_hash:faviconHash,content_type:contentType,size_bytes:buffer.byteLength}}}}function extractIconCandidates(baseUrl,html){
+const candidates=[];const pattern=/<link\b[^>]*>/gi;let match;while((match=pattern.exec(html))!==null){const attrs=parseHtmlAttributes(match[0]||"");const rel=String(
+attrs.rel||"").toLowerCase();if(!rel.includes("icon"))continue;const rawHref=String(attrs.href||"").trim();if(!rawHref)continue;try{candidates.push(new URL(rawHref,
+baseUrl).toString())}catch{continue}}candidates.push(...buildDefaultIconCandidates(baseUrl));return Array.from(new Set(candidates))}function matchFaviconRule(faviconHash,iconUrl,rules){
+for(const rule of rules){const metadata=parseMetadata(rule.metadata);const matchers=Array.isArray(metadata.matchers)?metadata.matchers:[];if(matchers.length>0){
+const operator=String(metadata.operator||"or").toLowerCase();const matched=operator==="and"?matchers.every(matcher=>{const part=String(matcher?.part||"").toLowerCase();
+const type=String(matcher?.type||"contains").toLowerCase();const source=part.includes("url")?iconUrl:faviconHash;const value=String(matcher?.value||"");if(type===
+"equals")return source.toLowerCase()===value.toLowerCase();if(type==="regex"){try{return new RegExp(value,"i").test(source)}catch{return false}}return source.toLowerCase().
+includes(value.toLowerCase())}):matchers.some(matcher=>{const part=String(matcher?.part||"").toLowerCase();const type=String(matcher?.type||"contains").toLowerCase();
+const source=part.includes("url")?iconUrl:faviconHash;const value=String(matcher?.value||"");if(type==="equals")return source.toLowerCase()===value.toLowerCase();
+if(type==="regex"){try{return new RegExp(value,"i").test(source)}catch{return false}}return source.toLowerCase().includes(value.toLowerCase())});if(matched){return rule}
+continue}if(faviconHash.toLowerCase().includes(rule.word.toLowerCase())){return rule}}return void 0}async function fingerprintTarget(target,followRedirects,rules,monitor){
+const pageCandidates=buildPageCandidates(target);if(pageCandidates.length===0){return{target,success:false,error:"Invalid target"}}const errors=[];for(const candidate of pageCandidates){
+monitor?.assertHealthy();let pageRecorded=false;try{const requestedUrl=new URL(candidate);const pageResponse=await fetch(requestedUrl.toString(),{method:"GET",redirect:followRedirects?
+"follow":"manual",timeout:PAGE_FETCH_TIMEOUT_MS});const responseUrl=new URL(pageResponse.url||requestedUrl.toString());const responseContentType=pageResponse.headers.
+get("content-type");const assetKey=normalizeWebAssetKey(responseUrl.toString());if(pageResponse.ok&&isDirectIconTarget(responseUrl,responseContentType)){const buffer=await pageResponse.
+arrayBuffer();if(!buffer||buffer.byteLength===0){errors.push(`${candidate}: fetched favicon is empty`);continue}pageRecorded=true;await monitor?.onProbe(`page:${candidate}`,
+{url:candidate,status:pageResponse.status,bytes:buffer.byteLength});return buildFingerprintSuccessResult(target,new URL(`${responseUrl.protocol}//${responseUrl.
+host}`),normalizeWebAssetKey(`${responseUrl.protocol}//${responseUrl.host}`),responseUrl.toString(),buffer,responseContentType,rules,void 0,pageResponse.status,
+void 0)}const html=await pageResponse.text();pageRecorded=true;await monitor?.onProbe(`page:${candidate}`,{url:candidate,status:pageResponse.status,bytes:html.length});
+const siteTitle=extractTitle(html);const headerObject=headersToObject(pageResponse.headers);const webArtifactBase=buildWebArtifact(responseUrl,pageResponse.status,
+headerObject,siteTitle,"");const candidates=extractIconCandidates(responseUrl,html);for(const iconUrl of candidates){monitor?.assertHealthy();let iconStatus;let iconError;
+try{const iconResponse=await fetch(iconUrl,{method:"GET",redirect:followRedirects?"follow":"manual",timeout:ICON_FETCH_TIMEOUT_MS});iconStatus=iconResponse.status;
+if(!iconResponse.ok)continue;const buffer=await iconResponse.arrayBuffer();if(!buffer||buffer.byteLength===0)continue;return buildFingerprintSuccessResult(target,
+responseUrl,assetKey,iconUrl,buffer,iconResponse.headers.get("content-type"),rules,webArtifactBase,pageResponse.status,siteTitle)}catch(error){monitor?.assertHealthy();
+iconError=error instanceof Error?error.message:String(error);errors.push(`${iconUrl}: ${iconError}`);continue}finally{await monitor?.onProbe(`icon:${iconUrl}`,{
+url:iconUrl,status:iconStatus,error:iconError},iconError)}}errors.push(`${candidate}: no favicon candidates responded successfully`)}catch(error){monitor?.assertHealthy();
+const message=error instanceof Error?error.message:String(error);if(!pageRecorded)await monitor?.onProbe(`page:${candidate}`,{url:candidate,error:message},message);
+errors.push(`${candidate}: ${message}`)}}return{target,success:false,error:errors[0]||"No favicon could be fetched"}}async function runConcurrently(tasks,concurrency,retainResults=true){
+const results=retainResults?new Array(tasks.length):[];let nextIndex=0;const workerCount=Math.min(concurrency,tasks.length);async function worker(){while(nextIndex<
+tasks.length){const index=nextIndex;nextIndex+=1;const result=await tasks[index]();if(retainResults)results[index]=result}}await Promise.all(Array.from({length:workerCount},
+()=>worker()));return results}function get_input_schema(){return{type:"object",required:["targets"],properties:{targets:{type:"array",items:{type:"string"},description:"\
+HTTP or HTTPS website URLs, or direct favicon file URLs, to fingerprint"},target_objects:{type:"array",items:{type:"object"},description:"Runtime Web inventory \
+identities supplied by the monitor host"},dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionary-type":"fingerprint_rule",description:"Struct\
+ured fingerprint dictionary ID or name"},dictionaryEntries:{type:"array",description:"Structured rule entries injected by workflow",items:{type:"object",properties:{
+id:{type:"string"},word:{type:"string"},category:{type:"string"},metadata:{type:"object"}},required:["word"]}},concurrency:{type:"integer",description:"Maximum \
+concurrent favicon fetches",default:DEFAULT_CONCURRENCY,minimum:MIN_CONCURRENCY,maximum:MAX_CONCURRENCY},followRedirects:{type:"boolean",description:"Follow HTT\
+P redirects",default:true}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"object",properties:{success:{type:"boolea\
+n"},data:{type:"object",properties:{targets:{type:"array",items:{type:"string"}},results:{type:"array",items:{type:"object",properties:{target:{type:"string"},success:{
+type:"boolean"},pageUrl:{type:"string"},iconUrl:{type:"string"},faviconHash:{type:"string"},httpStatusCode:{type:"number"},siteTitle:{type:"string"},contentType:{
+type:"string"},bytes:{type:"number"},error:{type:"string"}},required:["target","success"]}},summary:{type:"object",properties:{totalTargets:{type:"number"},successfulFingerprints:{
+type:"number"},failedFingerprints:{type:"number"},emittedWebAssets:{type:"number"}},required:["totalTargets","successfulFingerprints","failedFingerprints","emit\
+tedWebAssets"]},surface_artifacts:{type:"object",description:"Favicon-driven web discovery plus fingerprint and evidence artifacts",properties:{webs:{type:"arra\
+y",description:"Discovered or refreshed web assets keyed by canonical URL",items:{type:"object"}},fingerprints:{type:"array",description:"Strict favicon fingerp\
+rint artifacts with explicit rule_* and normalized_* fields",items:{type:"object"}},evidences:{type:"array",description:"Structured favicon evidence artifacts",
+items:{type:"object"}}}}}},error:{type:"string"}}}}pluginGlobals.get_output_schema=get_output_schema;async function analyze(input){try{const stream=createMonitorResultStream(
+input);const writeTarget=createMonitorTargetWriter(input,stream,normalizeTarget);const existingWebTargets=new Set((input.target_objects||[]).filter(item=>item.type===
+"web"&&item.source==="surface_asset"&&typeof item.asset_id==="string"&&item.asset_id.length>0).map(item=>normalizeTarget(item.value)));if(!Array.isArray(input.targets)||
+input.targets.length===0){return{success:false,error:"Invalid input: targets array is required"}}const targets=Array.from(new Set(input.targets.map(normalizeTarget).
+filter(Boolean)));if(targets.length===0){return{success:false,error:"No valid web targets provided"}}const concurrency=clampInteger(input.concurrency,DEFAULT_CONCURRENCY,
+MIN_CONCURRENCY,MAX_CONCURRENCY);const rules=await loadRules(input);const monitorExecution=input.__monitorExecution;await reportMonitorProgress(monitorExecution,
+{current:0,total:targets.length,phase:"prepare",message:`Preparing favicon fingerprints (${targets.length} targets, concurrency ${concurrency})`});let completedTargets=0;
+const tasks=targets.map(target=>async()=>{stream.assertHealthy();try{const item=await fingerprintTarget(target,input.followRedirects!==false,rules,{assertHealthy:()=>stream.
+assertHealthy(),onProbe:async(key,result2,error)=>{await writeTarget(target,key,{success:true,data:{results:[result2]}},{complete:false,status:error?"failed":"o\
+k",error})}});const{fingerprint,evidence,webArtifact,...result}=item;const enrichExisting=stream.enabled&&existingWebTargets.has(target);const boundFingerprint=fingerprint&&
+enrichExisting?{...fingerprint,asset_key:target}:fingerprint;const boundEvidence=evidence&&enrichExisting?{...evidence,asset_key:target}:evidence;const discoveredWeb=enrichExisting?
+void 0:webArtifact;await writeTarget(target,target,{success:true,data:{results:[result],summary:{totalTargets:1,successfulFingerprints:item.success?1:0,failedFingerprints:item.
+success?0:1,emittedWebAssets:discoveredWeb?1:0},surface_artifacts:{webs:discoveredWeb?[discoveredWeb]:[],fingerprints:boundFingerprint?[boundFingerprint]:[],evidences:boundEvidence?
+[boundEvidence]:[]}}},{status:item.success?"ok":"failed",error:item.error,complete:true});return item}finally{completedTargets+=1;await reportMonitorProgress(monitorExecution,
+{current:completedTargets,total:targets.length,currentTarget:target,phase:"fingerprint",message:`Fetched favicon fingerprint for ${target}`})}});const fingerprints=await runConcurrently(
+tasks,concurrency,!stream.enabled);return await stream.finish({success:true,data:{targets,results:fingerprints.map(({fingerprint,evidence,webArtifact,...result})=>result),
+summary:{totalTargets:targets.length,successfulFingerprints:fingerprints.filter(item=>item.success).length,failedFingerprints:fingerprints.filter(item=>!item.success).
+length,emittedWebAssets:fingerprints.filter(item=>item.success&&item.webArtifact).length},surface_artifacts:{webs:fingerprints.map(item=>item.webArtifact).filter(
+Boolean),fingerprints:fingerprints.map(item=>item.fingerprint).filter(Boolean),evidences:fingerprints.map(item=>item.evidence).filter(Boolean)}}})}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

@@ -11,6 +11,12 @@ This repository contains community-contributed and official plugins for Sentinel
 - **Agent Tool Plugins** - Provide tools for AI agents to perform security tasks
 - **Bug Bounty Plugins** - Execution plugins for bug bounty asset discovery, verification, and monitoring
 
+All 20 bounty plugins now use acknowledged incremental results during monitor
+execution. Results are saved in bounded batches, and only confirmed new saves
+renew the execution budget. Source modules, protocol requirements, snapshot
+boundaries, and local verification commands are documented in
+[Monitor result streams](docs/monitor-results-stream.md).
+
 ## Directory Structure
 
 ```

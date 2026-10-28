@@ -3,7 +3,7 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.5.0
+ * @version 2.6.0
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -12,827 +12,177 @@
  * @target_asset_types ["web"]
  * @seed_bindings []
  * @default_severity info
- * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events, monitor:technology-stream-v1
+ * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
  * @description Identify web technologies using dictionary-driven fingerprint rules with structured matchers.
  */
-
-declare const Sentinel: {
-    Dictionary?: {
-        get?(idOrName: string): Promise<any>;
-        getDefaultId?(dictType: string): Promise<string | null>;
-        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
-    };
-    Monitor?: {
-        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
-        commitResults?(request: Record<string, unknown>): Promise<{ ok: boolean; sequence: number }> | { ok: boolean; sequence: number };
-    };
-};
-
-interface ToolInput {
-    url?: string;
-    base_url?: string;
-    targets?: string[];
-    target_objects?: Array<{ type: string; value: string; source: string; asset_id?: string }>;
-    dictionaryId?: string;
-    dictionaryEntries?: RuleEntry[];
-    concurrency?: number;
-    userAgent?: string;
-    previousSnapshots?: Record<string, TechnologySnapshot>;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-    result_stream?: { protocol: "technology-v1"; max_targets: number; max_pending_commits?: number };
-}
-
-interface RuleEntry {
-    id?: string;
-    word: string;
-    category?: string | null;
-    metadata?: any;
-}
-
-interface TechnologyResult {
-    name: string;
-    category: string;
-    version?: string;
-    confidence?: number;
-    evidence: string[];
-}
-
-interface PerTargetResult {
-    url: string;
-    technologies: TechnologyResult[];
-    status: "identified" | "unidentified" | "failed";
-    error?: string;
-    http_status?: number;
-    final_url?: string;
-    checked_at: string;
-    failure_category?: string;
-    timings?: Record<string, number | string | null>;
-}
-
-interface TechnologySnapshot {
-    url: string;
-    technologies: Array<{
-        name: string;
-        category: string;
-        version?: string;
-    }>;
-    lastChecked: string;
-}
-
-interface ChangeEvent {
-    id: string;
-    assetId: string;
-    eventType: string;
-    severity: "low" | "medium" | "high" | "critical";
-    title: string;
-    description: string;
-    oldValue?: string;
-    newValue?: string;
-    detectionMethod: string;
-    tags: string[];
-    autoTriggerEnabled: boolean;
-    riskScore: number;
-    metadata: Record<string, any>;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        stream_complete?: boolean;
-        results: PerTargetResult[];
-        technologies: TechnologyResult[];
-        changeEvents: ChangeEvent[];
-        snapshots: Record<string, TechnologySnapshot>;
-        summary: {
-            totalTargets: number;
-            matchedTargets: number;
-            identifiedTechnologies: number;
-            technologyChanges: number;
-            failedTargets: number;
-            skippedTargets: number;
-            diagnostics?: Record<string, number>;
-        };
-        surface_artifacts?: Record<string, any[]>;
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_CONCURRENCY = 32;
-const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 32;
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.max(min, Math.min(Math.floor(parsed), max));
-}
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        properties: {
-            url: { type: "string", description: "Target URL" },
-            base_url: { type: "string", description: "Base URL alias" },
-            targets: { type: "array", items: { type: "string" }, description: "Multiple target URLs" },
-            target_objects: { type: "array", items: { type: "object" }, description: "Runtime Web asset references supplied by the monitor host" },
-            dictionaryId: { type: "string", "x-control": "dictionary-picker", "x-dictionary-type": "fingerprint_rule", description: "Structured fingerprint dictionary ID or name" },
-            dictionaryEntries: { type: "array", description: "Structured rule entries injected by workflow" },
-            concurrency: {
-                type: "integer",
-                default: DEFAULT_CONCURRENCY,
-                minimum: MIN_CONCURRENCY,
-                maximum: MAX_CONCURRENCY,
-            },
-            userAgent: { type: "string", default: "Sentinel-Tech-Fingerprinter/2.0" },
-            previousSnapshots: { type: "object", description: "Previous technology snapshots keyed by target URL" },
-        },
-    };
-}
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean" },
-            data: {
-                type: "object",
-                properties: {
-                    results: { type: "array" },
-                    technologies: { type: "array" },
-                    changeEvents: { type: "array" },
-                    snapshots: { type: "object" },
-                    summary: { type: "object" },
-                    surface_artifacts: {
-                        type: "object",
-                        properties: {
-                            fingerprints: {
-                                type: "array",
-                                description: "Strict normalized fingerprint artifacts with rule_id, rule_word, rule_name, normalized_product, and normalized_category",
-                            },
-                            evidences: {
-                                type: "array",
-                                description: "Structured evidence artifacts describing captured technology snapshots",
-                            },
-                        },
-                    },
-                },
-            },
-            error: { type: "string" },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-pluginGlobals.get_output_schema = get_output_schema;
-
-async function runConcurrently<T>(
-    tasks: Array<() => Promise<T>>,
-    concurrency: number,
-): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    let stopped = false;
-    const workerCount = Math.min(concurrency, tasks.length);
-
-    async function worker() {
-        while (!stopped && nextIndex < tasks.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            try { results[index] = await tasks[index](); }
-            catch (error) { stopped = true; throw error; }
-        }
-    }
-
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return results;
-}
-
-function normalizeTarget(raw: unknown): string {
-    if (typeof raw !== "string" || !raw || raw.trim() !== raw || /[\s\x00-\x1f\x7f\\]/.test(raw)) {
-        throw new Error("Target must be a non-empty URL without whitespace");
-    }
-    if (!/^https?:\/\/[^/\\]/i.test(raw)) throw new Error("Target must start with http:// or https:// and a host");
-    const url = new URL(raw);
-    if (!/^https?:$/i.test(url.protocol) || !url.hostname || url.username || url.password || raw.includes("#") || url.port === "0") {
-        throw new Error("Target must be an absolute HTTP(S) URL without credentials or a fragment");
-    }
-    if (!url.hostname.startsWith("[")) {
-        const host = url.hostname.replace(/\.$/, "");
-        if (host.length > 253 || host.split(".").some(label => label.length > 63
-            || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))) {
-            throw new Error("Target must contain a valid DNS hostname or IP address");
-        }
-    }
-    // Preserve the exact asset identity; validation must not rewrite a stored key.
-    return raw;
-}
-
-function parseTitle(html: string): string {
-    const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    return match?.[1]?.trim() || "";
-}
-
-function parseMetadata(value: any): Record<string, any> {
-    if (!value) return {};
-    if (typeof value === "string") {
-        try {
-            return JSON.parse(value);
-        } catch {
-            return {};
-        }
-    }
-    return typeof value === "object" ? value : {};
-}
-
-async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
-    if (!Sentinel?.Dictionary?.getEntries) throw new Error("Dictionary API unavailable; capability:dictionary is required");
-    const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-    return entries
-        .filter((item: any) => item && typeof item.word === "string")
-        .map((item: any) => ({
-            id: typeof item.id === "string" ? item.id : undefined,
-            word: item.word,
-            category: typeof item.category === "string" ? item.category : null,
-            metadata: parseMetadata(item.metadata),
-        }));
-}
-
-async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0) {
-        return input.dictionaryEntries.map(entry => ({
-            ...entry,
-            metadata: parseMetadata(entry.metadata),
-        }));
-    }
-
-    const dictionaryId = input.dictionaryId || (Sentinel?.Dictionary?.getDefaultId
-        ? await Sentinel.Dictionary.getDefaultId("fingerprint_rule") : null);
-    if (!dictionaryId) throw new Error("Configure a fingerprint_rule dictionary before probing");
-    return await loadDictionaryEntries(dictionaryId);
-}
-
-async function fetchPage(url: string, userAgent: string): Promise<Response> {
-    const options: RequestInit & { timeout: number } = {
-        method: "GET",
-        redirect: "follow",
-        headers: {
-            "User-Agent": userAgent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-        timeout: DEFAULT_TIMEOUT_MS,
-    };
-    return await fetch(url, options);
-}
-
-function normalizeTechnologySnapshot(technologies: Array<{ name: string; category: string; version?: string }>): Array<{ name: string; category: string; version?: string }> {
-    const unique = new Map<string, { name: string; category: string; version?: string }>();
-    for (const technology of technologies) {
-        const normalized = {
-            name: String(technology.name || "").trim(),
-            category: String(technology.category || "technology").trim() || "technology",
-            version: technology.version ? String(technology.version).trim() : undefined,
-        };
-        if (!normalized.name) continue;
-        const key = `${normalized.name.toLowerCase()}::${normalized.category.toLowerCase()}`;
-        unique.set(key, normalized);
-    }
-    return Array.from(unique.values()).sort((left, right) => {
-        const categoryCompare = left.category.localeCompare(right.category);
-        return categoryCompare !== 0 ? categoryCompare : left.name.localeCompare(right.name);
-    });
-}
-
-function buildTechnologyEventId(url: string, timestamp: string): string {
-    return `technology-${url}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
-}
-
-function createTechnologyChangeEvent(
-    url: string,
-    added: Array<{ name: string; category: string; version?: string }>,
-    removed: Array<{ name: string; category: string; version?: string }>,
-    updated: Array<{ name: string; category: string; oldVersion?: string; newVersion?: string }>,
-    timestamp: string,
-): ChangeEvent {
-    const severity: ChangeEvent["severity"] = removed.length > 0 || updated.length > 0 ? "medium" : "low";
-    const parts: string[] = [];
-    if (added.length > 0) {
-        parts.push(`added ${added.map(item => `${item.name}${item.version ? ` ${item.version}` : ""}`).join(", ")}`);
-    }
-    if (removed.length > 0) {
-        parts.push(`removed ${removed.map(item => `${item.name}${item.version ? ` ${item.version}` : ""}`).join(", ")}`);
-    }
-    if (updated.length > 0) {
-        parts.push(`updated ${updated.map(item => `${item.name} ${item.oldVersion || "unknown"} -> ${item.newVersion || "unknown"}`).join(", ")}`);
-    }
-    return {
-        id: buildTechnologyEventId(url, timestamp),
-        assetId: url,
-        eventType: "technology_change",
-        severity,
-        title: `Technology stack changed for ${url}`,
-        description: parts.join("; "),
-        oldValue: JSON.stringify({ removed, updated: updated.map(item => ({ name: item.name, category: item.category, version: item.oldVersion })) }),
-        newValue: JSON.stringify({ added, updated: updated.map(item => ({ name: item.name, category: item.category, version: item.newVersion })) }),
-        detectionMethod: "tech_fingerprinter",
-        tags: ["technology", "change", "fingerprint"],
-        autoTriggerEnabled: true,
-        riskScore: removed.length > 0 || updated.length > 0 ? 58 : 40,
-        metadata: {
-            url,
-            added,
-            removed,
-            updated,
-        },
-    };
-}
-
-function matcherHit(ctx: Record<string, any>, matcher: any): boolean {
-    const part = String(matcher?.part || "body").toLowerCase();
-    const type = String(matcher?.type || "contains").toLowerCase();
-    const value = matcher?.value;
-
-    if (part === "status") {
-        if (type === "in" && Array.isArray(value)) return value.includes(ctx.status);
-        return ctx.status === value;
-    }
-
-    const source = part === "header"
-        ? String(ctx.headers[String(matcher?.key || "").toLowerCase()] || "")
-        : part === "title"
-            ? ctx.title
-            : ctx.body;
-
-    if (type === "exists") return source.length > 0;
-    if (type === "equals") return source === String(value || "");
-    if (type === "regex") {
-        try {
-            return new RegExp(String(value || ""), "i").test(source);
-        } catch {
-            return false;
-        }
-    }
-    if (type === "in" && Array.isArray(value)) return value.includes(source);
-    return source.toLowerCase().includes(String(value || "").toLowerCase());
-}
-
-function matchedEvidence(ctx: Record<string, any>, metadata: Record<string, any>): Array<{part: string; key?: string; value: string}> {
-    const matchers = Array.isArray(metadata.matchers) ? metadata.matchers : [];
-    if (matchers.length === 0) throw new Error("Fingerprint rule requires explicit matchers");
-    const hits = matchers.filter((matcher: any) => matcherHit(ctx, matcher));
-    if (String(metadata.operator || "or").toLowerCase() === "and" && hits.length !== matchers.length) return [];
-    return hits.map((matcher: any) => {
-        const part = String(matcher.part || "body").toLowerCase();
-        const key = part === "header" ? String(matcher.key).toLowerCase() : undefined;
-        const source = part === "header" ? String(ctx.headers[key!] || "") : part === "title" ? ctx.title : part === "status" ? String(ctx.status) : ctx.body;
-        let value = String(matcher.value || "");
-        if (matcher.type === "regex") value = source.match(new RegExp(value, "i"))?.[0] || "";
-        if (matcher.type === "exists") value = "[present]";
-        if (key === "set-cookie") {
-            // Only cookie names are evidence; discard every value and attribute.
-            value = value.split("=")[0].replace(/^[\s;,]+/, "") + "=[REDACTED]";
-        } else if (key && /authorization|cookie|token|secret|api[-_]?key/i.test(key)) {
-            value = "[REDACTED]";
-        }
-        value = value.replace(/((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s;<>"']+/gi, "$1[REDACTED]");
-        return { part, key, value: value.slice(0, 180) };
-    });
-}
-
-function extractVersion(ctx: Record<string, any>, metadata: Record<string, any>): string | undefined {
-    const patterns = Array.isArray(metadata.version_patterns) ? metadata.version_patterns : [];
-    for (const item of patterns) {
-        const part = String(item?.part || "").toLowerCase();
-        const source = part === "header"
-            ? String(ctx.headers[String(item?.key || "").toLowerCase()] || "")
-            : part === "title"
-                ? ctx.title
-                : ctx.body;
-        try {
-            const match = source.match(new RegExp(String(item?.pattern || ""), "i"));
-            if (match?.[1]) return match[1];
-        } catch {
-            continue;
-        }
-    }
-    return undefined;
-}
-
-function normalizeConfidence(value: unknown): number | undefined {
-    const numeric = value == null ? NaN : Number(value);
-    if (!Number.isFinite(numeric)) {
-        return undefined;
-    }
-    if (numeric > 1) {
-        return Math.max(0, Math.min(numeric / 100, 1));
-    }
-    return Math.max(0, Math.min(numeric, 1));
-}
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        const scanStartedAt = Date.now();
-        const concurrency = clampInteger(
-            input.concurrency,
-            DEFAULT_CONCURRENCY,
-            MIN_CONCURRENCY,
-            MAX_CONCURRENCY,
-        );
-        const userAgent = input.userAgent || "Sentinel-Tech-Fingerprinter/2.0";
-        if (input.targets !== undefined && !Array.isArray(input.targets)) {
-            return { success: false, error: "targets must be an array" };
-        }
-        const rawTargets: unknown[] = [
-            ...(input.url !== undefined ? [input.url] : []),
-            ...(input.base_url !== undefined ? [input.base_url] : []),
-            ...(input.targets || []),
-        ];
-        if (rawTargets.length === 0) return { success: false, error: "At least one target URL is required" };
-        const targets: string[] = [];
-        let skippedTargets = 0;
-        let eligibleMonitorTargets: Set<string> | undefined;
-        if (input.__monitorExecution || input.target_objects !== undefined) {
-            if (!Array.isArray(input.target_objects)) throw new Error("Monitor target_objects must contain existing Web asset references");
-            eligibleMonitorTargets = new Set(input.target_objects
-                .filter(item => item && item.type === "web" && item.source === "surface_asset"
-                    && typeof item.asset_id === "string" && item.asset_id.trim().length > 0
-                    && typeof item.value === "string")
-                .map(item => item.value));
-        }
-        const seen = new Set<unknown>();
-        for (let index = 0; index < rawTargets.length; index++) {
-            if (seen.has(rawTargets[index])) continue;
-            seen.add(rawTargets[index]);
-            try {
-                const target = normalizeTarget(rawTargets[index]);
-                if (eligibleMonitorTargets && !eligibleMonitorTargets.has(target)) { skippedTargets++; continue; }
-                targets.push(target);
-            } catch {
-                // Do not persist a rejected raw value: it may contain credentials.
-                skippedTargets++;
-            }
-        }
-
-        const dictionaryStartedAt = Date.now();
-        const rules = targets.length > 0 ? await loadRules(input) : [];
-        const dictionaryLoadMs = Date.now() - dictionaryStartedAt;
-        if (targets.length > 0 && rules.length === 0) {
-            return {
-                success: false,
-                error: "No technology fingerprint rules loaded. Configure dictionaryEntries or a fingerprint_rule dictionary with explicit matchers.",
-            };
-        }
-        for (const rule of rules) {
-            const metadata = parseMetadata(rule.metadata);
-            if (!Array.isArray(metadata.matchers) || metadata.matchers.length === 0) {
-                throw new Error(`Fingerprint rule ${rule.word} requires explicit matchers`);
-            }
-            if (metadata.operator && !["and", "or"].includes(metadata.operator)) throw new Error(`Invalid operator in fingerprint rule ${rule.word}`);
-            for (const matcher of metadata.matchers) {
-                if (!["header", "body", "title", "status"].includes(matcher.part)) throw new Error(`Invalid source part in fingerprint rule ${rule.word}`);
-                if (matcher.part === "header" && !matcher.key) throw new Error(`Missing header key in fingerprint rule ${rule.word}`);
-                if (!["contains", "equals", "regex", "exists", "in"].includes(matcher.type)) throw new Error(`Invalid matcher type in fingerprint rule ${rule.word}`);
-                if (["contains", "regex"].includes(matcher.type) && (typeof matcher.value !== "string" || !matcher.value)) throw new Error(`Missing matcher value in fingerprint rule ${rule.word}`);
-                if (matcher.type === "regex") new RegExp(matcher.value, "i");
-            }
-            for (const pattern of metadata.version_patterns || []) new RegExp(pattern.pattern, "i");
-        }
-        const stream = input.__monitorExecution?.result_stream;
-        if (stream && (stream.protocol !== "technology-v1" || !Sentinel.Monitor?.commitResults)) {
-            throw new Error("Host requested an unsupported technology result stream");
-        }
-        const chunkSize = stream ? clampInteger(stream.max_targets, 32, 1, 32) : 0;
-        const results: PerTargetResult[] = [];
-        const timestamp = new Date().toISOString();
-        const totalTargets = targets.length;
-        const fingerprints: any[] = [];
-        const evidences: any[] = [];
-        const previousSnapshots = input.previousSnapshots || {};
-        const changeEvents: ChangeEvent[] = [];
-        const snapshots: Record<string, TechnologySnapshot> = stream ? {} : { ...previousSnapshots };
-        const monitorExecution = input.__monitorExecution;
-
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: totalTargets,
-            phase: "prepare",
-            message: `Preparing technology fingerprints (${targets.length} targets, concurrency ${concurrency})`,
-        });
-
-        let completedTargets = 0;
-        let matchedTargets = 0;
-        let identifiedTechnologies = 0;
-        let failedTargets = 0;
-        let technologyChanges = 0;
-        let sequence = 0;
-        let lastCommitAt = Date.now();
-        const pendingCommits = new Set<Promise<void>>();
-        const maxPendingCommits = stream ? clampInteger(stream.max_pending_commits, 1, 1, 2) : 1;
-        let commitFailure: Error | undefined;
-        let matchingMs = 0;
-        let backpressureMs = 0;
-        let maxQueuedCommits = 0;
-        const diagnostics = () => ({ dictionary_load_ms: dictionaryLoadMs, matching_ms_sum: matchingMs,
-            backpressure_ms_sum: backpressureMs, max_pending_commits: maxQueuedCommits, scan_wall_ms: Date.now() - scanStartedAt });
-        async function awaitCommitCapacity(): Promise<void> {
-            const started = Date.now();
-            while (pendingCommits.size >= maxPendingCommits) {
-                await Promise.race(pendingCommits);
-                if (commitFailure) throw commitFailure;
-            }
-            backpressureMs += Date.now() - started;
-            if (commitFailure) throw commitFailure;
-        }
-        const changeArtifacts = (events: ChangeEvent[]) => events.map(event => ({
-            asset_key: event.assetId, asset_type: "web", change_type: event.eventType,
-            severity: event.severity, title: event.title, description: event.description,
-            old_value: event.oldValue, new_value: event.newValue, risk_score: event.riskScore,
-            source: "tech_fingerprinter", metadata: event.metadata,
-        }));
-        async function commitPending(force = false): Promise<void> {
-            if (!stream) return;
-            while (pendingCommits.size >= maxPendingCommits) await awaitCommitCapacity();
-            if (commitFailure) throw commitFailure;
-            if (results.length === 0 || (!force && results.length < chunkSize)) return;
-            lastCommitAt = Date.now();
-            const chunkResults = results.splice(0, chunkSize);
-            const keys = new Set(chunkResults.map(result => result.url));
-            const take = (items: any[], key: (item: any) => string): any[] => {
-                const selected = items.filter(item => keys.has(key(item)));
-                const remaining = items.filter(item => !keys.has(key(item)));
-                items.splice(0, items.length, ...remaining);
-                return selected;
-            };
-            const chunkSnapshots: Record<string, TechnologySnapshot> = {};
-            for (const key of keys) {
-                if (snapshots[key]) { chunkSnapshots[key] = snapshots[key]; delete snapshots[key]; }
-            }
-            const chunkChanges = take(changeEvents, event => event.assetId);
-            const request = { sequence: ++sequence, output: { success: true, data: {
-                results: chunkResults, snapshots: chunkSnapshots,
-                summary: { totalTargets: chunkResults.length, failedTargets: chunkResults.filter(result => result.status === "failed").length, diagnostics: diagnostics() },
-                surface_artifacts: {
-                    fingerprints: take(fingerprints, item => item.asset_key),
-                    evidences: take(evidences, item => item.asset_key), changes: changeArtifacts(chunkChanges),
-                },
-            } } };
-            let pending: Promise<void>;
-            pending = Promise.resolve().then(async () => {
-                const ack = await Sentinel.Monitor!.commitResults!(request);
-                if (!ack?.ok || ack.sequence !== request.sequence) throw new Error("Monitor result commit was not acknowledged");
-            }).catch(error => {
-                commitFailure = error instanceof Error ? error : new Error(String(error));
-            }).finally(() => { pendingCommits.delete(pending); });
-            pendingCommits.add(pending);
-            maxQueuedCommits = Math.max(maxQueuedCommits, pendingCommits.size);
-            await awaitCommitCapacity();
-        }
-        await runConcurrently(targets.map((target) => async () => {
-                if (commitFailure) throw commitFailure;
-                let matchingStartedAt: number | undefined;
-                try {
-                    const response = await fetchPage(target, userAgent);
-                    const body = await response.text();
-                    matchingStartedAt = Date.now();
-                    const headers: Record<string, string> = {};
-                    response.headers.forEach((value, key) => { headers[String(key).toLowerCase()] = value; });
-                    const ctx = {
-                        status: response.status,
-                        headers,
-                        body,
-                        title: parseTitle(body),
-                    };
-
-                    const technologies = rules
-                        .map(rule => ({ rule, matches: matchedEvidence(ctx, parseMetadata(rule.metadata)) }))
-                        .filter(item => item.matches.length > 0)
-                        .map(({ rule, matches }) => {
-                            const metadata = parseMetadata(rule.metadata);
-                            const version = extractVersion(ctx, metadata);
-                            const ruleName = metadata.name || rule.word;
-                            const normalizedProduct = metadata.product || ruleName;
-                            const normalizedCategory = metadata.asset_category || rule.category || "technology";
-                            const normalizedFamily = metadata.asset_family || null;
-                            const normalizedVendor = metadata.vendor || null;
-                            const confidence = normalizeConfidence(metadata.confidence);
-                            const tech = {
-                                name: ruleName,
-                                category: normalizedCategory,
-                                version,
-                                confidence: confidence === undefined ? undefined : Math.round(confidence * 100),
-                                evidence: matches.map(hit => `${hit.part}${hit.key ? ":" + hit.key : ""}: ${hit.value}`),
-                            };
-
-                            fingerprints.push({
-                                asset_type: "web",
-                                asset_key: target,
-                                fingerprint_type: "technology",
-                                fingerprint_key: rule.word,
-                                fingerprint_value: tech.name,
-                                rule_id: metadata.rule_id || rule.id || `fingerprint_rule:${rule.word}`,
-                                rule_word: rule.word,
-                                rule_name: ruleName,
-                                normalized_product: normalizedProduct,
-                                normalized_vendor: normalizedVendor || undefined,
-                                normalized_category: normalizedCategory,
-                                normalized_family: normalizedFamily || undefined,
-                                version: tech.version,
-                                confidence,
-                                is_primary: Boolean(metadata.is_primary),
-                                match_source_part: matches[0].part,
-                                source: "tech_fingerprinter",
-                                request_url: target,
-                                final_url: response.url || target,
-                                http_status: response.status,
-                                checked_at: timestamp,
-                                match_details: matches,
-                                evidence: tech.evidence.join("\n"),
-                            });
-
-                            return tech;
-                        });
-
-                    const normalizedTechnologies = normalizeTechnologySnapshot(
-                        technologies.map(item => ({
-                            name: item.name,
-                            category: item.category,
-                            version: item.version,
-                        })),
-                    );
-
-                    snapshots[target] = {
-                        url: target,
-                        technologies: normalizedTechnologies,
-                        lastChecked: timestamp,
-                    };
-
-                    const previous = previousSnapshots[target];
-                    if (previous) {
-                        const previousMap = new Map(normalizeTechnologySnapshot(previous.technologies || []).map(item => [`${item.name.toLowerCase()}::${item.category.toLowerCase()}`, item]));
-                        const currentMap = new Map(normalizedTechnologies.map(item => [`${item.name.toLowerCase()}::${item.category.toLowerCase()}`, item]));
-                        const added = normalizedTechnologies.filter(item => !previousMap.has(`${item.name.toLowerCase()}::${item.category.toLowerCase()}`));
-                        const removed = Array.from(previousMap.entries())
-                            .filter(([key]) => !currentMap.has(key))
-                            .map(([, value]) => value);
-                        const updated = normalizedTechnologies.flatMap((item) => {
-                            const key = `${item.name.toLowerCase()}::${item.category.toLowerCase()}`;
-                            const previousItem = previousMap.get(key);
-                            if (!previousItem || previousItem.version === item.version) {
-                                return [];
-                            }
-                            return [{
-                                name: item.name,
-                                category: item.category,
-                                oldVersion: previousItem.version,
-                                newVersion: item.version,
-                            }];
-                        });
-                        if (added.length > 0 || removed.length > 0 || updated.length > 0) {
-                            changeEvents.push(createTechnologyChangeEvent(target, added, removed, updated, timestamp));
-                            technologyChanges++;
-                        }
-                    }
-
-                    const result: PerTargetResult = {
-                        url: target, technologies, status: technologies.length ? "identified" : "unidentified",
-                        http_status: response.status, final_url: response.url || target, checked_at: timestamp,
-                        timings: (response as Response & { timings?: Record<string, number | string | null> }).timings,
-                    };
-                    results.push(result);
-                    if (technologies.length > 0) matchedTargets++;
-                    identifiedTechnologies += technologies.length;
-                    evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe",
-                        title: `Technology Probe: ${target}`, content_json: result,
-                        content_text: `HTTP ${response.status}; ${result.status}; ${technologies.map(item => item.name).join(", ") || "UNKNOWN"}` });
-                } catch (error) {
-                    const typed = error as { category?: string; timings?: Record<string, number | string | null>; message?: string };
-                    const allowed = new Set(["timeout", "dns", "tls", "connect", "redirect", "response_body", "request_config", "permission", "queue", "network_other"]);
-                    const category = matchingStartedAt !== undefined ? "processing"
-                        : typed?.category && allowed.has(typed.category) ? typed.category
-                        : /timeout|timed out|abort/i.test(typed?.message || "") ? "timeout" : "network_other";
-                    const labels: Record<string, string> = { timeout: "Request timed out", dns: "DNS resolution failed", tls: "TLS negotiation failed",
-                        connect: "Connection failed", redirect: "Redirect failed", response_body: "Response body read failed", request_config: "Invalid HTTP request configuration",
-                        permission: "Request permission denied", queue: "Request queue failed", processing: "Fingerprint processing failed", network_other: "HTTP request failed" };
-                    const message = labels[category];
-                    const result: PerTargetResult = { url: target, technologies: [], status: "failed", error: message, checked_at: timestamp,
-                        failure_category: category, timings: typed?.timings };
-                    results.push(result);
-                    failedTargets++;
-                    evidences.push({ asset_type: "web", asset_key: target, evidence_type: "technology_probe_failure",
-                        title: `Technology Probe Failed: ${target}`, content_text: message, content_json: result });
-                } finally {
-                    if (matchingStartedAt !== undefined) matchingMs += Date.now() - matchingStartedAt;
-                    completedTargets += 1;
-                    await commitPending(Date.now() - lastCommitAt >= 5000);
-                    if (!stream) await reportMonitorProgress(monitorExecution, {
-                        current: completedTargets,
-                        total: totalTargets,
-                        currentTarget: target,
-                        phase: "fingerprint",
-                        message: `Checked technology fingerprint for ${target}`,
-                    });
-                }
-            }), concurrency);
-        while (stream && results.length > 0) await commitPending(true);
-        await Promise.all(pendingCommits);
-        if (commitFailure) throw commitFailure;
-
-        const uniqueTechnologies = Array.from(
-            new Map(
-                results
-                    .flatMap(item => item.technologies)
-                    .map(item => [`${item.name.toLowerCase()}::${item.category.toLowerCase()}::${item.version || ""}`, item]),
-            ).values(),
-        );
-
-        return {
-            success: true,
-            data: {
-                ...(stream ? { stream_complete: true } : {}),
-                results,
-                technologies: uniqueTechnologies,
-                changeEvents,
-                snapshots,
-                summary: {
-                    totalTargets,
-                    matchedTargets,
-                    identifiedTechnologies,
-                    technologyChanges,
-                    failedTargets,
-                    skippedTargets,
-                    diagnostics: diagnostics(),
-                },
-                surface_artifacts: {
-                    fingerprints,
-                    changes: changeEvents.map(event => ({
-                        asset_key: event.assetId,
-                        asset_type: "web",
-                        change_type: event.eventType,
-                        severity: event.severity,
-                        title: event.title,
-                        description: event.description,
-                        old_value: event.oldValue,
-                        new_value: event.newValue,
-                        risk_score: event.riskScore,
-                        source: "tech_fingerprinter",
-                        metadata: event.metadata,
-                    })),
-                    evidences,
-                },
-            },
-        };
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/tech_fingerprinter/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var pluginGlobals=globalThis;var DEFAULT_TIMEOUT_MS=5e3;var DEFAULT_CONCURRENCY=32;var MIN_CONCURRENCY=1;var MAX_CONCURRENCY=32;async function reportMonitorProgress(monitorExecution,update){
+if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{taskId:monitorExecution.task_id,taskName:monitorExecution.
+task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.started_at,currentPlugin:monitorExecution.
+current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,totalSteps:monitorExecution.total_steps,
+importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}function clampInteger(value,fallback,min,max){const parsed=Number(value);if(!Number.
+isFinite(parsed))return fallback;return Math.max(min,Math.min(Math.floor(parsed),max))}function get_input_schema(){return{type:"object",properties:{url:{type:"s\
+tring",description:"Target URL"},base_url:{type:"string",description:"Base URL alias"},targets:{type:"array",items:{type:"string"},description:"Multiple target \
+URLs"},target_objects:{type:"array",items:{type:"object"},description:"Runtime Web asset references supplied by the monitor host"},dictionaryId:{type:"string","\
+x-control":"dictionary-picker","x-dictionary-type":"fingerprint_rule",description:"Structured fingerprint dictionary ID or name"},dictionaryEntries:{type:"array",
+description:"Structured rule entries injected by workflow"},concurrency:{type:"integer",default:DEFAULT_CONCURRENCY,minimum:MIN_CONCURRENCY,maximum:MAX_CONCURRENCY},
+userAgent:{type:"string",default:"Sentinel-Tech-Fingerprinter/2.0"},previousSnapshots:{type:"object",description:"Previous technology snapshots keyed by target \
+URL"}}}}function get_output_schema(){return{type:"object",properties:{success:{type:"boolean"},data:{type:"object",properties:{results:{type:"array"},technologies:{
+type:"array"},changeEvents:{type:"array"},snapshots:{type:"object"},summary:{type:"object"},surface_artifacts:{type:"object",properties:{fingerprints:{type:"arr\
+ay",description:"Strict normalized fingerprint artifacts with rule_id, rule_word, rule_name, normalized_product, and normalized_category"},evidences:{type:"arra\
+y",description:"Structured evidence artifacts describing captured technology snapshots"}}}}},error:{type:"string"}}}}pluginGlobals.get_input_schema=get_input_schema;
+pluginGlobals.get_output_schema=get_output_schema;async function runConcurrently(tasks,concurrency){const results=new Array(tasks.length);let nextIndex=0;let stopped=false;
+const workerCount=Math.min(concurrency,tasks.length);async function worker(){while(!stopped&&nextIndex<tasks.length){const index=nextIndex;nextIndex+=1;try{results[index]=
+await tasks[index]()}catch(error){stopped=true;throw error}}}await Promise.all(Array.from({length:workerCount},()=>worker()));return results}function normalizeTarget(raw){
+if(typeof raw!=="string"||!raw||raw.trim()!==raw||/[\s\x00-\x1f\x7f\\]/.test(raw)){throw new Error("Target must be a non-empty URL without whitespace")}if(!/^https?:\/\/[^/\\]/i.
+test(raw))throw new Error("Target must start with http:// or https:// and a host");const url=new URL(raw);if(!/^https?:$/i.test(url.protocol)||!url.hostname||url.
+username||url.password||raw.includes("#")||url.port==="0"){throw new Error("Target must be an absolute HTTP(S) URL without credentials or a fragment")}if(!url.hostname.
+startsWith("[")){const host=url.hostname.replace(/\.$/,"");if(host.length>253||host.split(".").some(label=>label.length>63||!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.
+test(label))){throw new Error("Target must contain a valid DNS hostname or IP address")}}return raw}function parseTitle(html){const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);
+return match?.[1]?.trim()||""}function parseMetadata(value){if(!value)return{};if(typeof value==="string"){try{return JSON.parse(value)}catch{return{}}}return typeof value===
+"object"?value:{}}async function loadDictionaryEntries(idOrName){if(!Sentinel?.Dictionary?.getEntries)throw new Error("Dictionary API unavailable; capability:di\
+ctionary is required");const entries=await Sentinel.Dictionary.getEntries(idOrName,1e4);return entries.filter(item=>item&&typeof item.word==="string").map(item=>({
+id:typeof item.id==="string"?item.id:void 0,word:item.word,category:typeof item.category==="string"?item.category:null,metadata:parseMetadata(item.metadata)}))}
+async function loadRules(input){if(Array.isArray(input.dictionaryEntries)&&input.dictionaryEntries.length>0){return input.dictionaryEntries.map(entry=>({...entry,
+metadata:parseMetadata(entry.metadata)}))}const dictionaryId=input.dictionaryId||(Sentinel?.Dictionary?.getDefaultId?await Sentinel.Dictionary.getDefaultId("fin\
+gerprint_rule"):null);if(!dictionaryId)throw new Error("Configure a fingerprint_rule dictionary before probing");return await loadDictionaryEntries(dictionaryId)}
+async function fetchPage(url,userAgent){const options={method:"GET",redirect:"follow",headers:{"User-Agent":userAgent,"Accept":"text/html,application/xhtml+xml,\
+application/xml;q=0.9,*/*;q=0.8"},timeout:DEFAULT_TIMEOUT_MS};return await fetch(url,options)}function normalizeTechnologySnapshot(technologies){const unique=new Map;
+for(const technology of technologies){const normalized={name:String(technology.name||"").trim(),category:String(technology.category||"technology").trim()||"tech\
+nology",version:technology.version?String(technology.version).trim():void 0};if(!normalized.name)continue;const key=`${normalized.name.toLowerCase()}::${normalized.
+category.toLowerCase()}`;unique.set(key,normalized)}return Array.from(unique.values()).sort((left,right)=>{const categoryCompare=left.category.localeCompare(right.
+category);return categoryCompare!==0?categoryCompare:left.name.localeCompare(right.name)})}function buildTechnologyEventId(url,timestamp){return`technology-${url}\
+-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g,"-").slice(0,120)}function createTechnologyChangeEvent(url,added,removed,updated,timestamp){const severity=removed.length>
+0||updated.length>0?"medium":"low";const parts=[];if(added.length>0){parts.push(`added ${added.map(item=>`${item.name}${item.version?` ${item.version}`:""}`).join(
+", ")}`)}if(removed.length>0){parts.push(`removed ${removed.map(item=>`${item.name}${item.version?` ${item.version}`:""}`).join(", ")}`)}if(updated.length>0){parts.
+push(`updated ${updated.map(item=>`${item.name} ${item.oldVersion||"unknown"} -> ${item.newVersion||"unknown"}`).join(", ")}`)}return{id:buildTechnologyEventId(
+url,timestamp),assetId:url,eventType:"technology_change",severity,title:`Technology stack changed for ${url}`,description:parts.join("; "),oldValue:JSON.stringify(
+{removed,updated:updated.map(item=>({name:item.name,category:item.category,version:item.oldVersion}))}),newValue:JSON.stringify({added,updated:updated.map(item=>({
+name:item.name,category:item.category,version:item.newVersion}))}),detectionMethod:"tech_fingerprinter",tags:["technology","change","fingerprint"],autoTriggerEnabled:true,
+riskScore:removed.length>0||updated.length>0?58:40,metadata:{url,added,removed,updated}}}function matcherHit(ctx,matcher){const part=String(matcher?.part||"body").
+toLowerCase();const type=String(matcher?.type||"contains").toLowerCase();const value=matcher?.value;if(part==="status"){if(type==="in"&&Array.isArray(value))return value.
+includes(ctx.status);return ctx.status===value}const source=part==="header"?String(ctx.headers[String(matcher?.key||"").toLowerCase()]||""):part==="title"?ctx.title:
+ctx.body;if(type==="exists")return source.length>0;if(type==="equals")return source===String(value||"");if(type==="regex"){try{return new RegExp(String(value||""),
+"i").test(source)}catch{return false}}if(type==="in"&&Array.isArray(value))return value.includes(source);return source.toLowerCase().includes(String(value||"").
+toLowerCase())}function matchedEvidence(ctx,metadata){const matchers=Array.isArray(metadata.matchers)?metadata.matchers:[];if(matchers.length===0)throw new Error(
+"Fingerprint rule requires explicit matchers");const hits=matchers.filter(matcher=>matcherHit(ctx,matcher));if(String(metadata.operator||"or").toLowerCase()==="\
+and"&&hits.length!==matchers.length)return[];return hits.map(matcher=>{const part=String(matcher.part||"body").toLowerCase();const key=part==="header"?String(matcher.
+key).toLowerCase():void 0;const source=part==="header"?String(ctx.headers[key]||""):part==="title"?ctx.title:part==="status"?String(ctx.status):ctx.body;let value=String(
+matcher.value||"");if(matcher.type==="regex")value=source.match(new RegExp(value,"i"))?.[0]||"";if(matcher.type==="exists")value="[present]";if(key==="set-cooki\
+e"){value=value.split("=")[0].replace(/^[\s;,]+/,"")+"=[REDACTED]"}else if(key&&/authorization|cookie|token|secret|api[-_]?key/i.test(key)){value="[REDACTED]"}value=
+value.replace(/((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s;<>"']+/gi,"$1[REDACTED]");return{part,key,value:value.slice(0,180)}})}function extractVersion(ctx,metadata){
+const patterns=Array.isArray(metadata.version_patterns)?metadata.version_patterns:[];for(const item of patterns){const part=String(item?.part||"").toLowerCase();
+const source=part==="header"?String(ctx.headers[String(item?.key||"").toLowerCase()]||""):part==="title"?ctx.title:ctx.body;try{const match=source.match(new RegExp(
+String(item?.pattern||""),"i"));if(match?.[1])return match[1]}catch{continue}}return void 0}function normalizeConfidence(value){const numeric=value==null?NaN:Number(
+value);if(!Number.isFinite(numeric)){return void 0}if(numeric>1){return Math.max(0,Math.min(numeric/100,1))}return Math.max(0,Math.min(numeric,1))}async function analyze(input){
+try{const scanStartedAt=Date.now();const concurrency=clampInteger(input.concurrency,DEFAULT_CONCURRENCY,MIN_CONCURRENCY,MAX_CONCURRENCY);const userAgent=input.userAgent||
+"Sentinel-Tech-Fingerprinter/2.0";if(input.targets!==void 0&&!Array.isArray(input.targets)){return{success:false,error:"targets must be an array"}}const rawTargets=[
+...input.url!==void 0?[input.url]:[],...input.base_url!==void 0?[input.base_url]:[],...input.targets||[]];if(rawTargets.length===0)return{success:false,error:"A\
+t least one target URL is required"};const targets=[];let skippedTargets=0;let eligibleMonitorTargets;if(input.__monitorExecution||input.target_objects!==void 0){
+if(!Array.isArray(input.target_objects))throw new Error("Monitor target_objects must contain existing Web asset references");eligibleMonitorTargets=new Set(input.
+target_objects.filter(item=>item&&item.type==="web"&&item.source==="surface_asset"&&typeof item.asset_id==="string"&&item.asset_id.trim().length>0&&typeof item.
+value==="string").map(item=>item.value))}const seen=new Set;for(let index=0;index<rawTargets.length;index++){if(seen.has(rawTargets[index]))continue;seen.add(rawTargets[index]);
+try{const target=normalizeTarget(rawTargets[index]);if(eligibleMonitorTargets&&!eligibleMonitorTargets.has(target)){skippedTargets++;continue}targets.push(target)}catch{
+skippedTargets++}}const dictionaryStartedAt=Date.now();const rules=targets.length>0?await loadRules(input):[];const dictionaryLoadMs=Date.now()-dictionaryStartedAt;
+if(targets.length>0&&rules.length===0){return{success:false,error:"No technology fingerprint rules loaded. Configure dictionaryEntries or a fingerprint_rule dic\
+tionary with explicit matchers."}}for(const rule of rules){const metadata=parseMetadata(rule.metadata);if(!Array.isArray(metadata.matchers)||metadata.matchers.length===
+0){throw new Error(`Fingerprint rule ${rule.word} requires explicit matchers`)}if(metadata.operator&&!["and","or"].includes(metadata.operator))throw new Error(`\
+Invalid operator in fingerprint rule ${rule.word}`);for(const matcher of metadata.matchers){if(!["header","body","title","status"].includes(matcher.part))throw new Error(
+`Invalid source part in fingerprint rule ${rule.word}`);if(matcher.part==="header"&&!matcher.key)throw new Error(`Missing header key in fingerprint rule ${rule.
+word}`);if(!["contains","equals","regex","exists","in"].includes(matcher.type))throw new Error(`Invalid matcher type in fingerprint rule ${rule.word}`);if(["con\
+tains","regex"].includes(matcher.type)&&(typeof matcher.value!=="string"||!matcher.value))throw new Error(`Missing matcher value in fingerprint rule ${rule.word}`);
+if(matcher.type==="regex")new RegExp(matcher.value,"i")}for(const pattern of metadata.version_patterns||[])new RegExp(pattern.pattern,"i")}const stream=createMonitorResultStream(
+input);const results=[];const timestamp=new Date().toISOString();const totalTargets=targets.length;const fingerprints=[];const evidences=[];const previousSnapshots=input.
+previousSnapshots||{};const changeEvents=[];const snapshots=stream.enabled?{}:{...previousSnapshots};const monitorExecution=input.__monitorExecution;await reportMonitorProgress(
+monitorExecution,{current:0,total:totalTargets,phase:"prepare",message:`Preparing technology fingerprints (${targets.length} targets, concurrency ${concurrency}\
+)`});let completedTargets=0;let matchedTargets=0;let identifiedTechnologies=0;let failedTargets=0;let technologyChanges=0;let matchingMs=0;const diagnostics=()=>({
+dictionary_load_ms:dictionaryLoadMs,matching_ms_sum:matchingMs,scan_wall_ms:Date.now()-scanStartedAt});const changeArtifacts=events=>events.map(event=>({asset_key:event.
+assetId,asset_type:"web",change_type:event.eventType,severity:event.severity,title:event.title,description:event.description,old_value:event.oldValue,new_value:event.
+newValue,risk_score:event.riskScore,source:"tech_fingerprinter",metadata:event.metadata}));async function commitPending(){if(!stream.enabled)return;while(results.
+length>0){const result=results.shift();const take=(items,key)=>{const selected=items.filter(item=>key(item)===result.url);const remaining=items.filter(item=>key(
+item)!==result.url);items.splice(0,items.length,...remaining);return selected};const chunkSnapshots={};if(snapshots[result.url]){chunkSnapshots[result.url]=snapshots[result.
+url];delete snapshots[result.url]}const changes=take(changeEvents,event=>event.assetId);await stream.record(result.url,result.url,{success:true,data:{results:[result],
+snapshots:chunkSnapshots,summary:{totalTargets:1,failedTargets:result.status==="failed"?1:0},surface_artifacts:{fingerprints:take(fingerprints,item=>item.asset_key),
+evidences:take(evidences,item=>item.asset_key),changes:changeArtifacts(changes)}}},{status:result.status==="failed"?"failed":"ok",...result.failure_category?{failure_category:result.
+failure_category}:{}})}}await runConcurrently(targets.map(target=>async()=>{stream.assertHealthy();let matchingStartedAt;try{const response=await fetchPage(target,
+userAgent);const body=await response.text();matchingStartedAt=Date.now();const headers={};response.headers.forEach((value,key)=>{headers[String(key).toLowerCase()]=
+value});const ctx={status:response.status,headers,body,title:parseTitle(body)};const technologies=rules.map(rule=>({rule,matches:matchedEvidence(ctx,parseMetadata(
+rule.metadata))})).filter(item=>item.matches.length>0).map(({rule,matches})=>{const metadata=parseMetadata(rule.metadata);const version=extractVersion(ctx,metadata);
+const ruleName=metadata.name||rule.word;const normalizedProduct=metadata.product||ruleName;const normalizedCategory=metadata.asset_category||rule.category||"tec\
+hnology";const normalizedFamily=metadata.asset_family||null;const normalizedVendor=metadata.vendor||null;const confidence=normalizeConfidence(metadata.confidence);
+const tech={name:ruleName,category:normalizedCategory,version,confidence:confidence===void 0?void 0:Math.round(confidence*100),evidence:matches.map(hit=>`${hit.
+part}${hit.key?":"+hit.key:""}: ${hit.value}`)};fingerprints.push({asset_type:"web",asset_key:target,fingerprint_type:"technology",fingerprint_key:rule.word,fingerprint_value:tech.
+name,rule_id:metadata.rule_id||rule.id||`fingerprint_rule:${rule.word}`,rule_word:rule.word,rule_name:ruleName,normalized_product:normalizedProduct,normalized_vendor:normalizedVendor||
+void 0,normalized_category:normalizedCategory,normalized_family:normalizedFamily||void 0,version:tech.version,confidence,is_primary:Boolean(metadata.is_primary),
+match_source_part:matches[0].part,source:"tech_fingerprinter",request_url:target,final_url:response.url||target,http_status:response.status,checked_at:timestamp,
+match_details:matches,evidence:tech.evidence.join("\n")});return tech});const normalizedTechnologies=normalizeTechnologySnapshot(technologies.map(item=>({name:item.
+name,category:item.category,version:item.version})));snapshots[target]={url:target,technologies:normalizedTechnologies,lastChecked:timestamp};const previous=previousSnapshots[target];
+if(previous){const previousMap=new Map(normalizeTechnologySnapshot(previous.technologies||[]).map(item=>[`${item.name.toLowerCase()}::${item.category.toLowerCase()}`,
+item]));const currentMap=new Map(normalizedTechnologies.map(item=>[`${item.name.toLowerCase()}::${item.category.toLowerCase()}`,item]));const added=normalizedTechnologies.
+filter(item=>!previousMap.has(`${item.name.toLowerCase()}::${item.category.toLowerCase()}`));const removed=Array.from(previousMap.entries()).filter(([key])=>!currentMap.
+has(key)).map(([,value])=>value);const updated=normalizedTechnologies.flatMap(item=>{const key=`${item.name.toLowerCase()}::${item.category.toLowerCase()}`;const previousItem=previousMap.
+get(key);if(!previousItem||previousItem.version===item.version){return[]}return[{name:item.name,category:item.category,oldVersion:previousItem.version,newVersion:item.
+version}]});if(added.length>0||removed.length>0||updated.length>0){changeEvents.push(createTechnologyChangeEvent(target,added,removed,updated,timestamp));technologyChanges++}}
+const result={url:target,technologies,status:technologies.length?"identified":"unidentified",http_status:response.status,final_url:response.url||target,checked_at:timestamp,
+timings:response.timings};results.push(result);if(technologies.length>0)matchedTargets++;identifiedTechnologies+=technologies.length;evidences.push({asset_type:"\
+web",asset_key:target,evidence_type:"technology_probe",title:`Technology Probe: ${target}`,content_json:result,content_text:`HTTP ${response.status}; ${result.status}\
+; ${technologies.map(item=>item.name).join(", ")||"UNKNOWN"}`})}catch(error){const typed=error;const allowed=new Set(["timeout","dns","tls","connect","redirect",
+"response_body","request_config","permission","queue","network_other"]);const category=matchingStartedAt!==void 0?"processing":typed?.category&&allowed.has(typed.
+category)?typed.category:/timeout|timed out|abort/i.test(typed?.message||"")?"timeout":"network_other";const labels={timeout:"Request timed out",dns:"DNS resolu\
+tion failed",tls:"TLS negotiation failed",connect:"Connection failed",redirect:"Redirect failed",response_body:"Response body read failed",request_config:"Inval\
+id HTTP request configuration",permission:"Request permission denied",queue:"Request queue failed",processing:"Fingerprint processing failed",network_other:"HTT\
+P request failed"};const message=labels[category];const result={url:target,technologies:[],status:"failed",error:message,checked_at:timestamp,failure_category:category,
+timings:typed?.timings};results.push(result);failedTargets++;evidences.push({asset_type:"web",asset_key:target,evidence_type:"technology_probe_failure",title:`T\
+echnology Probe Failed: ${target}`,content_text:message,content_json:result})}finally{if(matchingStartedAt!==void 0)matchingMs+=Date.now()-matchingStartedAt;completedTargets+=
+1;await commitPending();if(!stream.enabled)await reportMonitorProgress(monitorExecution,{current:completedTargets,total:totalTargets,currentTarget:target,phase:"\
+fingerprint",message:`Checked technology fingerprint for ${target}`})}}),concurrency);await commitPending();const uniqueTechnologies=Array.from(new Map(results.
+flatMap(item=>item.technologies).map(item=>[`${item.name.toLowerCase()}::${item.category.toLowerCase()}::${item.version||""}`,item])).values());return await stream.
+finish({success:true,data:{results,technologies:uniqueTechnologies,changeEvents,snapshots,summary:{totalTargets,matchedTargets,identifiedTechnologies,technologyChanges,
+failedTargets,skippedTargets,diagnostics:diagnostics()},surface_artifacts:{fingerprints,changes:changeEvents.map(event=>({asset_key:event.assetId,asset_type:"we\
+b",change_type:event.eventType,severity:event.severity,title:event.title,description:event.description,old_value:event.oldValue,new_value:event.newValue,risk_score:event.
+riskScore,source:"tech_fingerprinter",metadata:event.metadata})),evidences}}})}catch(error){return{success:false,error:error instanceof Error?error.message:String(
+error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

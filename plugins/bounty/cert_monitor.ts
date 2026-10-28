@@ -3,7 +3,7 @@
  *
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.5
+ * @version 1.2.6
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type cert
@@ -12,739 +12,152 @@
  * @category monitor
  * @seed_bindings []
  * @default_severity medium
- * @tags certificate, ssl, tls, monitor, change-detection, expiry, capability:tls-inspect, capability:monitor-events
+ * @tags certificate, ssl, tls, monitor, change-detection, expiry, capability:tls-inspect, capability:monitor-events, monitor:results-stream-v1
  * @description Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation
  */
-
-interface ToolInput {
-    targets: string[];  // List of domains/URLs to monitor
-    checkExpiry?: boolean;
-    expiryWarningDays?: number;  // Warn if expiring within N days
-    concurrency?: number;
-    previousSnapshots?: Record<string, CertSnapshot>;  // Previous state for comparison
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface CertInfo {
-    subject: string;
-    issuer: string;
-    validFrom: string;
-    validTo: string;
-    fingerprint: string;
-    serialNumber: string;
-    altNames: string[];
-    protocol: string;
-    cipher: string;
-}
-
-interface TlsProbeResponse {
-    success: boolean;
-    cert?: Partial<CertInfo>;
-    error?: string;
-}
-
-const CERT_MONITOR_TLS_TIMEOUT_MS = 3000;
-const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 32;
-
-interface CertSnapshot {
-    domain: string;
-    fingerprint: string;
-    validTo: string;
-    issuer: string;
-    lastChecked: string;
-}
-
-interface ChangeEvent {
-    id: string;
-    assetId: string;
-    eventType: string;
-    severity: "low" | "medium" | "high" | "critical";
-    title: string;
-    description: string;
-    oldValue?: string;
-    newValue?: string;
-    detectionMethod: string;
-    tags: string[];
-    autoTriggerEnabled: boolean;
-    riskScore: number;
-    metadata: Record<string, any>;
-}
-
-interface CertResult {
-    domain: string;
-    success: boolean;
-    certInfo?: CertInfo;
-    snapshot?: CertSnapshot;
-    daysUntilExpiry?: number;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        results: CertResult[];
-        changeEvents: ChangeEvent[];
-        snapshots: Record<string, CertSnapshot>;
-        summary: {
-            totalTargets: number;
-            successfulChecks: number;
-            failedChecks: number;
-            certificateChanges: number;
-            expiringCertificates: number;
-            expiredCertificates: number;
-        };
-        surface_artifacts?: Record<string, any[]>;
-    };
-    error?: string;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-interface MonitorProgressUpdate {
-    current?: number;
-    total?: number;
-    message?: string;
-    currentTarget?: string;
-    phase?: string;
-    phaseLabel?: string;
-    indeterminate?: boolean;
-}
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: MonitorProgressUpdate,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-function formatTargetLabel(domain: string, index: number, total: number): string {
-    if (total <= 0) return domain;
-    return `${domain} (${index}/${total})`;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-// Generate UUID
-function generateId(): string {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-}
-
-// Calculate risk score
-function calculateRiskScore(severity: string, eventType: string): number {
-    let score = 0;
-    
-    // Base score from severity
-    switch (severity) {
-        case "critical": score += 40; break;
-        case "high": score += 30; break;
-        case "medium": score += 20; break;
-        case "low": score += 10; break;
-    }
-    
-    // Event type importance
-    switch (eventType) {
-        case "certificate_expired": score += 30; break;
-        case "certificate_expiring": score += 20; break;
-        case "certificate_change": score += 15; break;
-        case "issuer_change": score += 25; break;
-    }
-    
-    return Math.min(score, 100);
-}
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["targets"],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "List of domains or URLs to monitor certificates"
-            },
-            checkExpiry: {
-                type: "boolean",
-                description: "Check certificate expiry dates",
-                default: true
-            },
-            expiryWarningDays: {
-                type: "integer",
-                description: "Days before expiry to generate warning",
-                default: 30,
-                minimum: 1,
-                maximum: 365
-            },
-            concurrency: {
-                type: "integer",
-                description: "Number of concurrent TLS certificate checks",
-                default: DEFAULT_CONCURRENCY,
-                minimum: 1,
-                maximum: MAX_CONCURRENCY
-            },
-            previousSnapshots: {
-                type: "object",
-                description: "Previous certificate snapshots for comparison",
-                additionalProperties: {
-                    type: "object",
-                    properties: {
-                        domain: { type: "string" },
-                        fingerprint: { type: "string" },
-                        validTo: { type: "string" },
-                        issuer: { type: "string" },
-                        lastChecked: { type: "string" }
-                    }
-                }
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    results: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                domain: { type: "string" },
-                                success: { type: "boolean" },
-                                certInfo: { type: "object" },
-                                daysUntilExpiry: { type: "integer" }
-                            }
-                        },
-                        description: "Certificate check results"
-                    },
-                    changeEvents: { type: "array", description: "Change events detected" },
-                    snapshots: { type: "object", description: "Certificate snapshots by domain" },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTargets: { type: "integer" },
-                            certificateChanges: { type: "integer" },
-                            expiringCertificates: { type: "integer" },
-                            expiredCertificates: { type: "integer" }
-                        }
-                    },
-                    surface_artifacts: {
-                        type: "object",
-                        description: "Typed network surface artifacts for surface graph ingestion"
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Parse domain from URL
- */
-function parseDomain(target: string): string {
-    try {
-        if (!target.includes("://")) {
-            target = `https://${target}`;
-        }
-        const url = new URL(target);
-        return url.hostname;
-    } catch {
-        return target.replace(/^https?:\/\//, "").split("/")[0].split(":")[0];
-    }
-}
-
-/**
- * Get certificate info via HTTPS probe
- */
-async function getCertificateInfo(domain: string): Promise<CertInfo | null> {
-    try {
-        const tlsApi = (globalThis as any)?.Sentinel?.TLS;
-        if (tlsApi?.getCertificate) {
-            const tlsResult: TlsProbeResponse = await tlsApi.getCertificate(domain, {
-                port: 443,
-                timeout: CERT_MONITOR_TLS_TIMEOUT_MS,
-            });
-
-            if (tlsResult?.success && tlsResult.cert) {
-                return {
-                    subject: tlsResult.cert.subject || `CN=${domain}`,
-                    issuer: tlsResult.cert.issuer || "Unknown",
-                    validFrom: tlsResult.cert.validFrom || new Date().toISOString(),
-                    validTo: tlsResult.cert.validTo || new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-                    fingerprint: tlsResult.cert.fingerprint || "",
-                    serialNumber: tlsResult.cert.serialNumber || generateId().replace(/-/g, "").toUpperCase().substring(0, 32),
-                    altNames: Array.isArray(tlsResult.cert.altNames) && tlsResult.cert.altNames.length > 0
-                        ? tlsResult.cert.altNames
-                        : [domain],
-                    protocol: tlsResult.cert.protocol || "TLS",
-                    cipher: tlsResult.cert.cipher || "Unknown",
-                };
-            }
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-async function runWithConcurrency<T>(
-    tasks: (() => Promise<T>)[],
-    concurrency: number,
-): Promise<T[]> {
-    if (tasks.length === 0) {
-        return [];
-    }
-
-    const workerCount = Math.max(1, Math.min(concurrency, tasks.length));
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-
-    await Promise.all(Array.from({ length: workerCount }, async () => {
-        while (true) {
-            const currentIndex = nextIndex++;
-            if (currentIndex >= tasks.length) {
-                return;
-            }
-            results[currentIndex] = await tasks[currentIndex]();
-        }
-    }));
-
-    return results;
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!input.targets || !Array.isArray(input.targets)) {
-            return {
-                success: false,
-                error: "Invalid input: targets array is required"
-            };
-        }
-        
-        // Filter out empty strings
-        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
-        if (validTargets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: targets array must contain at least one non-empty string"
-            };
-        }
-
-        const checkExpiry = input.checkExpiry !== false;
-        const expiryWarningDays = input.expiryWarningDays || 30;
-        const previousSnapshots = input.previousSnapshots || {};
-        const monitorExecution = input.__monitorExecution;
-
-        const normalizedDomains = Array.from(
-            new Set(
-                validTargets
-                    .map((target) => parseDomain(target).trim().toLowerCase())
-                    .filter((domain) => domain.length > 0),
-            ),
-        );
-        const totalProgressUnits = normalizedDomains.length;
-        let completedProgressUnits = 0;
-
-        const advanceProgress = async (update: MonitorProgressUpdate, current = completedProgressUnits) => {
-            completedProgressUnits = Math.min(
-                totalProgressUnits,
-                Math.max(0, current),
-            );
-            await reportMonitorProgress(monitorExecution, {
-                total: totalProgressUnits,
-                current: completedProgressUnits,
-                ...update,
-            });
-        };
-
-        await advanceProgress({
-            phase: "prepare",
-            message: "Preparing certificate checks",
-            phaseLabel: "Preparing certificate checks",
-            indeterminate: true,
-        });
-
-        const results: CertResult[] = [];
-        const changeEvents: ChangeEvent[] = [];
-        const newSnapshots: Record<string, CertSnapshot> = {};
-
-        let successfulChecks = 0;
-        let failedChecks = 0;
-        let certificateChanges = 0;
-        let expiringCertificates = 0;
-        let expiredCertificates = 0;
-        let completedDomains = 0;
-
-        async function processDomain(domain: string, domainIndex: number): Promise<void> {
-            const result: CertResult = {
-                domain,
-                success: false,
-            };
-            const targetLabel = formatTargetLabel(
-                domain,
-                domainIndex + 1,
-                normalizedDomains.length,
-            );
-
-            try {
-                await advanceProgress({
-                    currentTarget: targetLabel,
-                    phase: "probe",
-                    phaseLabel: "Connecting",
-                    message: `Connecting to ${domain}`,
-                });
-
-                const certInfo = await getCertificateInfo(domain);
-
-                await advanceProgress({
-                    currentTarget: targetLabel,
-                    phase: "probe",
-                    phaseLabel: "Reading certificate",
-                    message: certInfo
-                        ? `Retrieved certificate for ${domain}`
-                        : `Unable to retrieve certificate for ${domain}`,
-                });
-
-                if (certInfo) {
-                    result.success = true;
-                    result.certInfo = certInfo;
-                    successfulChecks++;
-
-                    // Create snapshot
-                    const snapshot: CertSnapshot = {
-                        domain,
-                        fingerprint: certInfo.fingerprint,
-                        validTo: certInfo.validTo,
-                        issuer: certInfo.issuer,
-                        lastChecked: new Date().toISOString(),
-                    };
-                    result.snapshot = snapshot;
-                    newSnapshots[domain] = snapshot;
-
-                    // Check for changes against previous snapshot
-                    const prevSnapshot = previousSnapshots[domain];
-                    if (prevSnapshot) {
-                        // Certificate fingerprint changed
-                        if (prevSnapshot.fingerprint !== certInfo.fingerprint) {
-                            certificateChanges++;
-
-                            const event: ChangeEvent = {
-                                id: generateId(),
-                                assetId: domain,
-                                eventType: "certificate_change",
-                                severity: "medium",
-                                title: `SSL Certificate Changed: ${domain}`,
-                                description: `The SSL/TLS certificate for ${domain} has been replaced with a new certificate.`,
-                                oldValue: prevSnapshot.fingerprint,
-                                newValue: certInfo.fingerprint,
-                                detectionMethod: "cert_monitor",
-                                tags: ["certificate", "ssl", "tls", "change"],
-                                autoTriggerEnabled: true,
-                                riskScore: 0,
-                                metadata: {
-                                    previousIssuer: prevSnapshot.issuer,
-                                    newIssuer: certInfo.issuer,
-                                    previousValidTo: prevSnapshot.validTo,
-                                    newValidTo: certInfo.validTo,
-                                },
-                            };
-                            event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                            changeEvents.push(event);
-                        }
-
-                        // Issuer changed (potentially suspicious)
-                        if (prevSnapshot.issuer !== certInfo.issuer && prevSnapshot.issuer !== "Unknown") {
-                            const event: ChangeEvent = {
-                                id: generateId(),
-                                assetId: domain,
-                                eventType: "issuer_change",
-                                severity: "high",
-                                title: `Certificate Issuer Changed: ${domain}`,
-                                description: `The certificate issuer for ${domain} has changed, which could indicate a certificate replacement or potential security issue.`,
-                                oldValue: prevSnapshot.issuer,
-                                newValue: certInfo.issuer,
-                                detectionMethod: "cert_monitor",
-                                tags: ["certificate", "issuer", "change", "security"],
-                                autoTriggerEnabled: true,
-                                riskScore: 0,
-                                metadata: {
-                                    domain,
-                                    fingerprint: certInfo.fingerprint,
-                                },
-                            };
-                            event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                            changeEvents.push(event);
-                        }
-                    }
-
-                    // Check certificate expiry
-                    if (checkExpiry) {
-                        const validTo = new Date(certInfo.validTo);
-                        const now = new Date();
-                        const daysUntilExpiry = Math.floor((validTo.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-                        result.daysUntilExpiry = daysUntilExpiry;
-
-                        if (daysUntilExpiry <= 0) {
-                            expiredCertificates++;
-
-                            const event: ChangeEvent = {
-                                id: generateId(),
-                                assetId: domain,
-                                eventType: "certificate_expired",
-                                severity: "critical",
-                                title: `Certificate Expired: ${domain}`,
-                                description: `The SSL/TLS certificate for ${domain} has expired ${Math.abs(daysUntilExpiry)} days ago.`,
-                                newValue: certInfo.validTo,
-                                detectionMethod: "cert_monitor",
-                                tags: ["certificate", "expired", "critical", "security"],
-                                autoTriggerEnabled: true,
-                                riskScore: 0,
-                                metadata: {
-                                    daysExpired: Math.abs(daysUntilExpiry),
-                                    fingerprint: certInfo.fingerprint,
-                                    issuer: certInfo.issuer,
-                                },
-                            };
-                            event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                            changeEvents.push(event);
-                        } else if (daysUntilExpiry <= expiryWarningDays) {
-                            expiringCertificates++;
-
-                            const severity = daysUntilExpiry <= 7 ? "high" : "medium";
-                            const event: ChangeEvent = {
-                                id: generateId(),
-                                assetId: domain,
-                                eventType: "certificate_expiring",
-                                severity: severity,
-                                title: `Certificate Expiring Soon: ${domain}`,
-                                description: `The SSL/TLS certificate for ${domain} will expire in ${daysUntilExpiry} days.`,
-                                newValue: certInfo.validTo,
-                                detectionMethod: "cert_monitor",
-                                tags: ["certificate", "expiring", "warning"],
-                                autoTriggerEnabled: daysUntilExpiry <= 7,
-                                riskScore: 0,
-                                metadata: {
-                                    daysUntilExpiry,
-                                    fingerprint: certInfo.fingerprint,
-                                    issuer: certInfo.issuer,
-                                },
-                            };
-                            event.riskScore = calculateRiskScore(event.severity, event.eventType);
-                            changeEvents.push(event);
-                        }
-                    }
-                } else {
-                    result.error = "Failed to retrieve certificate";
-                    failedChecks++;
-                }
-            } catch (error: any) {
-                result.error = error.message || String(error);
-                failedChecks++;
-            }
-
-            results.push(result);
-            completedDomains += 1
-            await advanceProgress({
-                currentTarget: targetLabel,
-                phase: "probe",
-                phaseLabel: result.success ? "Completed" : "Failed",
-                message: result.success
-                    ? `Finished certificate check for ${domain}`
-                    : `Certificate check failed for ${domain}`,
-            }, completedDomains);
-        }
-
-        const concurrency = Math.max(
-            1,
-            Math.min(input.concurrency || DEFAULT_CONCURRENCY, MAX_CONCURRENCY, normalizedDomains.length),
-        );
-        await runWithConcurrency(
-            normalizedDomains.map((domain, targetIndex) => () => processDomain(domain, targetIndex)),
-            concurrency,
-        );
-
-        await advanceProgress({
-            phase: "compare",
-            message: "Comparing certificate snapshots",
-            phaseLabel: "Comparing snapshots",
-        });
-
-        const certificates = results
-            .filter((result) => result.success && result.certInfo)
-            .map((result) => {
-                const certInfo = result.certInfo!;
-                return {
-                    domain: result.domain,
-                    hostname: result.domain,
-                    subject: certInfo.subject,
-                    issuer: certInfo.issuer,
-                    fingerprint: certInfo.fingerprint,
-                    valid_from: certInfo.validFrom,
-                    valid_to: certInfo.validTo,
-                    san: certInfo.altNames,
-                    tls_version: certInfo.protocol,
-                    is_valid: new Date(certInfo.validTo).getTime() > Date.now(),
-                };
-            });
-
-        const discoveredSubdomains = new Set<string>(
-            certificates.flatMap((cert) => [cert.domain, ...cert.san]),
-        );
-
-        await advanceProgress({
-            phase: "build",
-            message: "Building certificate artifacts",
-            phaseLabel: "Building artifacts",
-        });
-
-        return {
-            success: true,
-            data: {
-                results,
-                changeEvents,
-                snapshots: newSnapshots,
-                summary: {
-                    totalTargets: normalizedDomains.length,
-                    successfulChecks,
-                    failedChecks,
-                    certificateChanges,
-                    expiringCertificates,
-                    expiredCertificates,
-                },
-                surface_artifacts: {
-                    certificates: certificates.map(cert => ({
-                        sha256: cert.fingerprint,
-                        issuer: cert.issuer,
-                        subject: cert.subject,
-                        san_list: cert.san,
-                        valid_from: cert.valid_from,
-                        valid_to: cert.valid_to,
-                        protocol: cert.tls_version,
-                        hostname: cert.hostname,
-                        self_signed_flag: cert.issuer === cert.subject,
-                        related_domains: Array.from(new Set([cert.domain, ...cert.san])),
-                        risk_status: !cert.is_valid ? "expired" : "valid",
-                        source: "cert_monitor",
-                        confidence: 0.98,
-                    })),
-                    domains: [...discoveredSubdomains].sort().map(domain => ({
-                        fqdn: domain,
-                        root_domain: domain.split(".").slice(-2).join("."),
-                        source: "cert_monitor",
-                        confidence: 0.7,
-                    })),
-                    changes: changeEvents.map(event => ({
-                        asset_key: event.assetId,
-                        asset_type: "domain",
-                        change_type: event.eventType,
-                        severity: event.severity,
-                        title: event.title,
-                        description: event.description,
-                        old_value: event.oldValue,
-                        new_value: event.newValue,
-                        risk_score: event.riskScore,
-                        source: "cert_monitor",
-                        metadata: event.metadata,
-                    })),
-                    evidences: certificates.map(cert => ({
-                        asset_type: "certificate",
-                        asset_key: cert.fingerprint,
-                        evidence_type: "certificate_snapshot",
-                        title: `Certificate Snapshot: ${cert.hostname}`,
-                        content_text: `${cert.subject} | ${cert.issuer} | ${cert.valid_to}`,
-                        content_json: {
-                            hostname: cert.hostname,
-                            domain: cert.domain,
-                            subject: cert.subject,
-                            issuer: cert.issuer,
-                            fingerprint: cert.fingerprint,
-                            valid_from: cert.valid_from,
-                            valid_to: cert.valid_to,
-                            san: cert.san,
-                            tls_version: cert.tls_version,
-                        },
-                        source: "cert_monitor",
-                    })),
-                    relations: certificates.flatMap(cert =>
-                        Array.from(new Set([cert.domain, ...cert.san])).map(domain => ({
-                            from_type: "domain",
-                            from_key: domain,
-                            to_type: "certificate",
-                            to_key: cert.fingerprint,
-                            relation_type: "covered_by_certificate",
-                            source: "cert_monitor",
-                            confidence: 0.9,
-                        })),
-                    ),
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/cert_monitor/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}var CERT_MONITOR_TLS_TIMEOUT_MS=3e3;var DEFAULT_CONCURRENCY=32;var MAX_CONCURRENCY=32;async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)
+return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.
+program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.
+current_plugin_index,completedSteps:monitorExecution.completed_steps,totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{
+return false}}function formatTargetLabel(domain,index,total){if(total<=0)return domain;return`${domain} (${index}/${total})`}var pluginGlobals=globalThis;function generateId(){
+return"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;const v=c==="x"?r:r&3|8;return v.toString(16)})}function calculateRiskScore(severity,eventType){
+let score=0;switch(severity){case"critical":score+=40;break;case"high":score+=30;break;case"medium":score+=20;break;case"low":score+=10;break}switch(eventType){case"\
+certificate_expired":score+=30;break;case"certificate_expiring":score+=20;break;case"certificate_change":score+=15;break;case"issuer_change":score+=25;break}return Math.
+min(score,100)}function get_input_schema(){return{type:"object",required:["targets"],properties:{targets:{type:"array",items:{type:"string"},description:"List o\
+f domains or URLs to monitor certificates"},checkExpiry:{type:"boolean",description:"Check certificate expiry dates",default:true},expiryWarningDays:{type:"inte\
+ger",description:"Days before expiry to generate warning",default:30,minimum:1,maximum:365},concurrency:{type:"integer",description:"Number of concurrent TLS ce\
+rtificate checks",default:DEFAULT_CONCURRENCY,minimum:1,maximum:MAX_CONCURRENCY},previousSnapshots:{type:"object",description:"Previous certificate snapshots fo\
+r comparison",additionalProperties:{type:"object",properties:{domain:{type:"string"},fingerprint:{type:"string"},validTo:{type:"string"},issuer:{type:"string"},
+lastChecked:{type:"string"}}}}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"object",properties:{success:{type:"bo\
+olean",description:"Whether the operation succeeded"},data:{type:"object",properties:{results:{type:"array",items:{type:"object",properties:{domain:{type:"strin\
+g"},success:{type:"boolean"},certInfo:{type:"object"},daysUntilExpiry:{type:"integer"}}},description:"Certificate check results"},changeEvents:{type:"array",description:"\
+Change events detected"},snapshots:{type:"object",description:"Certificate snapshots by domain"},summary:{type:"object",properties:{totalTargets:{type:"integer"},
+certificateChanges:{type:"integer"},expiringCertificates:{type:"integer"},expiredCertificates:{type:"integer"}}},surface_artifacts:{type:"object",description:"T\
+yped network surface artifacts for surface graph ingestion"}}},error:{type:"string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;
+function tlsTarget(target){const value=target.includes("://")?target:`https://${target}`;const parsed=new URL(value);if(!parsed.hostname||!["https:","http:"].includes(
+parsed.protocol)||parsed.username||parsed.password||parsed.hash)throw new Error("Invalid TLS inspection target");const hostname=parsed.hostname.replace(/^\[|\]$/g,
+"").toLowerCase();const port=parsed.port?Number(parsed.port):443;if(!Number.isInteger(port)||port<=0||port>65535)throw new Error("Invalid TLS inspection port");
+const hostKey=hostname.includes(":")?`[${hostname}]`:hostname;return{hostname,port,key:port===443?hostname:`${hostKey}:${port}`}}function certificateKey(fingerprint){
+const sha256=fingerprint.replaceAll(":","").toLowerCase();if(!/^[a-f0-9]{64}$/.test(sha256))throw new Error("Native TLS certificate SHA-256 fingerprint is inval\
+id");return sha256}function certificateDomain(value){return value.length<=253&&!/^\d+(?:\.\d+){3}$/.test(value)&&value.split(".").every(label=>/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.
+test(label))}async function getCertificateInfo(target){const{hostname,port}=tlsTarget(target);const tlsApi=globalThis?.Sentinel?.TLS;if(typeof tlsApi?.getCertificate!==
+"function")throw new Error("Native TLS inspection API is unavailable");const response=await tlsApi.getCertificate(hostname,{port,timeoutMs:CERT_MONITOR_TLS_TIMEOUT_MS});
+if(!response?.success||!response.cert)throw new Error("Native TLS certificate inspection failed");const cert=response.cert;for(const field of["subject","issuer",
+"validFrom","validTo","fingerprintSha256","serialNumber"]){if(typeof cert[field]!=="string"||!cert[field].trim())throw new Error(`Native TLS certificate is miss\
+ing ${field}`)}if(!Number.isFinite(Date.parse(cert.validFrom))||!Number.isFinite(Date.parse(cert.validTo)))throw new Error("Native TLS certificate validity date\
+s are invalid");if(!Array.isArray(cert.subjectAltNames)||cert.subjectAltNames.some(name=>typeof name!=="string"||!name))throw new Error("Native TLS certificate \
+SAN list is invalid");return{subject:cert.subject,issuer:cert.issuer,serialNumber:cert.serialNumber,validFrom:cert.validFrom,validTo:cert.validTo,fingerprint:cert.
+fingerprintSha256,altNames:cert.subjectAltNames,...cert.tlsVersion?{protocol:cert.tlsVersion}:{},...cert.cipherSuite?{cipher:cert.cipherSuite}:{}}}async function runWithConcurrency(tasks,concurrency){
+if(tasks.length===0){return[]}const workerCount=Math.max(1,Math.min(concurrency,tasks.length));const results=new Array(tasks.length);let nextIndex=0;await Promise.
+all(Array.from({length:workerCount},async()=>{while(true){const currentIndex=nextIndex++;if(currentIndex>=tasks.length){return}results[currentIndex]=await tasks[currentIndex]()}}));
+return results}function projectCertificateOutput(results,changeEvents,newSnapshots,summary){const certificates=results.filter(result=>result.success&&result.certInfo).
+map(result=>{const certInfo=result.certInfo;return{domain:result.domain,hostname:result.domain,subject:certInfo.subject,issuer:certInfo.issuer,fingerprint:certInfo.
+fingerprint,valid_from:certInfo.validFrom,valid_to:certInfo.validTo,san:certInfo.altNames,tls_version:certInfo.protocol,is_valid:new Date(certInfo.validTo).getTime()>
+Date.now()}});const discoveredSubdomains=new Set(certificates.flatMap(cert=>[cert.domain,...cert.san]).filter(certificateDomain));return{success:true,data:{results,
+changeEvents,snapshots:newSnapshots,summary,surface_artifacts:{certificates:certificates.map(cert=>({sha256:certificateKey(cert.fingerprint),issuer:cert.issuer,
+subject:cert.subject,san_list:cert.san,valid_from:cert.valid_from,valid_to:cert.valid_to,protocol:cert.tls_version,hostname:cert.hostname,self_signed_flag:cert.
+issuer===cert.subject,related_domains:Array.from(new Set([cert.domain,...cert.san])).filter(certificateDomain),risk_status:!cert.is_valid?"expired":"valid",source:"\
+cert_monitor",confidence:.98})),domains:[...discoveredSubdomains].sort().map(domain=>({fqdn:domain,root_domain:domain.split(".").slice(-2).join("."),source:"cer\
+t_monitor",confidence:.7})),changes:changeEvents.map(event=>({asset_key:event.assetId,asset_type:"domain",change_type:event.eventType,severity:event.severity,title:event.
+title,description:event.description,old_value:event.oldValue,new_value:event.newValue,risk_score:event.riskScore,source:"cert_monitor",metadata:event.metadata})),
+evidences:certificates.map(cert=>({asset_type:"certificate",asset_key:certificateKey(cert.fingerprint),evidence_type:"certificate_snapshot",title:`Certificate S\
+napshot: ${cert.hostname}`,content_text:`${cert.subject} | ${cert.issuer} | ${cert.valid_to}`,content_json:{hostname:cert.hostname,domain:cert.domain,subject:cert.
+subject,issuer:cert.issuer,fingerprint:cert.fingerprint,valid_from:cert.valid_from,valid_to:cert.valid_to,san:cert.san,tls_version:cert.tls_version},source:"cer\
+t_monitor"})),relations:certificates.flatMap(cert=>Array.from(new Set([cert.domain,...cert.san])).filter(certificateDomain).map(domain=>({from_type:"domain",from_key:domain,
+to_type:"certificate",to_key:certificateKey(cert.fingerprint),relation_type:"covered_by_certificate",source:"cert_monitor",confidence:.9})))}}}}async function analyze(input){
+try{const stream=createMonitorResultStream(input);const writeTarget=createMonitorTargetWriter(input,stream,target=>tlsTarget(target).key);if(!input.targets||!Array.
+isArray(input.targets)){return{success:false,error:"Invalid input: targets array is required"}}const validTargets=input.targets.filter(t=>typeof t==="string"&&t.
+trim().length>0);if(validTargets.length===0){return{success:false,error:"Invalid input: targets array must contain at least one non-empty string"}}const checkExpiry=input.
+checkExpiry!==false;const expiryWarningDays=input.expiryWarningDays||30;const previousSnapshots=input.previousSnapshots||{};const monitorExecution=input.__monitorExecution;
+const normalizedDomains=Array.from(new Set(validTargets.map(target=>tlsTarget(target).key).filter(domain=>domain.length>0)));const totalProgressUnits=normalizedDomains.
+length;let completedProgressUnits=0;const advanceProgress=async(update,current=completedProgressUnits)=>{completedProgressUnits=Math.min(totalProgressUnits,Math.
+max(0,current));await reportMonitorProgress(monitorExecution,{total:totalProgressUnits,current:completedProgressUnits,...update})};await advanceProgress({phase:"\
+prepare",message:"Preparing certificate checks",phaseLabel:"Preparing certificate checks",indeterminate:true});const results=[];const changeEvents=[];const newSnapshots={};
+let successfulChecks=0;let failedChecks=0;let certificateChanges=0;let expiringCertificates=0;let expiredCertificates=0;let completedDomains=0;async function processDomain(endpoint,domainIndex){
+const domain=tlsTarget(endpoint).hostname;stream.assertHealthy();const targetChangeEvents=[];const result={domain,success:false};const targetLabel=formatTargetLabel(
+domain,domainIndex+1,normalizedDomains.length);try{await advanceProgress({currentTarget:targetLabel,phase:"probe",phaseLabel:"Connecting",message:`Connecting to\
+ ${domain}`});const certInfo=await getCertificateInfo(endpoint);await advanceProgress({currentTarget:targetLabel,phase:"probe",phaseLabel:"Reading certificate",
+message:certInfo?`Retrieved certificate for ${domain}`:`Unable to retrieve certificate for ${domain}`});if(certInfo){result.success=true;result.certInfo=certInfo;
+successfulChecks++;const snapshot={domain,fingerprint:certInfo.fingerprint,validTo:certInfo.validTo,issuer:certInfo.issuer,lastChecked:new Date().toISOString()};
+result.snapshot=snapshot;if(!stream.enabled)newSnapshots[endpoint]=snapshot;const prevSnapshot=previousSnapshots[endpoint];if(prevSnapshot){if(prevSnapshot.fingerprint!==
+certInfo.fingerprint){certificateChanges++;const event={id:generateId(),assetId:domain,eventType:"certificate_change",severity:"medium",title:`SSL Certificate C\
+hanged: ${domain}`,description:`The SSL/TLS certificate for ${domain} has been replaced with a new certificate.`,oldValue:prevSnapshot.fingerprint,newValue:certInfo.
+fingerprint,detectionMethod:"cert_monitor",tags:["certificate","ssl","tls","change"],autoTriggerEnabled:true,riskScore:0,metadata:{previousIssuer:prevSnapshot.issuer,
+newIssuer:certInfo.issuer,previousValidTo:prevSnapshot.validTo,newValidTo:certInfo.validTo}};event.riskScore=calculateRiskScore(event.severity,event.eventType);
+targetChangeEvents.push(event)}if(prevSnapshot.issuer!==certInfo.issuer&&prevSnapshot.issuer!=="Unknown"){const event={id:generateId(),assetId:domain,eventType:"\
+issuer_change",severity:"high",title:`Certificate Issuer Changed: ${domain}`,description:`The certificate issuer for ${domain} has changed, which could indicate\
+ a certificate replacement or potential security issue.`,oldValue:prevSnapshot.issuer,newValue:certInfo.issuer,detectionMethod:"cert_monitor",tags:["certificate",
+"issuer","change","security"],autoTriggerEnabled:true,riskScore:0,metadata:{domain,fingerprint:certInfo.fingerprint}};event.riskScore=calculateRiskScore(event.severity,
+event.eventType);targetChangeEvents.push(event)}}if(checkExpiry){const validTo=new Date(certInfo.validTo);const now=new Date;const daysUntilExpiry=Math.floor((validTo.
+getTime()-now.getTime())/(1e3*60*60*24));result.daysUntilExpiry=daysUntilExpiry;if(daysUntilExpiry<=0){expiredCertificates++;const event={id:generateId(),assetId:domain,
+eventType:"certificate_expired",severity:"critical",title:`Certificate Expired: ${domain}`,description:`The SSL/TLS certificate for ${domain} has expired ${Math.
+abs(daysUntilExpiry)} days ago.`,newValue:certInfo.validTo,detectionMethod:"cert_monitor",tags:["certificate","expired","critical","security"],autoTriggerEnabled:true,
+riskScore:0,metadata:{daysExpired:Math.abs(daysUntilExpiry),fingerprint:certInfo.fingerprint,issuer:certInfo.issuer}};event.riskScore=calculateRiskScore(event.severity,
+event.eventType);targetChangeEvents.push(event)}else if(daysUntilExpiry<=expiryWarningDays){expiringCertificates++;const severity=daysUntilExpiry<=7?"high":"med\
+ium";const event={id:generateId(),assetId:domain,eventType:"certificate_expiring",severity,title:`Certificate Expiring Soon: ${domain}`,description:`The SSL/TLS\
+ certificate for ${domain} will expire in ${daysUntilExpiry} days.`,newValue:certInfo.validTo,detectionMethod:"cert_monitor",tags:["certificate","expiring","war\
+ning"],autoTriggerEnabled:daysUntilExpiry<=7,riskScore:0,metadata:{daysUntilExpiry,fingerprint:certInfo.fingerprint,issuer:certInfo.issuer}};event.riskScore=calculateRiskScore(
+event.severity,event.eventType);targetChangeEvents.push(event)}}}else{result.error="Failed to retrieve certificate";failedChecks++}}catch(error){result.error=error.
+message||String(error);failedChecks++}if(!stream.enabled){results.push(result);changeEvents.push(...targetChangeEvents)}await writeTarget(endpoint,"tls-certific\
+ate",projectCertificateOutput([result],targetChangeEvents,result.snapshot?{[endpoint]:result.snapshot}:{},{}),{status:result.success?"ok":"failed",error:result.
+error});completedDomains+=1;await advanceProgress({currentTarget:targetLabel,phase:"probe",phaseLabel:result.success?"Completed":"Failed",message:result.success?
+`Finished certificate check for ${domain}`:`Certificate check failed for ${domain}`},completedDomains)}const concurrency=Math.max(1,Math.min(input.concurrency||
+DEFAULT_CONCURRENCY,MAX_CONCURRENCY,normalizedDomains.length));await runWithConcurrency(normalizedDomains.map((domain,targetIndex)=>()=>processDomain(domain,targetIndex)),
+concurrency);await advanceProgress({phase:"compare",message:"Comparing certificate snapshots",phaseLabel:"Comparing snapshots"});return await stream.finish(projectCertificateOutput(
+results,changeEvents,newSnapshots,{totalTargets:normalizedDomains.length,successfulChecks,failedChecks,certificateChanges,expiringCertificates,expiredCertificates}))}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

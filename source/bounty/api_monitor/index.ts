@@ -3,7 +3,7 @@
  *
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.4.3
+ * @version 1.4.4
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -12,9 +12,13 @@
  * @target_asset_types ["web"]
  * @seed_bindings []
  * @default_severity high
- * @tags api, endpoint, monitor, change-detection, rest, javascript, spa, capability:fetch, capability:monitor-events
+ * @tags api, endpoint, monitor, change-detection, rest, javascript, spa, capability:fetch, capability:monitor-events, monitor:results-stream-v1
  * @description Monitor API endpoints and HTML routes by discovering JavaScript assets from pages and bundles, extracting API-like and route-like path literals, and comparing snapshot changes over time
  */
+import { createMonitorResultStream } from '../../shared/monitor_results.ts';
+import { webMonitorChanges } from '../../shared/monitor_changes.ts';
+
+import type { DocumentRole } from './discovery.ts';
 import type { MonitorExecutionContext, ToolInput, JsLink, ScriptContentSource, SourceMapLike, FetchResult, JsDiscoveryResult, ApiEndpoint, HtmlRoute, ApiSnapshot, JsFetchFailure, ChangeEvent, ApiResult, ToolOutput } from './types.ts';
 import { reportMonitorProgress, generateId, runWithConcurrency, DEFAULT_MAX_JS_FILES, DEFAULT_PAGE_CRAWL_LIMIT, DEFAULT_MAX_PAGES, PAGE_FETCH_CONCURRENCY_LIMIT, JS_FETCH_CONCURRENCY_LIMIT, MAX_JS_DISCOVERY_DEPTH, MAX_STRING_SCAN_MATCHES, MAX_PATH_CANDIDATE_LENGTH, EXCLUDED_STATIC_PREFIXES, EXCLUDED_EXACT_PATHS, EXCLUDED_STATIC_EXTENSIONS, EXCLUDED_HTML_TAG_PATHS, VENDOR_JS_FILENAME_PATTERNS, VENDOR_JS_PATH_SEGMENTS, normalizeCommonPathCandidate, extractPathCandidate, isStaticAssetPath, normalizeEndpointPath, normalizeHtmlRoutePath, pushApiEndpoint, pushHtmlRoute, maybePushStringCandidate, readEscapedJsChar, skipJsComment, skipQuotedJsValue, skipTemplateExpression, extractStringPathCandidates, extractPathsFromJs, simpleHash, resolveUrl, isSameOrigin, looksLikeJs, shouldSkipVendorJs, PAGE_FETCH_TIMEOUT_MS, fetchDocument, canAnalyzePageResponse, describeTargetFetchFailure, extractScriptTags, extractLinkTags, extractInlineScripts, extractWebpackRuntimeChunkLinks, pushDiscoveredJsLink, extractJsFromContent, resolveSourceMapSourceUrl, parseSourceMapScriptContents, parseManifest, getManifestUrls, extractSameOriginPageLinks, pushJsLink, discoverJavascriptAssets, calculateRiskScore } from './discovery.ts';
 
@@ -227,7 +231,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             };
         }
 
-        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
+        const validTargets = [...new Set(input.targets.filter(t => typeof t === 'string' && t.trim().length > 0))];
         if (validTargets.length === 0) {
             return {
                 success: false,
@@ -243,6 +247,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const followSourceMaps = input.followSourceMaps === true;
         const probeSpaManifests = input.probeSpaManifests === true;
         const previousSnapshots = input.previousSnapshots || {};
+        const stream = createMonitorResultStream(input);
         const monitorExecution = input.__monitorExecution;
         const totalProgressUnits = validTargets.length + 2;
 
@@ -271,6 +276,50 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         let completedTargets = 0;
 
         const targetTasks = validTargets.map((target) => async () => {
+            stream.assertHealthy();
+            const targetChanges: ChangeEvent[] = [];
+            const allHtmlRoutes: HtmlRoute[] = [];
+            const allApiEndpoints: ApiEndpoint[] = [];
+            let resourceIndex = 0;
+            let resourceFailures = 0;
+            const documentCompleted = async (url: string, resource: FetchResult, role: DocumentRole): Promise<void> => {
+                stream.assertHealthy();
+                // Missing optional manifests are a complete negative result. A linked
+                // page/script failure leaves the root inventory incomplete.
+                const failed = resource.status === null || (!resource.ok && !(role === "manifest" && resource.status === 404));
+                if (failed) resourceFailures++;
+                if (!stream.enabled) return;
+                const extracted: { apiEndpoints: ApiEndpoint[]; htmlRoutes: HtmlRoute[] } = { apiEndpoints: [], htmlRoutes: [] };
+                if (resource.ok && resource.text) {
+                    const sources = role === "sourcemap" ? parseSourceMapScriptContents(resource.text, url)
+                        : looksLikeJs(url) || /javascript|ecmascript/.test(resource.contentType)
+                            ? [{ source: url, content: resource.text }] : [];
+                    for (const source of sources) {
+                        const paths = extractPathsFromJs(source.content, source.source);
+                        extracted.apiEndpoints.push(...paths.apiEndpoints);
+                        extracted.htmlRoutes.push(...paths.htmlRoutes);
+                    }
+                    if ((role === "target" || role === "page") && !sources.length && canAnalyzePageResponse(resource)) {
+                        for (const inline of extractInlineScripts(resource.text)) {
+                            const paths = extractPathsFromJs(inline.content, `inline://${url}#${inline.hash}`);
+                            extracted.apiEndpoints.push(...paths.apiEndpoints);
+                            extracted.htmlRoutes.push(...paths.htmlRoutes);
+                        }
+                        const seen = new Set<string>();
+                        pushHtmlRoute(extracted.htmlRoutes, seen, url, `page:${url}`);
+                        for (const link of extractSameOriginPageLinks(resource.text, url).slice(0, DEFAULT_PAGE_CRAWL_LIMIT)) {
+                            pushHtmlRoute(extracted.htmlRoutes, seen, link.path, `html_link:${url}`);
+                        }
+                    }
+                }
+                allHtmlRoutes.push(...extracted.htmlRoutes);
+                allApiEndpoints.push(...extracted.apiEndpoints);
+                await stream.record(target, `resource:${++resourceIndex}:${simpleHash(url)}`, { success: true, data: {
+                    resourceResults: [{ url, finalUrl: resource.finalUrl, role, status: resource.status, contentType: resource.contentType,
+                        size: resource.size, ...(failed ? { error: "API resource request failed" } : {}),
+                        apiEndpoints: extracted.apiEndpoints, htmlRoutes: extracted.htmlRoutes }],
+                } }, { complete: false, status: failed ? "failed" : "ok", ...(failed ? { failure_category: "network_other" } : {}) });
+            };
             let baseUrl = target;
             if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
                 baseUrl = `https://${baseUrl}`;
@@ -283,8 +332,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
             try {
                 const targetStartedAt = Date.now();
-                const allHtmlRoutes: HtmlRoute[] = [];
-                const allApiEndpoints: ApiEndpoint[] = [];
                 let jsFilesAnalyzed = 0;
                 let crawledPages = 1;
                 let htmlRoutesDiscovered = 0;
@@ -311,17 +358,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     baseUrl,
                     userAgent,
                     "text/html,application/xhtml+xml,*/*",
+                    documentCompleted,
+                    "target",
+                    () => stream.assertHealthy(),
                 );
                 targetFetchMs = Date.now() - targetFetchStartedAt;
 
-                if (!pageResult || pageResult.status === null) {
+                if (!pageResult || !pageResult.ok) {
                     result.error = describeTargetFetchFailure(pageResult);
-                    failedChecks++;
-                    results.push(result);
                     return;
                 }
-
-                successfulChecks++;
 
                 const pageContent = canAnalyzePageResponse(pageResult) ? pageResult.text : "";
                 const directJsTarget = Boolean(pageContent) && (looksLikeJs(baseUrl) || pageResult.contentType.includes("javascript"));
@@ -342,6 +388,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             includeSameOriginOnly,
                             followSourceMaps,
                             probeSpaManifests,
+                            documentCompleted,
+                            () => stream.assertHealthy(),
+                            !stream.enabled,
                         );
                         assetDiscoveryMs = Date.now() - assetDiscoveryStartedAt;
                         scriptSources = discoveryResult.scriptContents;
@@ -410,9 +459,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     lastChecked: new Date().toISOString(),
                 };
 
+                if (resourceFailures > 0 || (result.jsFetchFailures?.length || 0) > 0) {
+                    throw new Error("API discovery incomplete; previous inventory retained");
+                }
                 result.success = true;
                 result.snapshot = snapshot;
-                newSnapshots[baseUrl] = snapshot;
+                if (!stream.enabled) newSnapshots[baseUrl] = snapshot;
 
                 await reportMonitorProgress(monitorExecution, {
                     current: completedTargets + 1,
@@ -461,7 +513,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, addedHtmlRoutes.length);
-                        changeEvents.push(event);
+                        targetChanges.push(event);
+                        if (!stream.enabled) changeEvents.push(event);
                     }
 
                     if (removedHtmlRoutes.length > 0) {
@@ -486,7 +539,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, removedHtmlRoutes.length);
-                        changeEvents.push(event);
+                        targetChanges.push(event);
+                        if (!stream.enabled) changeEvents.push(event);
                     }
 
                     if (addedApiEndpoints.length > 0) {
@@ -511,7 +565,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, addedApiEndpoints.length);
-                        changeEvents.push(event);
+                        targetChanges.push(event);
+                        if (!stream.enabled) changeEvents.push(event);
                     }
 
                     if (removedApiEndpoints.length > 0) {
@@ -536,7 +591,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, removedApiEndpoints.length);
-                        changeEvents.push(event);
+                        targetChanges.push(event);
+                        if (!stream.enabled) changeEvents.push(event);
                     }
                 } else {
                     if (uniqueHtmlRoutes.length > 0) {
@@ -557,7 +613,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueHtmlRoutes.length);
-                        changeEvents.push(event);
+                        targetChanges.push(event);
+                        if (!stream.enabled) changeEvents.push(event);
                     }
 
                     if (uniqueApiEndpoints.length > 0) {
@@ -578,7 +635,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                             },
                         };
                         event.riskScore = calculateRiskScore(event.severity, event.eventType, uniqueApiEndpoints.length);
-                        changeEvents.push(event);
+                        targetChanges.push(event);
+                        if (!stream.enabled) changeEvents.push(event);
                     }
                 }
                 compareMs = Date.now() - compareStartedAt;
@@ -610,19 +668,28 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 };
 
             } catch (error: any) {
+                stream.assertHealthy();
                 result.error = error.message || String(error);
-                failedChecks++;
+                result.success = false;
+                delete result.snapshot;
+                delete newSnapshots[baseUrl];
+            } finally {
+                stream.assertHealthy();
+                if (result.success) successfulChecks++;
+                else failedChecks++;
+                await stream.record(target, "complete", { success: true, data: {
+                    results: [result], changeEvents: result.success ? targetChanges : [],
+                    surface_artifacts: { changes: result.success ? webMonitorChanges(targetChanges, "api_monitor") : [] },
+                    snapshots: result.success && result.snapshot ? { [baseUrl]: result.snapshot } : {},
+                    summary: { totalTargets: 1, failedTargets: result.success ? 0 : 1 },
+                } }, { status: result.success ? "ok" : "failed", complete: true });
+                if (!stream.enabled) results.push(result);
+                completedTargets += 1;
+                await reportMonitorProgress(monitorExecution, {
+                    current: completedTargets, total: totalProgressUnits, currentTarget: baseUrl,
+                    phase: "discover", message: `Completed API discovery for ${baseUrl}`,
+                });
             }
-
-            results.push(result);
-            completedTargets += 1;
-            await reportMonitorProgress(monitorExecution, {
-                current: completedTargets,
-                total: totalProgressUnits,
-                currentTarget: baseUrl,
-                phase: "discover",
-                message: `Completed API discovery for ${baseUrl}`,
-            });
         });
 
         await runWithConcurrency(targetTasks, Math.min(50, validTargets.length || 1));
@@ -641,7 +708,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             message: "Building API results",
         });
 
-        return {
+        return await stream.finish({
             success: true,
             data: {
                 results,
@@ -662,7 +729,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     apiChanges,
                 },
             },
-        };
+        });
 
     } catch (error: any) {
         return {

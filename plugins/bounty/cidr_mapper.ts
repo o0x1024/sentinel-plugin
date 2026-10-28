@@ -3,7 +3,7 @@
  *
  * @plugin cidr_mapper
  * @name CIDR Mapper
- * @version 1.0.2
+ * @version 1.0.3
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
@@ -12,252 +12,88 @@
  * @category recon
  * @seed_bindings []
  * @default_severity info
- * @tags cidr, ip, network, asm, surface
+ * @tags cidr, ip, network, asm, surface, capability:monitor-events, monitor:results-stream-v1
  * @description Expand IPv4 CIDR blocks and individual IP targets into typed IP surface artifacts for ASM and network asset mapping workflows
  */
-
-interface ToolInput {
-    targets: string[];
-    maxHosts?: number;
-    includeNetworkBroadcast?: boolean;
-}
-
-interface MappingResult {
-    target: string;
-    kind: "cidr" | "ip";
-    generatedIps: number;
-    truncated: boolean;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        targets: string[];
-        results: MappingResult[];
-        summary: {
-            totalTargets: number;
-            generatedIps: number;
-            truncatedTargets: number;
-        };
-        surface_artifacts?: Record<string, any[]>;
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-function isIpv4(value: string): boolean {
-    const parts = value.split(".");
-    if (parts.length !== 4) return false;
-    return parts.every((part) => {
-        if (!/^\d+$/.test(part)) return false;
-        const num = Number(part);
-        return num >= 0 && num <= 255;
-    });
-}
-
-function ipv4ToInt(ip: string): number {
-    return ip.split(".").reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
-}
-
-function intToIpv4(value: number): string {
-    return [
-        (value >>> 24) & 255,
-        (value >>> 16) & 255,
-        (value >>> 8) & 255,
-        value & 255,
-    ].join(".");
-}
-
-function normalizeTarget(value: string): string {
-    return String(value || "").trim();
-}
-
-function expandIpv4Cidr(
-    cidr: string,
-    maxHosts: number,
-    includeNetworkBroadcast: boolean,
-): { addresses: string[]; truncated: boolean } {
-    const [rawIp, rawPrefix] = cidr.split("/");
-    const prefix = Number(rawPrefix);
-    if (!isIpv4(rawIp) || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
-        throw new Error(`Unsupported CIDR target: ${cidr}`);
-    }
-
-    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-    const network = ipv4ToInt(rawIp) & mask;
-    const hostCount = prefix === 32 ? 1 : Math.pow(2, 32 - prefix);
-    const startOffset = includeNetworkBroadcast || prefix >= 31 ? 0 : 1;
-    const endExclusive = includeNetworkBroadcast || prefix >= 31 ? hostCount : hostCount - 1;
-    const totalUsable = Math.max(0, endExclusive - startOffset);
-    const capped = Math.min(totalUsable, Math.max(1, maxHosts));
-    const addresses: string[] = [];
-
-    for (let offset = 0; offset < capped; offset += 1) {
-        addresses.push(intToIpv4(network + startOffset + offset));
-    }
-
-    return {
-        addresses,
-        truncated: totalUsable > capped,
-    };
-}
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["targets"],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "IPv4 addresses or IPv4 CIDR ranges to expand",
-            },
-            maxHosts: {
-                type: "integer",
-                description: "Maximum number of hosts to emit per CIDR range",
-                default: 1024,
-                minimum: 1,
-                maximum: 65536,
-            },
-            includeNetworkBroadcast: {
-                type: "boolean",
-                description: "Include network and broadcast addresses when expanding CIDR ranges",
-                default: false,
-            },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean" },
-            data: {
-                type: "object",
-                properties: {
-                    targets: { type: "array", items: { type: "string" } },
-                    results: { type: "array" },
-                    summary: { type: "object" },
-                    surface_artifacts: {
-                        type: "object",
-                        description: "Typed IP assets for surface graph ingestion",
-                    },
-                },
-            },
-            error: { type: "string" },
-        },
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!Array.isArray(input.targets) || input.targets.length === 0) {
-            return { success: false, error: "Invalid input: targets array is required" };
-        }
-
-        const targets = Array.from(new Set(input.targets.map(normalizeTarget).filter(Boolean)));
-        const maxHosts = Math.max(1, Math.min(input.maxHosts || 1024, 65536));
-        const includeNetworkBroadcast = Boolean(input.includeNetworkBroadcast);
-
-        const ips: any[] = [];
-        const evidences: any[] = [];
-        const results: MappingResult[] = [];
-        const seenIps = new Set<string>();
-
-        for (const target of targets) {
-            try {
-                let addresses: string[] = [];
-                let truncated = false;
-                let kind: MappingResult["kind"] = "ip";
-
-                if (target.includes("/")) {
-                    kind = "cidr";
-                    const expanded = expandIpv4Cidr(target, maxHosts, includeNetworkBroadcast);
-                    addresses = expanded.addresses;
-                    truncated = expanded.truncated;
-                } else if (isIpv4(target)) {
-                    addresses = [target];
-                } else {
-                    throw new Error(`Unsupported target: ${target}`);
-                }
-
-                for (const ip of addresses) {
-                    if (!seenIps.has(ip)) {
-                        seenIps.add(ip);
-                        ips.push({
-                            ip_address: ip,
-                            ip_version: "ipv4",
-                            cidr: kind === "cidr" ? target : `${ip}/32`,
-                            network_boundary_type: "internet",
-                            source_seed: target,
-                        });
-                    }
-
-                    evidences.push({
-                        asset_type: "ip",
-                        asset_key: ip,
-                        evidence_type: "cidr_mapping",
-                        title: `CIDR mapping evidence for ${ip}`,
-                        content_json: {
-                            seed: target,
-                            emitted_ip: ip,
-                            mapping_kind: kind,
-                        },
-                    });
-                }
-
-                results.push({
-                    target,
-                    kind,
-                    generatedIps: addresses.length,
-                    truncated,
-                });
-            } catch (error) {
-                results.push({
-                    target,
-                    kind: target.includes("/") ? "cidr" : "ip",
-                    generatedIps: 0,
-                    truncated: false,
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            }
-        }
-
-        return {
-            success: true,
-            data: {
-                targets,
-                results,
-                summary: {
-                    totalTargets: targets.length,
-                    generatedIps: ips.length,
-                    truncatedTargets: results.filter((item) => item.truncated).length,
-                },
-                surface_artifacts: {
-                    ips,
-                    evidences,
-                },
-            },
-        };
-    } catch (error) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/cidr_mapper/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}var pluginGlobals=globalThis;function isIpv4(value){const parts=value.split(".");if(parts.length!==4)return false;return parts.every(part=>{if(!/^\d+$/.test(part))
+return false;const num=Number(part);return num>=0&&num<=255})}function ipv4ToInt(ip){return ip.split(".").reduce((acc,part)=>(acc<<8)+Number(part),0)>>>0}function intToIpv4(value){
+return[value>>>24&255,value>>>16&255,value>>>8&255,value&255].join(".")}function normalizeTarget(value){return String(value||"").trim()}function expandIpv4Cidr(cidr,maxHosts,includeNetworkBroadcast){
+const[rawIp,rawPrefix]=cidr.split("/");const prefix=Number(rawPrefix);if(!isIpv4(rawIp)||!Number.isInteger(prefix)||prefix<0||prefix>32){throw new Error(`Unsupp\
+orted CIDR target: ${cidr}`)}const mask=prefix===0?0:4294967295<<32-prefix>>>0;const network=ipv4ToInt(rawIp)&mask;const hostCount=prefix===32?1:Math.pow(2,32-prefix);
+const startOffset=includeNetworkBroadcast||prefix>=31?0:1;const endExclusive=includeNetworkBroadcast||prefix>=31?hostCount:hostCount-1;const totalUsable=Math.max(
+0,endExclusive-startOffset);const capped=Math.min(totalUsable,Math.max(1,maxHosts));const addresses=[];for(let offset=0;offset<capped;offset+=1){addresses.push(
+intToIpv4(network+startOffset+offset))}return{addresses,truncated:totalUsable>capped}}function get_input_schema(){return{type:"object",required:["targets"],properties:{
+targets:{type:"array",items:{type:"string"},description:"IPv4 addresses or IPv4 CIDR ranges to expand"},maxHosts:{type:"integer",description:"Maximum number of \
+hosts to emit per CIDR range",default:1024,minimum:1,maximum:65536},includeNetworkBroadcast:{type:"boolean",description:"Include network and broadcast addresses\
+ when expanding CIDR ranges",default:false}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"object",properties:{success:{
+type:"boolean"},data:{type:"object",properties:{targets:{type:"array",items:{type:"string"}},results:{type:"array"},summary:{type:"object"},surface_artifacts:{type:"\
+object",description:"Typed IP assets for surface graph ingestion"}}},error:{type:"string"}}}}pluginGlobals.get_output_schema=get_output_schema;async function analyze(input){
+try{const stream=createMonitorResultStream(input);const writeTarget=createMonitorTargetWriter(input,stream,normalizeTarget);if(!Array.isArray(input.targets)||input.
+targets.length===0)throw new Error("Invalid input: targets array is required");const targets=Array.from(new Set(input.targets.map(normalizeTarget).filter(Boolean)));
+const maxHosts=Math.max(1,Math.min(input.maxHosts||1024,65536));const seenIps=new Set;const ips=[],evidences=[],results=[];let generatedIps=0;for(const target of targets){
+stream.assertHealthy();const kind=target.includes("/")?"cidr":"ip";let addresses=[],truncated=false,error;try{if(kind==="cidr")({addresses,truncated}=expandIpv4Cidr(
+target,maxHosts,Boolean(input.includeNetworkBroadcast)));else if(isIpv4(target))addresses=[target];else throw new Error(`Unsupported target: ${target}`)}catch(cause){
+error=cause instanceof Error?cause.message:String(cause)}for(let offset=0;offset<addresses.length;offset+=256){stream.assertHealthy();const pageIps=[],pageEvidences=[];
+for(const ip of addresses.slice(offset,offset+256)){if(!seenIps.has(ip)){seenIps.add(ip);generatedIps++;pageIps.push({ip_address:ip,ip_version:"ipv4",cidr:kind===
+"cidr"?target:`${ip}/32`,network_boundary_type:"internet",source_seed:target})}pageEvidences.push({asset_type:"ip",asset_key:ip,evidence_type:"cidr_mapping",title:`\
+CIDR mapping evidence for ${ip}`,content_json:{seed:target,emitted_ip:ip,mapping_kind:kind}})}if(!stream.enabled){ips.push(...pageIps);evidences.push(...pageEvidences)}
+await writeTarget(target,`mapping-page:${offset/256}`,{success:true,data:{surface_artifacts:{ips:pageIps,evidences:pageEvidences}}},{complete:false})}const result={
+target,kind,generatedIps:addresses.length,truncated,...error?{error}:{}};results.push(result);await writeTarget(target,"mapping-complete",{success:true,data:{results:[
+result]}},{status:error?"failed":"ok",error})}return await stream.finish({success:true,data:{targets,results,summary:{totalTargets:targets.length,generatedIps,truncatedTargets:results.
+filter(item=>item.truncated).length},surface_artifacts:{ips,evidences}}})}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}
+pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

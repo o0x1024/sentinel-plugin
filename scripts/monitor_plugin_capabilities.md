@@ -9,14 +9,20 @@ published/source `@tags` must contain exactly that capability subset.
 does not also need `fetch`. `filesystem-write` permits file reads and writes;
 none of these plugins needs a separate `filesystem-read` declaration.
 Logging, returning data, and returning change-event arrays are core functions.
-Only host progress publication requires `monitor-events`.
+Host progress and acknowledged result publication require `monitor-events`.
+
+All bounty monitors now also use the shared acknowledged-result stream,
+`Sentinel.Monitor.commitResults`, when executing a monitor task. This requires
+`monitor-events` even for a pure-computation plugin such as `cidr_mapper`.
+The published tag is `monitor:results-stream-v1`; every bounty entry is bundled
+from `source/bounty/<id>/index.ts` with `source/shared/monitor_results.ts`.
 
 | Plugin | Capabilities (without `capability:` prefix) | Actual host calls and purpose |
 | --- | --- | --- |
 | actuator_scanner | fetch, monitor-events | HTTP actuator checks; `Sentinel.Monitor.reportProgress` |
 | api_monitor | fetch, monitor-events | Discovery module fetches pages, JavaScript, manifests and source maps; progress publication |
 | cert_monitor | tls-inspect, monitor-events | `Sentinel.TLS.getCertificate` inspects certificate metadata; progress publication |
-| cidr_mapper | none | Pure IPv4/CIDR expansion; returns artifacts without host network or progress calls |
+| cidr_mapper | monitor-events | Pure IPv4/CIDR expansion; acknowledged result publication requires no network grant |
 | content_monitor | fetch, monitor-events | HTTP content retrieval; progress publication |
 | directory_bruteforcer | fetch, dictionary, monitor-events | HTTP path checks; `Sentinel.Dictionary.getWords`; progress publication |
 | dns_resolver | network-scan, monitor-events | Native DNS resolution (`Deno.resolveDns`); progress publication |
@@ -29,7 +35,8 @@ Only host progress publication requires `monitor-events`.
 | sensitive_file_scanner | fetch, dictionary, monitor-events | HTTP exposure checks; dictionary default ID and entries; progress publication |
 | service_monitor | network-scan, dictionary, monitor-events | Native `Sentinel.Network.probeServices`; HTTP protocol checks and TCP banner operations; dictionary entries; progress publication |
 | service_probe | network-scan, dictionary, monitor-events | Native `Sentinel.Network.probeServices`; HTTP protocol checks and TCP banner operations; dictionary entries; progress publication |
-| subdomain_enumerator | fetch | Imported source modules make OSINT HTTP requests; logs and returned change events need no extra capability |
+| subdomain_enumerator | fetch, monitor-events | Imported source modules make OSINT HTTP requests; acknowledged source results and progress publication |
+| subdomain_takeover | fetch, monitor-events | CNAME/HTTP takeover checks; acknowledged per-domain results |
 | subdomain_brute | network-scan, monitor-events | One `Sentinel.Network.bruteForceSubdomains` batch delegates dictionary loading, DNS, progress, snapshots and surface artifacts to the shared native Rust engine; no per-word JavaScript DNS or Dictionary calls |
 | tech_fingerprinter | fetch, dictionary, monitor-events | HTTP fingerprinting; dictionary default ID and entries; progress publication |
 | webpack_source_downloader | fetch, filesystem-write, monitor-events | HTTP source-map/source download; `Deno.mkdir` and `Deno.writeTextFile` export source files; progress publication |

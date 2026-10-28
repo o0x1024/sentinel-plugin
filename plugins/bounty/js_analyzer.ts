@@ -3,7 +3,7 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.6
+ * @version 3.1.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type api
@@ -12,942 +12,170 @@
  * @category discovery
  * @seed_bindings []
  * @default_severity info
- * @tags javascript, endpoint, api, discovery, secrets, ast, capability:fetch, capability:ast-parse, capability:monitor-events
+ * @tags javascript, endpoint, api, discovery, secrets, ast, capability:fetch, capability:ast-parse, capability:monitor-events, monitor:results-stream-v1
  * @description Analyze JavaScript files using AST parsing (oxc_parser) to extract all string literals, then identify API endpoints, secrets, and sensitive data
  */
-
-// Declare Sentinel global API
-declare const Sentinel: {
-    AST: {
-        parse: (code: string, filename?: string) => {
-            success: boolean;
-            literals: Array<{ value: string; line: number; column: number; type: string }>;
-            errors: string[];
-        };
-        extractLiterals: (code: string, options?: { minLength?: number; types?: string[] }) => Array<{ value: string; line: number; column: number; type: string }>;
-        extractUniqueStrings: (code: string, options?: { minLength?: number }) => string[];
-    };
-    Dictionary: {
-        getWords: (idOrName: string, limit?: number) => Promise<string[]>;
-    };
-    Monitor?: {
-        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
-    };
-};
-
-interface ToolInput {
-    url?: string;
-    urls?: string[];
-    concurrency?: number;
-    userAgent?: string;
-    maxFileSize?: number;
-    extractEndpoints?: boolean;
-    extractSecrets?: boolean;
-    extractDomains?: boolean;
-    followImports?: boolean;
-    maxFiles?: number;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-interface StringLiteral {
-    value: string;
-    line: number;
-    column: number;
-    type: string;
-}
-
-interface Endpoint {
-    url: string;
-    method?: string;
-    source: string;
-    line?: number;
-}
-
-interface Secret {
-    type: string;
-    value: string;
-    source: string;
-    line?: number;
-    severity: "critical" | "high" | "medium" | "low";
-}
-
-interface Domain {
-    domain: string;
-    source: string;
-    line?: number;
-}
-
-interface JsFile {
-    url: string;
-    size: number;
-    literalsCount: number;
-    endpoints: Endpoint[];
-    secrets: Secret[];
-    domains: Domain[];
-    parseErrors?: string[];
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        baseUrls: string[];
-        files: JsFile[];
-        summary: {
-            totalFiles: number;
-            totalLiterals: number;
-            totalEndpoints: number;
-            totalSecrets: number;
-            totalDomains: number;
-            uniqueEndpoints: string[];
-            uniqueDomains: string[];
-            secretsBySeverity: Record<string, number>;
-            urlsScanned: number;
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-const PAGE_FETCH_TIMEOUT_MS = 8000;
-const JS_FETCH_TIMEOUT_MS = 12000;
-const MIN_TIMEOUT_MS = 3000;
-const MAX_TIMEOUT_MS = 3000;
-const MIN_CONCURRENCY = 1;
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.max(min, Math.min(Math.floor(parsed), max));
-}
-
-// Secret patterns with severity
-const SECRET_PATTERNS: { name: string; pattern: RegExp; severity: "critical" | "high" | "medium" | "low" }[] = [
-    // Cloud Provider Keys
-    { name: "AWS Access Key", pattern: /^AKIA[0-9A-Z]{16}$/, severity: "critical" },
-    { name: "AWS Secret Key", pattern: /^[0-9a-zA-Z\/+]{40}$/, severity: "critical" },
-    { name: "Google API Key", pattern: /^AIza[0-9A-Za-z_-]{35}$/, severity: "high" },
-    { name: "Google OAuth", pattern: /^[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com$/, severity: "high" },
-
-    // Payment Services
-    { name: "Stripe Live Key", pattern: /^sk_live_[0-9a-zA-Z]{24,}$/, severity: "critical" },
-    { name: "Stripe Publishable Key", pattern: /^pk_live_[0-9a-zA-Z]{24,}$/, severity: "medium" },
-    { name: "Stripe Test Key", pattern: /^sk_test_[0-9a-zA-Z]{24,}$/, severity: "low" },
-    { name: "Square Access Token", pattern: /^sq0atp-[0-9A-Za-z_-]{22,}$/, severity: "critical" },
-    { name: "Square OAuth Secret", pattern: /^sq0csp-[0-9A-Za-z_-]{43,}$/, severity: "critical" },
-    { name: "PayPal Braintree Token", pattern: /^access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}$/, severity: "critical" },
-
-    // Version Control & CI/CD
-    { name: "GitHub Token", pattern: /^ghp_[0-9a-zA-Z]{36}$/, severity: "critical" },
-    { name: "GitHub OAuth", pattern: /^gho_[0-9a-zA-Z]{36}$/, severity: "high" },
-    { name: "GitHub App Token", pattern: /^ghu_[0-9a-zA-Z]{36}$/, severity: "high" },
-    { name: "GitLab Token", pattern: /^glpat-[0-9a-zA-Z_-]{20,}$/, severity: "critical" },
-
-    // Communication Services
-    { name: "Slack Token", pattern: /^xox[baprs]-[0-9a-zA-Z-]{10,}$/, severity: "critical" },
-    { name: "Slack Webhook", pattern: /hooks\.slack\.com\/services\/[A-Z0-9]+\/[A-Z0-9]+\/[a-zA-Z0-9]+/, severity: "high" },
-    { name: "Discord Webhook", pattern: /discord(?:app)?\.com\/api\/webhooks\/[0-9]+\/[A-Za-z0-9_-]+/, severity: "high" },
-    { name: "Telegram Bot Token", pattern: /^[0-9]{8,10}:[A-Za-z0-9_-]{35}$/, severity: "high" },
-
-    // Email Services
-    { name: "SendGrid API Key", pattern: /^SG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}$/, severity: "critical" },
-    { name: "Mailchimp API Key", pattern: /^[0-9a-f]{32}-us[0-9]{1,2}$/, severity: "high" },
-    { name: "Mailgun API Key", pattern: /^key-[0-9a-zA-Z]{32}$/, severity: "high" },
-
-    // Phone/SMS Services
-    { name: "Twilio API Key", pattern: /^SK[0-9a-fA-F]{32}$/, severity: "high" },
-    { name: "Twilio Account SID", pattern: /^AC[0-9a-fA-F]{32}$/, severity: "medium" },
-
-    // Social Media
-    { name: "Facebook Access Token", pattern: /^EAACEdEose0cBA[0-9A-Za-z]+$/, severity: "high" },
-    { name: "Twitter Bearer Token", pattern: /^AAAAAAAAAAAAAAAAAAAAA[0-9A-Za-z%]+$/, severity: "high" },
-
-    // Database Connection Strings
-    { name: "MongoDB URI", pattern: /^mongodb(?:\+srv)?:\/\/[^\s]+$/, severity: "critical" },
-    { name: "PostgreSQL URI", pattern: /^postgres(?:ql)?:\/\/[^\s]+$/, severity: "critical" },
-    { name: "MySQL URI", pattern: /^mysql:\/\/[^\s]+$/, severity: "critical" },
-    { name: "Redis URI", pattern: /^redis:\/\/[^\s]+$/, severity: "critical" },
-    { name: "MSSQL URI", pattern: /^mssql:\/\/[^\s]+$/, severity: "critical" },
-
-    // Authentication
-    { name: "JWT Token", pattern: /^eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*$/, severity: "medium" },
-    { name: "Bearer Token", pattern: /^Bearer\s+[A-Za-z0-9_-]{20,}$/, severity: "high" },
-    { name: "Basic Auth", pattern: /^Basic\s+[A-Za-z0-9+\/=]{10,}$/, severity: "high" },
-
-    // Private Keys
-    { name: "Private Key", pattern: /^-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/, severity: "critical" },
-    { name: "PGP Private Key", pattern: /^-----BEGIN PGP PRIVATE KEY BLOCK-----/, severity: "critical" },
-
-    // Generic High-Entropy Secrets (32+ hex chars)
-    { name: "Hex Secret (32+)", pattern: /^[0-9a-fA-F]{32,64}$/, severity: "medium" },
-
-    // API Key patterns in common formats
-    { name: "Generic API Key", pattern: /^[a-zA-Z0-9_-]{32,}$/, severity: "low" },
-];
-
-// Endpoint detection patterns
-const ENDPOINT_PATTERNS: { pattern: RegExp; method?: string }[] = [
-    // API paths
-    { pattern: /^\/api\/[a-zA-Z0-9\/_-]+$/ },
-    { pattern: /^\/v[0-9]+\/[a-zA-Z0-9\/_-]+$/ },
-    { pattern: /^\/rest\/[a-zA-Z0-9\/_-]+$/ },
-    { pattern: /^\/graphql\/?$/ },
-    { pattern: /^\/gql\/?$/ },
-
-    // Common REST endpoints
-    { pattern: /^\/(?:users?|auth|login|logout|register|signup|signin|profile|account|settings|config|admin|dashboard|data|search|upload|download|export|import|webhook)(?:\/[a-zA-Z0-9_-]*)*$/ },
-
-    // Full URLs with API paths
-    { pattern: /^https?:\/\/[^\/]+\/api\/[^\s"']+$/ },
-    { pattern: /^https?:\/\/[^\/]+\/v[0-9]+\/[^\s"']+$/ },
-    { pattern: /^https?:\/\/[^\/]+\/rest\/[^\s"']+$/ },
-    { pattern: /^https?:\/\/[^\/]+\/graphql\/?$/ },
-];
-
-// Domain extraction pattern
-const DOMAIN_PATTERN = /^https?:\/\/([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)/;
-
-// Skip domains (CDN, analytics, etc.)
-const SKIP_DOMAINS = new Set([
-    "google.com", "googleapis.com", "gstatic.com", "googletagmanager.com",
-    "google-analytics.com", "facebook.com", "facebook.net", "fbcdn.net",
-    "twitter.com", "twimg.com", "youtube.com", "ytimg.com",
-    "cloudflare.com", "cdnjs.cloudflare.com", "jsdelivr.net", "unpkg.com",
-    "bootstrapcdn.com", "jquery.com", "fontawesome.com", "esm.sh",
-    "w3.org", "schema.org", "mozilla.org", "npmjs.com", "github.com",
-]);
-
-const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 32;
-const MAX_FILE_ANALYSIS_CONCURRENCY = 32;
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        properties: {
-            url: {
-                type: "string",
-                description: "Single target URL (HTML page or JavaScript file, use 'urls' for multiple targets)"
-            },
-            urls: {
-                type: "array",
-                items: { type: "string" },
-                description: "Array of target URLs to analyze (supports batch processing)"
-            },
-            concurrency: {
-                type: "integer",
-                description: "Maximum concurrent base URL analyses",
-                default: DEFAULT_CONCURRENCY,
-                minimum: MIN_CONCURRENCY,
-                maximum: MAX_CONCURRENCY
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            maxFileSize: {
-                type: "integer",
-                description: "Maximum file size to analyze in bytes",
-                default: 5242880,
-                minimum: 102400,
-                maximum: 52428800
-            },
-            extractEndpoints: {
-                type: "boolean",
-                description: "Extract API endpoints",
-                default: true
-            },
-            extractSecrets: {
-                type: "boolean",
-                description: "Extract secrets and sensitive data",
-                default: true
-            },
-            extractDomains: {
-                type: "boolean",
-                description: "Extract referenced domains",
-                default: true
-            },
-            followImports: {
-                type: "boolean",
-                description: "Follow and analyze imported JS files",
-                default: true
-            },
-            maxFiles: {
-                type: "integer",
-                description: "Maximum number of JS files to analyze per URL",
-                default: 20,
-                minimum: 1,
-                maximum: 100
-            },
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-async function executeConcurrently<T, R>(
-    items: T[],
-    executor: (item: T) => Promise<R>,
-    concurrency: number,
-): Promise<R[]> {
-    const results: R[] = new Array(items.length);
-    let nextIndex = 0;
-    const workerCount = Math.min(concurrency, items.length);
-
-    async function worker() {
-        while (nextIndex < items.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            results[index] = await executor(items[index]);
-        }
-    }
-
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return results;
-}
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    baseUrl: { type: "string", description: "Base URL analyzed" },
-                    files: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                url: { type: "string" },
-                                endpoints: { type: "array" },
-                                secrets: { type: "array" },
-                                domains: { type: "array" }
-                            }
-                        },
-                        description: "Analyzed JS files"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalFiles: { type: "integer" },
-                            totalEndpoints: { type: "integer" },
-                            totalSecrets: { type: "integer" },
-                            uniqueEndpoints: { type: "array", items: { type: "string" } },
-                            uniqueDomains: { type: "array", items: { type: "string" } }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Extract literals from JavaScript code using Sentinel AST API (oxc_parser)
- */
-function extractLiterals(code: string, filename?: string): { literals: StringLiteral[]; errors: string[] } {
-    try {
-        // Use Sentinel's AST API powered by oxc_parser
-        if (typeof Sentinel !== "undefined" && Sentinel.AST) {
-            const result = Sentinel.AST.parse(code, filename);
-            return {
-                literals: result.literals,
-                errors: result.errors,
-            };
-        }
-    } catch (e) {
-        console.debug(`AST parsing failed: ${e}`);
-    }
-
-    // Fallback to regex extraction if AST API is not available
-    return {
-        literals: extractLiteralsWithRegex(code),
-        errors: ["AST API not available, using regex fallback"],
-    };
-}
-
-/**
- * Fallback: Extract string literals using regex
- */
-function extractLiteralsWithRegex(code: string): StringLiteral[] {
-    const literals: StringLiteral[] = [];
-    const seen = new Set<string>();
-
-    // Single and double quoted strings
-    const stringPattern = /(['"`])(?:(?!\1)[^\\]|\\.)*\1/g;
-    let match;
-
-    while ((match = stringPattern.exec(code)) !== null) {
-        const raw = match[0];
-        const value = raw.slice(1, -1);
-
-        if (value.length >= 3 && !seen.has(value)) {
-            seen.add(value);
-            const beforeMatch = code.substring(0, match.index);
-            const line = (beforeMatch.match(/\n/g) || []).length + 1;
-
-            literals.push({
-                value,
-                line,
-                column: 0,
-                type: raw.startsWith("`") ? "template" : "string",
-            });
-        }
-    }
-
-    return literals;
-}
-
-/**
- * Analyze literals to extract endpoints
- */
-function analyzeEndpoints(literals: StringLiteral[], source: string): Endpoint[] {
-    const endpoints: Endpoint[] = [];
-    const seen = new Set<string>();
-
-    for (const literal of literals) {
-        const value = literal.value.trim();
-
-        if (seen.has(value)) continue;
-
-        // Check against endpoint patterns
-        for (const { pattern, method } of ENDPOINT_PATTERNS) {
-            if (pattern.test(value)) {
-                seen.add(value);
-                endpoints.push({
-                    url: value,
-                    method,
-                    source,
-                    line: literal.line,
-                });
-                break;
-            }
-        }
-
-        // Check for URL-like strings that might be endpoints
-        if (!seen.has(value) && value.startsWith("/") && value.length > 1) {
-            const segments = value.split("/").filter(Boolean);
-            if (segments.length >= 2 && !/\.[a-z]{2,4}$/i.test(value)) {
-                if (!/\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/i.test(value)) {
-                    seen.add(value);
-                    endpoints.push({
-                        url: value,
-                        source,
-                        line: literal.line,
-                    });
-                }
-            }
-        }
-    }
-
-    return endpoints;
-}
-
-/**
- * Calculate Shannon entropy of a string
- */
-function calculateEntropy(str: string): number {
-    const freq: Record<string, number> = {};
-    for (const char of str) {
-        freq[char] = (freq[char] || 0) + 1;
-    }
-
-    let entropy = 0;
-    const len = str.length;
-    for (const count of Object.values(freq)) {
-        const p = count / len;
-        entropy -= p * Math.log2(p);
-    }
-
-    return entropy;
-}
-
-/**
- * Analyze literals to extract secrets
- */
-function analyzeSecrets(literals: StringLiteral[], source: string): Secret[] {
-    const secrets: Secret[] = [];
-    const seen = new Set<string>();
-
-    for (const literal of literals) {
-        const value = literal.value.trim();
-
-        // Skip if too short or too long
-        if (value.length < 8 || value.length > 500) continue;
-
-        // Skip common false positives
-        if (/^(true|false|null|undefined|function|return|const|let|var|import|export|from|default|class|extends|constructor|this|super|new|delete|typeof|instanceof|void|yield|await|async|static|get|set|if|else|switch|case|break|continue|for|while|do|try|catch|finally|throw|with|debugger)$/i.test(value)) {
-            continue;
-        }
-
-        if (seen.has(value)) continue;
-
-        // Check against secret patterns
-        for (const { name, pattern, severity } of SECRET_PATTERNS) {
-            if (pattern.test(value)) {
-                // Additional validation for generic patterns
-                if (name === "Generic API Key" || name === "Hex Secret (32+)") {
-                    if (/^[0-9a-f]{32}$/i.test(value) && !value.includes("-")) {
-                        const entropy = calculateEntropy(value);
-                        if (entropy < 3.5) continue;
-                    }
-                }
-
-                seen.add(value);
-                secrets.push({
-                    type: name,
-                    value: value.length > 80 ? value.substring(0, 80) + "..." : value,
-                    source,
-                    line: literal.line,
-                    severity,
-                });
-                break;
-            }
-        }
-    }
-
-    return secrets;
-}
-
-/**
- * Analyze literals to extract domains
- */
-function analyzeDomains(literals: StringLiteral[], source: string): Domain[] {
-    const domains: Domain[] = [];
-    const seen = new Set<string>();
-
-    for (const literal of literals) {
-        const value = literal.value.trim();
-
-        const match = value.match(DOMAIN_PATTERN);
-        if (match) {
-            const domain = match[1].toLowerCase();
-
-            // Skip common CDN/analytics domains
-            if (SKIP_DOMAINS.has(domain)) continue;
-            let skip = false;
-            for (const skipDomain of SKIP_DOMAINS) {
-                if (domain.endsWith(`.${skipDomain}`)) {
-                    skip = true;
-                    break;
-                }
-            }
-            if (skip) continue;
-
-            if (seen.has(domain)) continue;
-            seen.add(domain);
-
-            domains.push({
-                domain,
-                source,
-                line: literal.line,
-            });
-        }
-    }
-
-    return domains;
-}
-
-/**
- * Extract script URLs from HTML
- */
-function extractScriptUrls(html: string, baseUrl: string): string[] {
-    const scripts: string[] = [];
-    const regex = /<script[^>]*\s+src=["']([^"']+)["']/gi;
-    let match;
-
-    while ((match = regex.exec(html)) !== null) {
-        let src = match[1];
-
-        if (src.startsWith("data:") || src.startsWith("javascript:")) {
-            continue;
-        }
-
-        try {
-            if (src.startsWith("//")) {
-                src = `https:${src}`;
-            } else if (src.startsWith("/")) {
-                const url = new URL(baseUrl);
-                src = `${url.origin}${src}`;
-            } else if (!src.startsWith("http")) {
-                const url = new URL(baseUrl);
-                const basePath = url.pathname.substring(0, url.pathname.lastIndexOf("/") + 1);
-                src = `${url.origin}${basePath}${src}`;
-            }
-
-            scripts.push(src);
-        } catch {
-            // Skip invalid URLs
-        }
-    }
-
-    return [...new Set(scripts)];
-}
-
-/**
- * Extract inline scripts from HTML
- */
-function extractInlineScripts(html: string): string {
-    const scripts: string[] = [];
-    const regex = /<script[^>]*>([^]*?)<\/script>/gi;
-    let match;
-
-    while ((match = regex.exec(html)) !== null) {
-        const content = match[1].trim();
-        if (content && !match[0].includes("src=")) {
-            scripts.push(content);
-        }
-    }
-
-    return scripts.join("\n\n");
-}
-
-/**
- * Analyze a single JavaScript file
- */
-async function analyzeJsFile(
-    url: string,
-    options: {
-        userAgent: string;
-        maxFileSize: number;
-        extractEndpoints: boolean;
-        extractSecrets: boolean;
-        extractDomains: boolean;
-    }
-): Promise<JsFile> {
-    const result: JsFile = {
-        url,
-        size: 0,
-        literalsCount: 0,
-        endpoints: [],
-        secrets: [],
-        domains: [],
-    };
-
-    try {
-        const response = await fetch(url, {
-            method: "GET",
-            headers: {
-                "User-Agent": options.userAgent,
-                "Accept": "*/*",
-            },
-            timeout: JS_FETCH_TIMEOUT_MS,
-        });
-
-        if (!response.ok) {
-            result.error = `HTTP ${response.status}`;
-            return result;
-        }
-
-        const contentLength = parseInt(response.headers.get("content-length") || "0", 10);
-        if (contentLength > options.maxFileSize) {
-            result.error = `File too large: ${contentLength} bytes`;
-            return result;
-        }
-
-        const content = await response.text();
-        result.size = content.length;
-
-        if (content.length > options.maxFileSize) {
-            result.error = `File too large: ${content.length} bytes`;
-            return result;
-        }
-
-        // Extract literals using oxc_parser AST
-        const filename = url.split("/").pop() || "script.js";
-        const { literals, errors } = extractLiterals(content, filename);
-        result.literalsCount = literals.length;
-
-        if (errors.length > 0) {
-            result.parseErrors = errors;
-        }
-
-        const source = filename;
-
-        // Analyze literals
-        if (options.extractEndpoints) {
-            result.endpoints = analyzeEndpoints(literals, source);
-        }
-
-        if (options.extractSecrets) {
-            result.secrets = analyzeSecrets(literals, source);
-        }
-
-        if (options.extractDomains) {
-            result.domains = analyzeDomains(literals, source);
-        }
-
-    } catch (error: any) {
-        result.error = error.message || String(error);
-    }
-
-    return result;
-}
-
-/**
- * Process a single URL (HTML page or JS file)
- */
-async function processSingleUrl(
-    baseUrl: string,
-    options: {
-        userAgent: string;
-        maxFileSize: number;
-        extractEndpoints: boolean;
-        extractSecrets: boolean;
-        extractDomains: boolean;
-        followImports: boolean;
-        maxFiles: number;
-    }
-): Promise<JsFile[]> {
-    const jsUrls: string[] = [];
-    const files: JsFile[] = [];
-
-    // Check if URL is a JS file or HTML page
-    if (baseUrl.endsWith(".js") || baseUrl.endsWith(".mjs") || baseUrl.endsWith(".ts")) {
-        jsUrls.push(baseUrl);
-    } else {
-        // Fetch HTML page and extract script URLs
-        try {
-            const response = await fetch(baseUrl, {
-                method: "GET",
-                headers: {
-                    "User-Agent": options.userAgent,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
-                timeout: PAGE_FETCH_TIMEOUT_MS,
-            });
-
-            if (response.ok) {
-                const html = await response.text();
-
-                // Analyze inline scripts
-                const inlineContent = extractInlineScripts(html);
-                if (inlineContent.length > 0) {
-                    const { literals, errors } = extractLiterals(inlineContent, "inline.js");
-                    const inlineResult: JsFile = {
-                        url: `${baseUrl}#inline`,
-                        size: inlineContent.length,
-                        literalsCount: literals.length,
-                        endpoints: options.extractEndpoints ? analyzeEndpoints(literals, "inline") : [],
-                        secrets: options.extractSecrets ? analyzeSecrets(literals, "inline") : [],
-                        domains: options.extractDomains ? analyzeDomains(literals, "inline") : [],
-                        parseErrors: errors.length > 0 ? errors : undefined,
-                    };
-                    files.push(inlineResult);
-                }
-
-                if (options.followImports) {
-                    const scriptUrls = extractScriptUrls(html, baseUrl);
-                    jsUrls.push(...scriptUrls);
-                }
-            }
-        } catch {
-            // If we can't fetch the page, treat URL as JS file
-            jsUrls.push(baseUrl);
-        }
-    }
-
-    // Limit number of files
-    const urlsToAnalyze = [...new Set(jsUrls)].slice(0, options.maxFiles - files.length);
-
-    // Analyze JS files with bounded plugin concurrency
-    const jsFileResults = await executeConcurrently(urlsToAnalyze, async (url) => {
-            return await analyzeJsFile(url, {
-                userAgent: options.userAgent,
-                maxFileSize: options.maxFileSize,
-                extractEndpoints: options.extractEndpoints,
-                extractSecrets: options.extractSecrets,
-                extractDomains: options.extractDomains,
-            });
-        }, Math.min(MAX_FILE_ANALYSIS_CONCURRENCY, options.maxFiles));
-
-    files.push(...jsFileResults);
-
-    return files;
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        // Build URL list from input (support both url and urls)
-        let targetUrls: string[] = [];
-
-        if (input.urls && Array.isArray(input.urls) && input.urls.length > 0) {
-            targetUrls = input.urls.filter(u => typeof u === 'string' && u.trim().length > 0);
-        }
-
-        if (targetUrls.length === 0 && input.url && typeof input.url === "string" && input.url.trim().length > 0) {
-            targetUrls = [input.url.trim()];
-        }
-
-        if (targetUrls.length === 0) {
-            return {
-                success: false,
-                error: "At least one URL is required (use 'url' or 'urls' parameter)"
-            };
-        }
-
-        // Normalize URLs
-        const baseUrls = [...new Set(targetUrls.map(url => {
-            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                return `https://${url}`;
-            }
-            return url;
-        }))];
-
-        const concurrency = clampInteger(
-            input.concurrency,
-            DEFAULT_CONCURRENCY,
-            MIN_CONCURRENCY,
-            MAX_CONCURRENCY,
-        );
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const maxFileSize = input.maxFileSize || 5242880;
-        const extractEndpointsFlag = input.extractEndpoints !== false;
-        const extractSecretsFlag = input.extractSecrets !== false;
-        const extractDomainsFlag = input.extractDomains !== false;
-        const followImports = input.followImports !== false;
-        const maxFiles = input.maxFiles || 20;
-
-        const monitorExecution = input.__monitorExecution;
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: baseUrls.length,
-            phase: "prepare",
-            message: `Preparing JavaScript analysis (${baseUrls.length} base URLs, concurrency ${concurrency})`,
-        });
-
-        let completedBaseUrls = 0;
-        const allFilesArrays = await executeConcurrently(baseUrls, async (baseUrl) => {
-                try {
-                    return await processSingleUrl(baseUrl, {
-                        userAgent,
-                        maxFileSize,
-                        extractEndpoints: extractEndpointsFlag,
-                        extractSecrets: extractSecretsFlag,
-                        extractDomains: extractDomainsFlag,
-                        followImports,
-                        maxFiles,
-                    });
-                } finally {
-                    completedBaseUrls += 1;
-                    await reportMonitorProgress(monitorExecution, {
-                        current: completedBaseUrls,
-                        total: baseUrls.length,
-                        currentTarget: baseUrl,
-                        phase: "analyze",
-                        message: `Analyzed JavaScript sources for ${baseUrl}`,
-                    });
-                }
-            }, concurrency);
-
-        // Flatten results
-        const allFiles: JsFile[] = allFilesArrays.flat();
-
-        // Build summary
-        const allEndpoints: Endpoint[] = [];
-        const allSecrets: Secret[] = [];
-        const allDomains: Domain[] = [];
-        let totalLiterals = 0;
-
-        for (const file of allFiles) {
-            totalLiterals += file.literalsCount;
-            allEndpoints.push(...file.endpoints);
-            allSecrets.push(...file.secrets);
-            allDomains.push(...file.domains);
-        }
-
-        const uniqueEndpoints = [...new Set(allEndpoints.map(e => e.url))].sort();
-        const uniqueDomains = [...new Set(allDomains.map(d => d.domain))].sort();
-
-        const secretsBySeverity: Record<string, number> = {};
-        for (const secret of allSecrets) {
-            secretsBySeverity[secret.severity] = (secretsBySeverity[secret.severity] || 0) + 1;
-        }
-
-        return {
-            success: true,
-            data: {
-                baseUrls,
-                files: allFiles,
-                summary: {
-                    totalFiles: allFiles.length,
-                    totalLiterals,
-                    totalEndpoints: allEndpoints.length,
-                    totalSecrets: allSecrets.length,
-                    totalDomains: allDomains.length,
-                    uniqueEndpoints,
-                    uniqueDomains,
-                    secretsBySeverity,
-                    urlsScanned: baseUrls.length,
-                },
-            },
-        };
-
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/js_analyzer/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}var pluginGlobals=globalThis;var PAGE_FETCH_TIMEOUT_MS=8e3;var JS_FETCH_TIMEOUT_MS=12e3;var MIN_CONCURRENCY=1;async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.
+reportProgress?.({monitorProgress:{taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.
+execution_mode,startedAt:monitorExecution.started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.
+completed_steps,totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}function clampInteger(value,fallback,min,max){
+const parsed=Number(value);if(!Number.isFinite(parsed))return fallback;return Math.max(min,Math.min(Math.floor(parsed),max))}var SECRET_PATTERNS=[{name:"AWS Acc\
+ess Key",pattern:/^AKIA[0-9A-Z]{16}$/,severity:"critical"},{name:"AWS Secret Key",pattern:/^[0-9a-zA-Z\/+]{40}$/,severity:"critical"},{name:"Google API Key",pattern:/^AIza[0-9A-Za-z_-]{35}$/,
+severity:"high"},{name:"Google OAuth",pattern:/^[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com$/,severity:"high"},{name:"Stripe Live Key",pattern:/^sk_live_[0-9a-zA-Z]{24,}$/,
+severity:"critical"},{name:"Stripe Publishable Key",pattern:/^pk_live_[0-9a-zA-Z]{24,}$/,severity:"medium"},{name:"Stripe Test Key",pattern:/^sk_test_[0-9a-zA-Z]{24,}$/,
+severity:"low"},{name:"Square Access Token",pattern:/^sq0atp-[0-9A-Za-z_-]{22,}$/,severity:"critical"},{name:"Square OAuth Secret",pattern:/^sq0csp-[0-9A-Za-z_-]{43,}$/,
+severity:"critical"},{name:"PayPal Braintree Token",pattern:/^access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}$/,severity:"critical"},{name:"GitHub Token",pattern:/^ghp_[0-9a-zA-Z]{36}$/,
+severity:"critical"},{name:"GitHub OAuth",pattern:/^gho_[0-9a-zA-Z]{36}$/,severity:"high"},{name:"GitHub App Token",pattern:/^ghu_[0-9a-zA-Z]{36}$/,severity:"hi\
+gh"},{name:"GitLab Token",pattern:/^glpat-[0-9a-zA-Z_-]{20,}$/,severity:"critical"},{name:"Slack Token",pattern:/^xox[baprs]-[0-9a-zA-Z-]{10,}$/,severity:"criti\
+cal"},{name:"Slack Webhook",pattern:/hooks\.slack\.com\/services\/[A-Z0-9]+\/[A-Z0-9]+\/[a-zA-Z0-9]+/,severity:"high"},{name:"Discord Webhook",pattern:/discord(?:app)?\.com\/api\/webhooks\/[0-9]+\/[A-Za-z0-9_-]+/,
+severity:"high"},{name:"Telegram Bot Token",pattern:/^[0-9]{8,10}:[A-Za-z0-9_-]{35}$/,severity:"high"},{name:"SendGrid API Key",pattern:/^SG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}$/,
+severity:"critical"},{name:"Mailchimp API Key",pattern:/^[0-9a-f]{32}-us[0-9]{1,2}$/,severity:"high"},{name:"Mailgun API Key",pattern:/^key-[0-9a-zA-Z]{32}$/,severity:"\
+high"},{name:"Twilio API Key",pattern:/^SK[0-9a-fA-F]{32}$/,severity:"high"},{name:"Twilio Account SID",pattern:/^AC[0-9a-fA-F]{32}$/,severity:"medium"},{name:"\
+Facebook Access Token",pattern:/^EAACEdEose0cBA[0-9A-Za-z]+$/,severity:"high"},{name:"Twitter Bearer Token",pattern:/^AAAAAAAAAAAAAAAAAAAAA[0-9A-Za-z%]+$/,severity:"\
+high"},{name:"MongoDB URI",pattern:/^mongodb(?:\+srv)?:\/\/[^\s]+$/,severity:"critical"},{name:"PostgreSQL URI",pattern:/^postgres(?:ql)?:\/\/[^\s]+$/,severity:"\
+critical"},{name:"MySQL URI",pattern:/^mysql:\/\/[^\s]+$/,severity:"critical"},{name:"Redis URI",pattern:/^redis:\/\/[^\s]+$/,severity:"critical"},{name:"MSSQL \
+URI",pattern:/^mssql:\/\/[^\s]+$/,severity:"critical"},{name:"JWT Token",pattern:/^eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*$/,severity:"medium"},{name:"\
+Bearer Token",pattern:/^Bearer\s+[A-Za-z0-9_-]{20,}$/,severity:"high"},{name:"Basic Auth",pattern:/^Basic\s+[A-Za-z0-9+\/=]{10,}$/,severity:"high"},{name:"Priva\
+te Key",pattern:/^-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/,severity:"critical"},{name:"PGP Private Key",pattern:/^-----BEGIN PGP PRIVATE KEY BLOCK-----/,
+severity:"critical"},{name:"Hex Secret (32+)",pattern:/^[0-9a-fA-F]{32,64}$/,severity:"medium"},{name:"Generic API Key",pattern:/^[a-zA-Z0-9_-]{32,}$/,severity:"\
+low"}];var ENDPOINT_PATTERNS=[{pattern:/^\/api\/[a-zA-Z0-9\/_-]+$/},{pattern:/^\/v[0-9]+\/[a-zA-Z0-9\/_-]+$/},{pattern:/^\/rest\/[a-zA-Z0-9\/_-]+$/},{pattern:/^\/graphql\/?$/},
+{pattern:/^\/gql\/?$/},{pattern:/^\/(?:users?|auth|login|logout|register|signup|signin|profile|account|settings|config|admin|dashboard|data|search|upload|download|export|import|webhook)(?:\/[a-zA-Z0-9_-]*)*$/},
+{pattern:/^https?:\/\/[^\/]+\/api\/[^\s"']+$/},{pattern:/^https?:\/\/[^\/]+\/v[0-9]+\/[^\s"']+$/},{pattern:/^https?:\/\/[^\/]+\/rest\/[^\s"']+$/},{pattern:/^https?:\/\/[^\/]+\/graphql\/?$/}];
+var DOMAIN_PATTERN=/^https?:\/\/([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+)/;var SKIP_DOMAINS=new Set(["google.com","googleapis.com","gstatic.com",
+"googletagmanager.com","google-analytics.com","facebook.com","facebook.net","fbcdn.net","twitter.com","twimg.com","youtube.com","ytimg.com","cloudflare.com","cd\
+njs.cloudflare.com","jsdelivr.net","unpkg.com","bootstrapcdn.com","jquery.com","fontawesome.com","esm.sh","w3.org","schema.org","mozilla.org","npmjs.com","githu\
+b.com"]);var DEFAULT_CONCURRENCY=32;var MAX_CONCURRENCY=32;var MAX_FILE_ANALYSIS_CONCURRENCY=32;function get_input_schema(){return{type:"object",properties:{url:{
+type:"string",description:"Single target URL (HTML page or JavaScript file, use 'urls' for multiple targets)"},urls:{type:"array",items:{type:"string"},description:"\
+Array of target URLs to analyze (supports batch processing)"},concurrency:{type:"integer",description:"Maximum concurrent base URL analyses",default:DEFAULT_CONCURRENCY,
+minimum:MIN_CONCURRENCY,maximum:MAX_CONCURRENCY},userAgent:{type:"string",description:"Custom User-Agent header"},maxFileSize:{type:"integer",description:"Maxim\
+um file size to analyze in bytes",default:5242880,minimum:102400,maximum:52428800},extractEndpoints:{type:"boolean",description:"Extract API endpoints",default:true},
+extractSecrets:{type:"boolean",description:"Extract secrets and sensitive data",default:true},extractDomains:{type:"boolean",description:"Extract referenced dom\
+ains",default:true},followImports:{type:"boolean",description:"Follow and analyze imported JS files",default:true},maxFiles:{type:"integer",description:"Maximum\
+ number of JS files to analyze per URL",default:20,minimum:1,maximum:100}}}}pluginGlobals.get_input_schema=get_input_schema;async function executeConcurrently(items,executor,concurrency){
+const results=new Array(items.length);let nextIndex=0;const workerCount=Math.min(concurrency,items.length);async function worker(){while(nextIndex<items.length){
+const index=nextIndex;nextIndex+=1;results[index]=await executor(items[index])}}await Promise.all(Array.from({length:workerCount},()=>worker()));return results}
+function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{
+baseUrl:{type:"string",description:"Base URL analyzed"},files:{type:"array",items:{type:"object",properties:{url:{type:"string"},endpoints:{type:"array"},secrets:{
+type:"array"},domains:{type:"array"}}},description:"Analyzed JS files"},summary:{type:"object",properties:{totalFiles:{type:"integer"},totalEndpoints:{type:"int\
+eger"},totalSecrets:{type:"integer"},uniqueEndpoints:{type:"array",items:{type:"string"}},uniqueDomains:{type:"array",items:{type:"string"}}}}}},error:{type:"st\
+ring",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function extractLiterals(code,filename){if(typeof Sentinel==="u\
+ndefined"||!Sentinel.AST||typeof Sentinel.AST.parse!=="function"){throw new Error("JavaScript analysis requires Sentinel.AST.parse")}const result=Sentinel.AST.parse(
+code,filename);if(!result||!Array.isArray(result.literals)||!Array.isArray(result.errors)){throw new Error("JavaScript AST parser returned an invalid result")}return{
+literals:result.literals,errors:result.errors}}function analyzeEndpoints(literals,source){const endpoints=[];const seen=new Set;for(const literal of literals){const value=literal.
+value.trim();if(seen.has(value))continue;for(const{pattern,method}of ENDPOINT_PATTERNS){if(pattern.test(value)){seen.add(value);endpoints.push({url:value,method,
+source,line:literal.line});break}}if(!seen.has(value)&&value.startsWith("/")&&value.length>1){const segments=value.split("/").filter(Boolean);if(segments.length>=
+2&&!/\.[a-z]{2,4}$/i.test(value)){if(!/\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|map)$/i.test(value)){seen.add(value);endpoints.push({url:value,source,
+line:literal.line})}}}}return endpoints}function calculateEntropy(str){const freq={};for(const char of str){freq[char]=(freq[char]||0)+1}let entropy=0;const len=str.
+length;for(const count of Object.values(freq)){const p=count/len;entropy-=p*Math.log2(p)}return entropy}function analyzeSecrets(literals,source){const secrets=[];
+const seen=new Set;for(const literal of literals){const value=literal.value.trim();if(value.length<8||value.length>500)continue;if(/^(true|false|null|undefined|function|return|const|let|var|import|export|from|default|class|extends|constructor|this|super|new|delete|typeof|instanceof|void|yield|await|async|static|get|set|if|else|switch|case|break|continue|for|while|do|try|catch|finally|throw|with|debugger)$/i.
+test(value)){continue}if(seen.has(value))continue;for(const{name,pattern,severity}of SECRET_PATTERNS){if(pattern.test(value)){if(name==="Generic API Key"||name===
+"Hex Secret (32+)"){if(/^[0-9a-f]{32}$/i.test(value)&&!value.includes("-")){const entropy=calculateEntropy(value);if(entropy<3.5)continue}}seen.add(value);secrets.
+push({type:name,value:value.length>80?value.substring(0,80)+"...":value,source,line:literal.line,severity});break}}}return secrets}function analyzeDomains(literals,source){
+const domains=[];const seen=new Set;for(const literal of literals){const value=literal.value.trim();const match=value.match(DOMAIN_PATTERN);if(match){const domain=match[1].
+toLowerCase();if(SKIP_DOMAINS.has(domain))continue;let skip=false;for(const skipDomain of SKIP_DOMAINS){if(domain.endsWith(`.${skipDomain}`)){skip=true;break}}if(skip)
+continue;if(seen.has(domain))continue;seen.add(domain);domains.push({domain,source,line:literal.line})}}return domains}function extractScriptUrls(html,baseUrl){
+const scripts=[];const regex=/<script[^>]*\s+src=["']([^"']+)["']/gi;let match;while((match=regex.exec(html))!==null){let src=match[1];if(src.startsWith("data:")||
+src.startsWith("javascript:")){continue}try{if(src.startsWith("//")){src=`https:${src}`}else if(src.startsWith("/")){const url=new URL(baseUrl);src=`${url.origin}${src}`}else if(!src.
+startsWith("http")){const url=new URL(baseUrl);const basePath=url.pathname.substring(0,url.pathname.lastIndexOf("/")+1);src=`${url.origin}${basePath}${src}`}scripts.
+push(src)}catch{}}return[...new Set(scripts)]}function extractInlineScripts(html){const scripts=[];const regex=/<script[^>]*>([^]*?)<\/script>/gi;let match;while((match=
+regex.exec(html))!==null){const content=match[1].trim();if(content&&!match[0].includes("src=")){scripts.push(content)}}return scripts.join("\n\n")}async function analyzeJsFile(url,options){
+const result={url,size:0,literalsCount:0,endpoints:[],secrets:[],domains:[]};try{const response=await fetch(url,{method:"GET",headers:{"User-Agent":options.userAgent,
+"Accept":"*/*"},timeout:JS_FETCH_TIMEOUT_MS});if(!response.ok){result.error=`HTTP ${response.status}`;return result}const contentLength=parseInt(response.headers.
+get("content-length")||"0",10);if(contentLength>options.maxFileSize){result.error=`File too large: ${contentLength} bytes`;return result}const content=await response.
+text();result.size=content.length;if(content.length>options.maxFileSize){result.error=`File too large: ${content.length} bytes`;return result}const filename=url.
+split("/").pop()||"script.js";const{literals,errors}=extractLiterals(content,filename);result.literalsCount=literals.length;if(errors.length>0){result.parseErrors=
+errors}const source=filename;if(options.extractEndpoints){result.endpoints=analyzeEndpoints(literals,source)}if(options.extractSecrets){result.secrets=analyzeSecrets(
+literals,source)}if(options.extractDomains){result.domains=analyzeDomains(literals,source)}}catch(error){result.error=error.message||String(error)}return result}
+async function processSingleUrl(baseUrl,options){const jsUrls=[];const files=[];const inlineFiles=[];let inlineCount=0;if(baseUrl.endsWith(".js")||baseUrl.endsWith(
+".mjs")||baseUrl.endsWith(".ts")){jsUrls.push(baseUrl)}else{let pageError;let pageStatus;options.assertHealthy?.();try{const response=await fetch(baseUrl,{method:"\
+GET",headers:{"User-Agent":options.userAgent,"Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},timeout:PAGE_FETCH_TIMEOUT_MS});pageStatus=
+response.status;if(!response.ok)throw new Error(`HTTP ${response.status}`);if(response.ok){const html=await response.text();const inlineContent=extractInlineScripts(
+html);if(inlineContent.length>0){const{literals,errors}=extractLiterals(inlineContent,"inline.js");const inlineResult={url:`${baseUrl}#inline`,size:inlineContent.
+length,literalsCount:literals.length,endpoints:options.extractEndpoints?analyzeEndpoints(literals,"inline"):[],secrets:options.extractSecrets?analyzeSecrets(literals,
+"inline"):[],domains:options.extractDomains?analyzeDomains(literals,"inline"):[],parseErrors:errors.length>0?errors:void 0};inlineCount++;inlineFiles.push(inlineResult);
+if(options.retainFiles!==false)files.push(inlineResult)}if(options.followImports){const scriptUrls=extractScriptUrls(html,baseUrl);jsUrls.push(...scriptUrls)}}}catch(error){
+pageError=error instanceof Error?error.message:String(error)}if(options.onPage)await options.onPage({url:baseUrl,status:pageStatus,error:pageError});if(options.
+onFile)for(const file of inlineFiles)await options.onFile(file);inlineFiles.length=0;if(pageError){if(options.retainFiles!==false)files.push({url:baseUrl,size:0,
+literalsCount:0,endpoints:[],secrets:[],domains:[],error:pageError});return files}}const urlsToAnalyze=[...new Set(jsUrls)].slice(0,options.maxFiles-inlineCount);
+const jsFileResults=await executeConcurrently(urlsToAnalyze,async url=>{options.assertHealthy?.();const file=await analyzeJsFile(url,{userAgent:options.userAgent,
+maxFileSize:options.maxFileSize,extractEndpoints:options.extractEndpoints,extractSecrets:options.extractSecrets,extractDomains:options.extractDomains});if(options.
+onFile)await options.onFile(file);return options.retainFiles===false?void 0:file},Math.min(MAX_FILE_ANALYSIS_CONCURRENCY,options.maxFiles));files.push(...jsFileResults.
+filter(file=>file!==void 0));return files}async function analyze(input){try{const stream=createMonitorResultStream(input);const normalizeBase=value=>/^https?:\/\//.
+test(value)?value:`https://${value}`;const writeTarget=createMonitorTargetWriter(input,stream,normalizeBase);let targetUrls=[];if(input.urls&&Array.isArray(input.
+urls)&&input.urls.length>0){targetUrls=input.urls.filter(u=>typeof u==="string"&&u.trim().length>0)}if(targetUrls.length===0&&input.url&&typeof input.url==="str\
+ing"&&input.url.trim().length>0){targetUrls=[input.url.trim()]}if(targetUrls.length===0){return{success:false,error:"At least one URL is required (use 'url' or \
+'urls' parameter)"}}const baseUrls=[...new Set(targetUrls.map(url=>{if(!url.startsWith("http://")&&!url.startsWith("https://")){return`https://${url}`}return url}))];
+const concurrency=clampInteger(input.concurrency,DEFAULT_CONCURRENCY,MIN_CONCURRENCY,MAX_CONCURRENCY);const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT \
+10.0; Win64; x64) AppleWebKit/537.36";const maxFileSize=input.maxFileSize||5242880;const extractEndpointsFlag=input.extractEndpoints!==false;const extractSecretsFlag=input.
+extractSecrets!==false;const extractDomainsFlag=input.extractDomains!==false;const followImports=input.followImports!==false;const maxFiles=input.maxFiles||20;const monitorExecution=input.
+__monitorExecution;await reportMonitorProgress(monitorExecution,{current:0,total:baseUrls.length,phase:"prepare",message:`Preparing JavaScript analysis (${baseUrls.
+length} base URLs, concurrency ${concurrency})`});let completedBaseUrls=0;const allFilesArrays=await executeConcurrently(baseUrls,async baseUrl=>{stream.assertHealthy();
+let targetFailed=false;try{const files=await processSingleUrl(baseUrl,{userAgent,maxFileSize,extractEndpoints:extractEndpointsFlag,extractSecrets:extractSecretsFlag,
+extractDomains:extractDomainsFlag,followImports,maxFiles,retainFiles:!stream.enabled,assertHealthy:()=>stream.assertHealthy(),onPage:async result=>{if(result.error)
+targetFailed=true;await writeTarget(baseUrl,`page:${baseUrl}`,{success:true,data:{results:[result]}},{complete:false,status:result.error?"failed":"ok",error:result.
+error})},onFile:async file=>{if(file.error)targetFailed=true;await writeTarget(baseUrl,`file:${file.url}`,{success:true,data:{files:[file],summary:{totalFiles:1,
+totalLiterals:file.literalsCount,totalEndpoints:file.endpoints.length,totalSecrets:file.secrets.length,totalDomains:file.domains.length}}},{complete:false,status:file.
+error?"failed":"ok",error:file.error})}});await writeTarget(baseUrl,"target-complete",{success:true,data:{}},{complete:true,status:targetFailed?"failed":"ok"});
+return stream.enabled?[]:files}finally{completedBaseUrls+=1;await reportMonitorProgress(monitorExecution,{current:completedBaseUrls,total:baseUrls.length,currentTarget:baseUrl,
+phase:"analyze",message:`Analyzed JavaScript sources for ${baseUrl}`})}},concurrency);const allFiles=allFilesArrays.flat();const allEndpoints=[];const allSecrets=[];
+const allDomains=[];let totalLiterals=0;for(const file of allFiles){totalLiterals+=file.literalsCount;allEndpoints.push(...file.endpoints);allSecrets.push(...file.
+secrets);allDomains.push(...file.domains)}const uniqueEndpoints=[...new Set(allEndpoints.map(e=>e.url))].sort();const uniqueDomains=[...new Set(allDomains.map(d=>d.
+domain))].sort();const secretsBySeverity={};for(const secret of allSecrets){secretsBySeverity[secret.severity]=(secretsBySeverity[secret.severity]||0)+1}return await stream.
+finish({success:true,data:{baseUrls,files:allFiles,summary:{totalFiles:allFiles.length,totalLiterals,totalEndpoints:allEndpoints.length,totalSecrets:allSecrets.
+length,totalDomains:allDomains.length,uniqueEndpoints,uniqueDomains,secretsBySeverity,urlsScanned:baseUrls.length}}})}catch(error){return{success:false,error:error instanceof
+Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

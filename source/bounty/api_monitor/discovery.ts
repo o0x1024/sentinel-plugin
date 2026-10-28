@@ -494,29 +494,35 @@ export function shouldSkipVendorJs(url: string): boolean {
 
 export const PAGE_FETCH_TIMEOUT_MS = 12000;
 
+export type DocumentRole = "target" | "page" | "manifest" | "script" | "sourcemap";
+export type DocumentCompleted = (url: string, result: FetchResult, role: DocumentRole) => Promise<void>;
+
 export async function fetchDocument(
     url: string,
     userAgent: string,
     accept = "text/html,application/xhtml+xml,application/xml;q=0.9,application/javascript,*/*;q=0.8",
+    onDocument?: DocumentCompleted,
+    role: DocumentRole = "page",
+    assertHealthy?: () => void,
 ): Promise<FetchResult | null> {
+    // Fail before scheduling new I/O after a rejected persistence receipt.
+    assertHealthy?.();
+    let result: FetchResult;
     try {
         const response = await fetch(url, {
-            headers: {
-                "User-Agent": userAgent,
-                "Accept": accept,
-                "Accept-Language": "en-US,en;q=0.5",
-            },
-            redirect: "follow",
-            timeout: PAGE_FETCH_TIMEOUT_MS,
-            maxBodyBytes: 1048576,
+            headers: { "User-Agent": userAgent, "Accept": accept, "Accept-Language": "en-US,en;q=0.5" },
+            redirect: "follow", timeout: PAGE_FETCH_TIMEOUT_MS, maxBodyBytes: 1048576,
         });
-
         const text = await response.text();
-        return { ok: response.ok, status: response.status, text, size: text.length, contentType: response.headers.get("content-type") || "", finalUrl: response.url || url };
+        result = { ok: response.ok, status: response.status, text, size: text.length,
+            contentType: response.headers.get("content-type") || "", finalUrl: response.url || url };
     } catch (error: any) {
-        const message = error?.message || String(error) || "Unknown fetch error";
-        return { ok: false, status: null, text: "", size: 0, contentType: "", finalUrl: url, error: message };
+        result = { ok: false, status: null, text: "", size: 0, contentType: "", finalUrl: url,
+            error: error?.message || String(error) || "Unknown fetch error" };
     }
+    // Saving errors are terminal; they must never be converted into network failures.
+    if (onDocument) await onDocument(url, result, role);
+    return result;
 }
 
 export function canAnalyzePageResponse(result: FetchResult): boolean {
@@ -920,7 +926,12 @@ export async function discoverJavascriptAssets(
     includeSameOriginOnly: boolean,
     followSourceMaps: boolean,
     probeSpaManifests: boolean,
+    onDocument?: DocumentCompleted,
+    assertHealthy?: () => void,
+    retainScriptContents = true,
 ): Promise<JsDiscoveryResult> {
+    const fetchResource = (url: string, agent: string, accept?: string, role: DocumentRole = "page") =>
+        fetchDocument(url, agent, accept, onDocument, role, assertHealthy);
     const jsLinks: JsLink[] = [];
     const scriptContents: ScriptContentSource[] = [];
     const htmlRoutes: HtmlRoute[] = [];
@@ -975,7 +986,7 @@ export async function discoverJavascriptAssets(
                 }
 
                 const pageFetchStartedAt = Date.now();
-                const pageResult = await fetchDocument(current.url, userAgent);
+                const pageResult = await fetchResource(current.url, userAgent);
                 if (!pageResult || !pageResult.ok) {
                     return null;
                 }
@@ -1015,7 +1026,7 @@ export async function discoverJavascriptAssets(
                 discoveryMetrics.inlineScriptCount += 1;
                 scriptContents.push({
                     source: `inline://${current.url}#${inlineScript.hash}`,
-                    content: inlineScript.content,
+                    content: retainScriptContents ? inlineScript.content : "",
                 });
                 const nestedDiscoveryStartedAt = Date.now();
                 for (const link of extractJsFromContent(inlineScript.content, current.url)) {
@@ -1049,7 +1060,7 @@ export async function discoverJavascriptAssets(
         const manifestProbeStartedAt = Date.now();
         const manifestResults = await runWithConcurrency(manifestUrls.map(manifestUrl => async () => ({
             manifestUrl,
-            result: await fetchDocument(manifestUrl, userAgent, "application/json,*/*"),
+            result: await fetchResource(manifestUrl, userAgent, "application/json,*/*", "manifest"),
         })), manifestUrls.length);
         discoveryTimings.manifestProbeMs += Date.now() - manifestProbeStartedAt;
 
@@ -1077,12 +1088,13 @@ export async function discoverJavascriptAssets(
                 fetchStartedAt: Date.now(),
                 link,
                 depth,
-                result: await fetchDocument(
+                result: await fetchResource(
                     link.url,
                     userAgent,
                     link.type === "sourcemap"
                         ? "application/json,text/plain,*/*"
                         : "application/javascript,text/javascript,text/plain,*/*",
+                    link.type === "sourcemap" ? "sourcemap" : "script",
                 ),
             })), Math.min(jsFetchConcurrency, batch.length || 1));
 
@@ -1114,14 +1126,14 @@ export async function discoverJavascriptAssets(
                     discoveryMetrics.sourceMapFetchCount += 1;
                     discoveryTimings.sourceMapFetchMs += fetchDurationMs;
                     for (const sourceContent of parseSourceMapScriptContents(result.text, link.url)) {
-                        scriptContents.push(sourceContent);
+                        scriptContents.push(retainScriptContents ? sourceContent : { source: sourceContent.source, content: "" });
                     }
                     continue;
                 }
 
                 scriptContents.push({
                     source: link.url,
-                    content: result.text,
+                    content: retainScriptContents ? result.text : "",
                 });
 
                 if (depth < MAX_JS_DISCOVERY_DEPTH) {

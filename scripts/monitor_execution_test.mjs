@@ -2,6 +2,7 @@
 // All requests are local stubs; no network and no credentials are used.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { monitorExecution } from './monitor_stream_fixture.ts';
 const originalFetch = globalThis.fetch;
 const originalSentinel = globalThis.Sentinel;
 let handleFetch;
@@ -70,9 +71,14 @@ test('bounds concurrent domains and reports monotonic completion for the whole l
     const domain = new URL(url).searchParams.get('q').slice(2);
     return ok([{ name_value: 'api.' + domain }]);
   };
-  const output = await subdomain.analyze({ domains: Array.from({ length: 9 }, (_, i) => `target${i}.test`), sources: ['crtsh'], __monitorExecution: {} });
+  const domains = Array.from({ length: 9 }, (_, i) => `target${i}.test`);
+  const commits = [];
+  globalThis.Sentinel.Monitor.commitResults = async request => { commits.push(request); return { ok: true, sequence: request.sequence }; };
+  const output = await subdomain.analyze({ domains, sources: ['crtsh'],
+    __monitorExecution: monitorExecution(domains, { pluginId: 'subdomain_enumerator' }) });
   assert.equal(output.success, true);
-  assert.equal(output.data.summary.successfulTargets, 9);
+  assert.equal(output.data.stream_complete, true);
+  assert.equal(commits.flatMap(request => request.work).filter(work => work.complete).length, 9);
   assert.equal(peak, 4);
   assert.equal(updates.at(-1), 9);
   assert.ok(updates.every((value, index) => index === 0 || value >= updates[index - 1]));

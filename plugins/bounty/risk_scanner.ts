@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.7
+ * @version 2.2.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -12,1047 +12,186 @@
  * @category risk
  * @seed_bindings []
  * @default_severity medium
- * @tags risk, poc, verification, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events
+ * @tags risk, poc, verification, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
  * @description Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, and structured evidence.
  */
-
-declare const Sentinel: {
-  Dictionary?: {
-    get?(idOrName: string): Promise<any>;
-    getDefaultId?(dictType: string): Promise<string | null>;
-    getEntries?(idOrName: string, limit?: number): Promise<any[]>;
-  };
-};
-
-interface MonitorExecutionContext {
-  task_id: string;
-  task_name: string;
-  program_id: string;
-  execution_mode: string;
-  started_at: string;
-  current_plugin: string;
-  current_plugin_index: number;
-  completed_steps: number;
-  total_steps: number;
-  imported_assets?: number;
-}
-
-async function reportMonitorProgress(
-  monitorExecution: MonitorExecutionContext | undefined,
-  update: Record<string, unknown>,
-): Promise<boolean> {
-  if (!monitorExecution) return false;
-  try {
-    return Boolean(
-      await Sentinel.Monitor?.reportProgress?.({
-        monitorProgress: {
-          taskId: monitorExecution.task_id,
-          taskName: monitorExecution.task_name,
-          programId: monitorExecution.program_id,
-          executionMode: monitorExecution.execution_mode,
-          startedAt: monitorExecution.started_at,
-          currentPlugin: monitorExecution.current_plugin,
-          currentPluginIndex: monitorExecution.current_plugin_index,
-          completedSteps: monitorExecution.completed_steps,
-          totalSteps: monitorExecution.total_steps,
-          importedAssets: monitorExecution.imported_assets,
-        },
-        ...update,
-      }),
-    );
-  } catch {
-    return false;
-  }
-}
-
-interface ToolInput {
-  url?: string;
-  base_url?: string;
-  targets?: string[];
-  technologies?: Array<string | { name?: string }>;
-  fingerprints?: string[];
-  dictionaryId?: string;
-  dictionaryEntries?: RuleEntry[];
-  safe_mode?: boolean;
-  maxRules?: number;
-  userAgent?: string;
-  stopOnFirstHit?: boolean;
-  variables?: Record<string, any>;
-  __monitorExecution?: MonitorExecutionContext;
-}
-
-interface RuleEntry {
-  word: string;
-  category?: string | null;
-  metadata?: any;
-}
-
-interface Finding {
-  title: string;
-  severity: string;
-  url: string;
-  description: string;
-  impact?: string;
-  remediation?: string;
-  cwe?: string;
-}
-
-interface ExecutionStep {
-  id: string;
-  method: string;
-  url: string;
-  status?: number;
-  matched: boolean;
-  extracted: Record<string, any>;
-}
-
-interface ToolOutput {
-  success: boolean;
-  data?: {
-    findings: Finding[];
-    evidence: any[];
-    summary: {
-      totalTargets: number;
-      executedRules: number;
-      matchedRules: number;
-    };
-    surface_artifacts?: Record<string, any[]>;
-  };
-  error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-  get_input_schema?: typeof get_input_schema;
-  get_output_schema?: typeof get_output_schema;
-  analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
-
-const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 32;
-
-export function get_input_schema() {
-  return {
-    type: "object",
-    required: [],
-    properties: {
-      url: {
-        type: "string",
-        description:
-          "Single target URL to verify with dictionary-driven risk rules",
-      },
-      base_url: {
-        type: "string",
-        description: "Base URL alias for a single target",
-      },
-      targets: {
-        type: "array",
-        items: { type: "string" },
-        description: "List of target URLs or hostnames to verify",
-      },
-      technologies: {
-        type: "array",
-        description: "Observed technologies used to scope matching rules",
-        items: {
-          anyOf: [
-            { type: "string" },
-            {
-              type: "object",
-              properties: {
-                name: {
-                  type: "string",
-                  description: "Technology name",
-                },
-              },
-            },
-          ],
-        },
-      },
-      fingerprints: {
-        type: "array",
-        items: { type: "string" },
-        description: "Observed fingerprint names used for rule filtering",
-      },
-      dictionaryId: {
-        type: "string",
-        "x-control": "dictionary-picker",
-        "x-dictionary-type": "poc_rule",
-        description:
-          "Structured dictionary ID or name used to load verification rules",
-      },
-      dictionaryEntries: {
-        type: "array",
-        description: "Inline rule entries that override dictionary loading",
-        items: {
-          type: "object",
-          required: ["word"],
-          properties: {
-            word: {
-              type: "string",
-              description: "Rule identifier",
-            },
-            category: {
-              type: "string",
-              description: "Rule category used for normalized finding type",
-            },
-            metadata: {
-              description:
-                "Rule metadata object or JSON string with requests, matchers and finding fields",
-            },
-          },
-        },
-      },
-      variables: {
-        type: "object",
-        description: "Variables injected into rule templates and request paths",
-      },
-      safe_mode: {
-        type: "boolean",
-        description: "Skip rules explicitly marked as unsafe",
-        default: true,
-      },
-      maxRules: {
-        type: "integer",
-        description: "Maximum number of applicable rules to execute",
-        default: 20,
-        minimum: 1,
-        maximum: 200,
-      },
-      userAgent: {
-        type: "string",
-        description: "User-Agent header used for outbound requests",
-        default: "Sentinel-Risk-Scanner/2.0",
-      },
-      stopOnFirstHit: {
-        type: "boolean",
-        description:
-          "Stop executing more rules after the first positive finding",
-        default: false,
-      },
-    },
-  };
-}
-
-export function get_output_schema() {
-  return {
-    type: "object",
-    properties: {
-      success: {
-        type: "boolean",
-        description: "Whether the risk verification run completed successfully",
-      },
-      data: {
-        type: "object",
-        properties: {
-          findings: {
-            type: "array",
-            description: "Matched risk findings produced by the executed rules",
-            items: {
-              type: "object",
-              properties: {
-                title: { type: "string" },
-                severity: { type: "string" },
-                url: { type: "string" },
-                description: { type: "string" },
-                impact: { type: "string" },
-                remediation: { type: "string" },
-                cwe: { type: "string" },
-              },
-            },
-          },
-          evidence: {
-            type: "array",
-            description:
-              "Structured execution evidence captured during rule evaluation",
-          },
-          summary: {
-            type: "object",
-            description: "High-level execution summary",
-            properties: {
-              totalTargets: { type: "integer" },
-              executedRules: { type: "integer" },
-              matchedRules: { type: "integer" },
-            },
-          },
-          surface_artifacts: {
-            type: "object",
-            description:
-              "Normalized findings and evidences prepared for upper-layer ingestion",
-            properties: {
-              findings: {
-                type: "array",
-                description: "Normalized vulnerability findings",
-              },
-              evidences: {
-                type: "array",
-                description: "Normalized evidence records",
-              },
-            },
-          },
-        },
-      },
-      error: {
-        type: "string",
-        description: "Error message if the risk verification run fails",
-      },
-    },
-  };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-pluginGlobals.get_output_schema = get_output_schema;
-
-const RULE_FETCH_TIMEOUT_MS = 10000;
-
-async function runSequentially<T>(
-  tasks: Array<() => Promise<T>>,
-): Promise<T[]> {
-  const results = new Array<T>(tasks.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(16, tasks.length) },
-    async () => {
-      while (nextIndex < tasks.length) {
-        const currentIndex = nextIndex++;
-        results[currentIndex] = await tasks[currentIndex]();
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
-}
-
-function normalizeTarget(raw?: string): string | null {
-  if (!raw || typeof raw !== "string") return null;
-  const trimmed = raw.trim().replace(/\/+$/, "");
-  if (!trimmed) return null;
-  return trimmed.startsWith("http://") || trimmed.startsWith("https://")
-    ? trimmed
-    : `https://${trimmed}`;
-}
-
-function getInputNumber(
-  input: ToolInput,
-  camelKey: keyof ToolInput,
-  snakeKey: string,
-  fallback: number,
-): number {
-  const snakeValue = (input as any)?.[snakeKey];
-  const camelValue = input?.[camelKey];
-  const value = snakeValue ?? camelValue;
-  const parsed = Number(value ?? fallback);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function getInputBoolean(
-  input: ToolInput,
-  camelKey: keyof ToolInput,
-  snakeKey: string,
-  fallback: boolean,
-): boolean {
-  const snakeValue = (input as any)?.[snakeKey];
-  const camelValue = input?.[camelKey];
-  return typeof snakeValue === "boolean"
-    ? snakeValue
-    : typeof camelValue === "boolean"
-      ? camelValue
-      : fallback;
-}
-
-function getInputString(
-  input: ToolInput,
-  camelKey: keyof ToolInput,
-  snakeKey: string,
-  fallback = "",
-): string {
-  const snakeValue = (input as any)?.[snakeKey];
-  const camelValue = input?.[camelKey];
-  const value = snakeValue ?? camelValue;
-  return typeof value === "string" && value.trim().length > 0
-    ? value
-    : fallback;
-}
-
-function parseMetadata(value: any): Record<string, any> {
-  if (!value) return {};
-  if (typeof value === "string") {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return {};
-    }
-  }
-  return typeof value === "object" ? value : {};
-}
-
-function asArray<T>(value: T[] | T | undefined | null): T[] {
-  return Array.isArray(value) ? value : value == null ? [] : [value];
-}
-
-function parseTitle(html: string): string {
-  const match = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-  return match?.[1]?.trim() || "";
-}
-
-function joinUrl(baseUrl: string, path: string): string {
-  return `${baseUrl}/${String(path || "").replace(/^\/+/, "")}`;
-}
-
-function deepGet(source: any, path: string): any {
-  if (!path) return source;
-  return path.split(".").reduce((acc, key) => {
-    if (acc == null) return undefined;
-    if (key.endsWith("]")) {
-      const match = key.match(/^([^[\]]+)\[(\d+)\]$/);
-      if (!match) return acc?.[key];
-      const [, arrayKey, indexText] = match;
-      return acc?.[arrayKey]?.[Number(indexText)];
-    }
-    return acc?.[key];
-  }, source);
-}
-
-function renderTemplate(value: any, context: Record<string, any>): any {
-  if (typeof value !== "string") return value;
-  return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, expr) => {
-    const resolved = deepGet(context, String(expr).trim());
-    if (resolved == null) return "";
-    return typeof resolved === "string" ? resolved : JSON.stringify(resolved);
-  });
-}
-
-function tryParseJson(body: string): any {
-  try {
-    return JSON.parse(body);
-  } catch {
-    return undefined;
-  }
-}
-
-function matcherHit(ctx: Record<string, any>, matcher: any): boolean {
-  const part = String(matcher?.part || "body").toLowerCase();
-  const type = String(matcher?.type || "contains").toLowerCase();
-  const expected = matcher?.value;
-
-  if (part === "status") {
-    if (type === "in" && Array.isArray(expected)) {
-      return expected.includes(ctx.status);
-    }
-    return ctx.status === expected;
-  }
-
-  const source =
-    part === "header"
-      ? String(ctx.headers[String(matcher?.key || "").toLowerCase()] || "")
-      : part === "title"
-        ? ctx.title
-        : part === "json"
-          ? deepGet(ctx.json || {}, String(matcher?.path || matcher?.key || ""))
-          : ctx.body;
-
-  if (type === "exists") {
-    return source !== undefined && source !== null && String(source).length > 0;
-  }
-  if (type === "equals") return String(source) === String(expected ?? "");
-  if (type === "in" && Array.isArray(expected)) {
-    return expected.map(String).includes(String(source));
-  }
-  if (type === "regex") {
-    try {
-      return new RegExp(String(expected || ""), "i").test(String(source || ""));
-    } catch {
-      return false;
-    }
-  }
-  return String(source || "")
-    .toLowerCase()
-    .includes(String(expected || "").toLowerCase());
-}
-
-function matchAll(
-  ctx: Record<string, any>,
-  matchers: any[],
-  operator?: string,
-): boolean {
-  if (!Array.isArray(matchers) || matchers.length === 0) return false;
-  return String(operator || "and").toLowerCase() === "or"
-    ? matchers.some((matcher) => matcherHit(ctx, matcher))
-    : matchers.every((matcher) => matcherHit(ctx, matcher));
-}
-
-function evaluateCondition(
-  condition: any,
-  context: Record<string, any>,
-): boolean {
-  if (condition?.matchers) {
-    return matchAll(
-      context,
-      asArray(condition.matchers),
-      condition.operator || "and",
-    );
-  }
-
-  const field = String(condition?.field || "");
-  const op = String(condition?.op || "equals").toLowerCase();
-  const actual = deepGet(context, field);
-  const expected = condition?.value;
-
-  if (op === "exists") {
-    return actual !== undefined && actual !== null && String(actual).length > 0;
-  }
-  if (op === "contains") {
-    return String(actual || "")
-      .toLowerCase()
-      .includes(String(expected || "").toLowerCase());
-  }
-  if (op === "in" && Array.isArray(expected)) {
-    return expected.map(String).includes(String(actual));
-  }
-  if (op === "regex") {
-    try {
-      return new RegExp(String(expected || ""), "i").test(String(actual || ""));
-    } catch {
-      return false;
-    }
-  }
-  return String(actual) === String(expected);
-}
-
-function evaluatePreconditions(
-  preconditions: any[],
-  context: Record<string, any>,
-): boolean {
-  if (!Array.isArray(preconditions) || preconditions.length === 0) return true;
-  return preconditions.every((condition) =>
-    evaluateCondition(condition, context),
-  );
-}
-
-function getObservedFingerprints(input: ToolInput): string[] {
-  return [
-    ...asArray(input.fingerprints),
-    ...asArray(input.technologies).map((item) =>
-      typeof item === "string" ? item : item?.name || "",
-    ),
-  ]
-    .filter(Boolean)
-    .map((item) => String(item).toLowerCase());
-}
-
-function ruleMatchesFingerprintScope(
-  rule: RuleEntry,
-  observedFingerprints: string[],
-): boolean {
-  const metadata = parseMetadata(rule.metadata);
-  if (metadata.enabled === false) return false;
-
-  const scope = metadata.match_scope || {};
-  const expectedFingerprints = asArray(scope.fingerprints).map((item) =>
-    String(item).toLowerCase(),
-  );
-
-  if (
-    expectedFingerprints.length > 0 &&
-    !expectedFingerprints.some((item) => observedFingerprints.includes(item))
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function ruleApplies(
-  rule: RuleEntry,
-  input: ToolInput,
-  targetContext: Record<string, any>,
-): boolean {
-  if (!ruleMatchesFingerprintScope(rule, getObservedFingerprints(input))) {
-    return false;
-  }
-
-  return evaluatePreconditions(
-    asArray(parseMetadata(rule.metadata).preconditions),
-    targetContext,
-  );
-}
-
-function dedupeRules(rules: RuleEntry[]): RuleEntry[] {
-  const seen = new Set<string>();
-  const deduped: RuleEntry[] = [];
-
-  for (const rule of rules) {
-    const metadata = parseMetadata(rule.metadata);
-    const ruleId = String(rule.word || metadata.name || "")
-      .trim()
-      .toLowerCase();
-    if (!ruleId || seen.has(ruleId)) continue;
-    seen.add(ruleId);
-    deduped.push({ ...rule, metadata });
-  }
-
-  return deduped;
-}
-
-async function loadStructuredDictionary(
-  idOrName: string,
-): Promise<RuleEntry[]> {
-  if (!Sentinel?.Dictionary?.getEntries) return [];
-  try {
-    const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-    return entries
-      .filter((item: any) => item && typeof item.word === "string")
-      .map((item: any) => ({
-        word: item.word,
-        category: item.category || null,
-        metadata: parseMetadata(item.metadata),
-      }));
-  } catch {
-    return [];
-  }
-}
-
-async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-  if (
-    Array.isArray(input.dictionaryEntries) &&
-    input.dictionaryEntries.length > 0
-  ) {
-    return input.dictionaryEntries.map((entry) => ({
-      ...entry,
-      metadata: parseMetadata(entry.metadata),
-    }));
-  }
-
-  const defaultDictionaryId = Sentinel?.Dictionary?.getDefaultId
-    ? await Sentinel.Dictionary.getDefaultId("poc_rule")
-    : null;
-
-  const candidates = [
-    input.dictionaryId,
-    (input as any)?.dictionary_id,
-    defaultDictionaryId,
-    "builtin_safe_poc_rules",
-    "Safe POC Rules",
-  ].filter(
-    (value): value is string =>
-      typeof value === "string" && value.trim().length > 0,
-  );
-
-  for (const candidate of candidates) {
-    const rules = await loadStructuredDictionary(candidate);
-    if (rules.length > 0) return rules;
-  }
-
-  return [];
-}
-
-function normalizeRequests(metadata: Record<string, any>): any[] {
-  const requests = Array.isArray(metadata.requests)
-    ? metadata.requests
-    : metadata.request
-      ? [metadata.request]
-      : [];
-  return requests.map((request, index) => ({
-    id: request?.id || `step_${index + 1}`,
-    method: String(request?.method || "GET").toUpperCase(),
-    path: request?.path || "/",
-    headers: request?.headers || {},
-    body: request?.body,
-    matchers: Array.isArray(request?.matchers) ? request.matchers : undefined,
-    extractors: Array.isArray(request?.extractors) ? request.extractors : [],
-  }));
-}
-
-function buildRequestContext(
-  baseContext: Record<string, any>,
-  executionContext: Record<string, any>,
-): Record<string, any> {
-  return {
-    ...baseContext,
-    ...executionContext,
-    steps: executionContext.steps || {},
-    extracted: executionContext.extracted || {},
-  };
-}
-
-function applyExtractors(
-  extractors: any[],
-  responseContext: Record<string, any>,
-): Record<string, any> {
-  const extracted: Record<string, any> = {};
-  for (const extractor of extractors) {
-    const name = String(extractor?.name || "").trim();
-    if (!name) continue;
-    const sourcePart = String(extractor?.part || "body").toLowerCase();
-    const source =
-      sourcePart === "header"
-        ? String(
-            responseContext.headers[
-              String(extractor?.key || "").toLowerCase()
-            ] || "",
-          )
-        : sourcePart === "title"
-          ? responseContext.title
-          : sourcePart === "json"
-            ? deepGet(
-                responseContext.json || {},
-                String(extractor?.path || extractor?.key || ""),
-              )
-            : responseContext.body;
-
-    if (extractor?.type === "regex") {
-      try {
-        const match = String(source || "").match(
-          new RegExp(String(extractor?.pattern || extractor?.value || ""), "i"),
-        );
-        if (match?.[1]) extracted[name] = match[1];
-      } catch {
-        continue;
-      }
-      continue;
-    }
-
-    if (extractor?.type === "json_path") {
-      extracted[name] = deepGet(
-        responseContext.json || {},
-        String(extractor?.path || ""),
-      );
-      continue;
-    }
-
-    extracted[name] = source;
-  }
-  return extracted;
-}
-
-async function executeRule(
-  target: string,
-  rule: RuleEntry,
-  input: ToolInput,
-): Promise<{ finding?: Finding; evidence?: any; matched: boolean }> {
-  const metadata = parseMetadata(rule.metadata);
-  const baseContext: Record<string, any> = {
-    target,
-    base_url: target,
-    url: target,
-    rule_id: rule.word,
-    category: rule.category || "",
-    variables: input.variables || {},
-    fingerprints: asArray(input.fingerprints),
-    technologies: asArray(input.technologies).map((item) =>
-      typeof item === "string" ? item : item?.name || "",
-    ),
-  };
-
-  if (!ruleApplies(rule, input, baseContext)) {
-    return { matched: false };
-  }
-
-  const requests = normalizeRequests(metadata);
-  if (requests.length === 0) return { matched: false };
-
-  const executionContext: Record<string, any> = { steps: {}, extracted: {} };
-  const evidenceSteps: ExecutionStep[] = [];
-  let lastResponseContext: Record<string, any> | null = null;
-
-  for (const request of requests) {
-    const context = buildRequestContext(baseContext, executionContext);
-    const method = String(request.method || "GET").toUpperCase();
-
-    if (input.safe_mode !== false && !SAFE_METHODS.has(method)) {
-      return { matched: false };
-    }
-
-    const renderedPath = renderTemplate(request.path, context);
-    const url = joinUrl(target, renderedPath);
-    const headers = Object.fromEntries(
-      Object.entries(request.headers || {}).map(([key, value]) => [
-        key,
-        renderTemplate(value, context),
-      ]),
-    );
-    const body =
-      request.body == null ? undefined : renderTemplate(request.body, context);
-
-    try {
-      const response = await fetch(url, {
-        method,
-        headers: {
-          "User-Agent": input.userAgent || "Sentinel-Risk-Scanner/2.0",
-          ...headers,
-        },
-        body: body == null ? undefined : String(body),
-        timeout: RULE_FETCH_TIMEOUT_MS,
-      });
-
-      const responseBody = await response.text();
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[String(key).toLowerCase()] = value;
-      });
-      const responseContext = {
-        status: response.status,
-        body: responseBody,
-        headers: responseHeaders,
-        title: parseTitle(responseBody),
-        json: tryParseJson(responseBody),
-        url,
-      };
-
-      const extracted = applyExtractors(
-        asArray(request.extractors),
-        responseContext,
-      );
-      executionContext.steps[request.id] = responseContext;
-      executionContext.extracted = {
-        ...executionContext.extracted,
-        ...extracted,
-      };
-      lastResponseContext = responseContext;
-
-      const stepMatchers = Array.isArray(request.matchers)
-        ? request.matchers
-        : [];
-      const hasStepMatchers = stepMatchers.length > 0;
-      const stepMatched = hasStepMatchers
-        ? matchAll(responseContext, stepMatchers, request.operator || "and")
-        : false;
-
-      evidenceSteps.push({
-        id: request.id,
-        method,
-        url,
-        status: response.status,
-        matched: hasStepMatchers ? stepMatched : undefined,
-        extracted,
-      });
-
-      if (hasStepMatchers && !stepMatched) {
-        return {
-          matched: false,
-          evidence: { rule_id: rule.word, target, steps: evidenceSteps },
-        };
-      }
-    } catch (error: any) {
-      evidenceSteps.push({
-        id: request.id,
-        method,
-        url,
-        matched: false,
-        extracted: {},
-      });
-      return {
-        matched: false,
-        evidence: {
-          rule_id: rule.word,
-          target,
-          steps: evidenceSteps,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      };
-    }
-  }
-
-  const finalMatchers = Array.isArray(metadata.matchers)
-    ? metadata.matchers
-    : [];
-  const finalMatched =
-    finalMatchers.length === 0
-      ? true
-      : lastResponseContext != null &&
-        matchAll(
-          lastResponseContext,
-          finalMatchers,
-          metadata.operator || "and",
-        );
-
-  const evidence = {
-    rule_id: rule.word,
-    target,
-    steps: evidenceSteps,
-    final_matchers: finalMatchers,
-    extracted: executionContext.extracted,
-  };
-
-  if (!finalMatched || !lastResponseContext) {
-    return { matched: false, evidence };
-  }
-
-  const finding: Finding = {
-    title: metadata.name || rule.word,
-    severity: metadata.severity || "medium",
-    url: lastResponseContext.url,
-    description:
-      metadata.description || `Risk verification rule ${rule.word} matched.`,
-    impact: metadata.impact || "",
-    remediation:
-      metadata.remediation ||
-      "Restrict access and harden the affected component.",
-    cwe: metadata.cwe || "",
-  };
-
-  return { matched: true, finding, evidence };
-}
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-  try {
-    if (!input || typeof input !== "object") {
-      return {
-        success: false,
-        error: "Invalid input: expected an object payload",
-      };
-    }
-
-    const safeMode = getInputBoolean(input, "safe_mode", "safe_mode", true);
-    const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
-    const userAgent = getInputString(
-      input,
-      "userAgent",
-      "user_agent",
-      "Sentinel-Risk-Scanner/2.0",
-    );
-    const stopOnFirstHit = getInputBoolean(
-      input,
-      "stopOnFirstHit",
-      "stop_on_first_hit",
-      false,
-    );
-    const normalizedInput: ToolInput = {
-      ...input,
-      safe_mode: safeMode,
-      maxRules,
-      userAgent,
-      stopOnFirstHit,
-      dictionaryId:
-        getInputString(input, "dictionaryId", "dictionary_id") ||
-        input.dictionaryId,
-    };
-    const monitorExecution = input.__monitorExecution;
-    const targets = Array.from(
-      new Set(
-        [
-          normalizeTarget(input.url),
-          normalizeTarget(input.base_url),
-          ...asArray(input.targets).map(normalizeTarget),
-        ].filter((value): value is string => Boolean(value)),
-      ),
-    );
-
-    if (targets.length === 0) {
-      return { success: false, error: "At least one target URL is required" };
-    }
-
-    const observedFingerprints = getObservedFingerprints(normalizedInput);
-    const allRules = dedupeRules(await loadRules(normalizedInput));
-    if (allRules.length === 0) {
-      return {
-        success: false,
-        error:
-          "No risk verification rules loaded. Configure dictionaryEntries or a poc_rule dictionary with explicit requests and matchers.",
-      };
-    }
-    const rules = allRules
-      .filter((rule) => {
-        const metadata = parseMetadata(rule.metadata);
-        if (metadata.enabled === false) return false;
-        if (safeMode && metadata.safe_mode === false) return false;
-        return ruleMatchesFingerprintScope(rule, observedFingerprints);
-      })
-      .slice(0, maxRules);
-    const totalProgressUnits = targets.length * Math.max(rules.length, 1) + 2;
-
-    await reportMonitorProgress(monitorExecution, {
-      current: 0,
-      total: totalProgressUnits,
-      phase: "prepare",
-      message: "Preparing risk verification",
-    });
-
-    const findings: Finding[] = [];
-    const evidence: any[] = [];
-    const vulnerabilityFindings: any[] = [];
-
-    const scanTasks: Array<{ target: string; rule: RuleEntry }> = [];
-    for (const target of targets) {
-      for (const rule of rules) {
-        scanTasks.push({ target, rule });
-      }
-    }
-
-    let stopRequested = false;
-    let executedRuleCount = 0;
-    await runSequentially(
-      scanTasks.map(({ target, rule }) => async () => {
-        if (stopRequested) return;
-        executedRuleCount += 1;
-
-        const result = await executeRule(target, rule, normalizedInput);
-        await reportMonitorProgress(monitorExecution, {
-          current: executedRuleCount,
-          total: totalProgressUnits,
-          currentTarget: target,
-          phase: "probe",
-          message: `Executing verification rules for ${target}`,
-        });
-        if (result.evidence) evidence.push(result.evidence);
-        if (!result.matched || !result.finding) return;
-
-        const metadata = parseMetadata(rule.metadata);
-        findings.push(result.finding);
-        vulnerabilityFindings.push({
-          title: result.finding.title,
-          severity: result.finding.severity,
-          target: result.finding.url,
-          vulnerability_type:
-            metadata.finding_type || rule.category || "risk_verification",
-          description: result.finding.description,
-          source: "risk_scanner",
-        });
-
-        if (stopOnFirstHit) {
-          stopRequested = true;
-        }
-      }),
-    );
-
-    await reportMonitorProgress(monitorExecution, {
-      current: totalProgressUnits - 1,
-      total: totalProgressUnits,
-      phase: "compare",
-      message: "Summarizing risk verification results",
-    });
-
-    await reportMonitorProgress(monitorExecution, {
-      current: totalProgressUnits,
-      total: totalProgressUnits,
-      phase: "build",
-      message: "Building risk scan results",
-    });
-
-    return {
-      success: true,
-      data: {
-        findings,
-        evidence,
-        summary: {
-          totalTargets: targets.length,
-          executedRules: executedRuleCount,
-          matchedRules: findings.length,
-        },
-        surface_artifacts: {
-          findings: vulnerabilityFindings,
-          evidences: evidence,
-        },
-      },
-    };
-  } catch (error: any) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/risk_scanner/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function confirmedMonitorFinding(finding,findingType,evidence=finding.evidence){const required=(value,field)=>{if(typeof value!=="string"||!value.trim())throw new Error(
+`Confirmed monitor finding requires ${field}`);return value.trim()};const output={title:required(finding.title,"title"),description:required(finding.description,
+"description"),finding_type:required(findingType,"finding_type"),severity:required(finding.severity,"severity"),confidence:"high",affected_url:required(finding.
+url,"affected_url")};if(finding.cwe?.trim())output.cwe_id=finding.cwe.trim();if(finding.remediation?.trim())output.remediation=finding.remediation.trim();if(finding.
+impact?.trim())output.impact=finding.impact.trim();if(finding.tags?.length)output.tags=finding.tags;if(evidence!==void 0)output.evidence=evidence;return output}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{
+taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
+started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}var pluginGlobals=globalThis;var SAFE_METHODS=new Set(
+["GET","HEAD","OPTIONS","POST"]);function get_input_schema(){return{type:"object",required:[],properties:{url:{type:"string",description:"Single target URL to verify with dictionary-driven risk\
+ rules"},base_url:{type:"string",description:"Base URL alias for a single target"},targets:{type:"array",items:{type:"string"},description:"List of target URLs \
+or hostnames to verify"},technologies:{type:"array",description:"Observed technologies used to scope matching rules",items:{anyOf:[{type:"string"},{type:"object",
+properties:{name:{type:"string",description:"Technology name"}}}]}},fingerprints:{type:"array",items:{type:"string"},description:"Observed fingerprint names use\
+d for rule filtering"},dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionary-type":"poc_rule",description:"Structured dictionary ID or name \
+used to load verification rules"},dictionaryEntries:{type:"array",description:"Inline rule entries that override dictionary loading",items:{type:"object",required:[
+"word"],properties:{word:{type:"string",description:"Rule identifier"},category:{type:"string",description:"Rule category used for normalized finding type"},metadata:{
+description:"Rule metadata object or JSON string with requests, matchers and finding fields"}}}},variables:{type:"object",description:"Variables injected into r\
+ule templates and request paths"},safe_mode:{type:"boolean",description:"Skip rules explicitly marked as unsafe",default:true},maxRules:{type:"integer",description:"\
+Maximum number of applicable rules to execute",default:20,minimum:1,maximum:200},userAgent:{type:"string",description:"User-Agent header used for outbound reque\
+sts",default:"Sentinel-Risk-Scanner/2.0"},stopOnFirstHit:{type:"boolean",description:"Stop executing more rules after the first positive finding",default:false}}}}
+function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the risk verification run completed successfully"},data:{
+type:"object",properties:{findings:{type:"array",description:"Matched risk findings produced by the executed rules",items:{type:"object",properties:{title:{type:"\
+string"},severity:{type:"string"},url:{type:"string"},description:{type:"string"},impact:{type:"string"},remediation:{type:"string"},cwe:{type:"string"}}}},evidence:{
+type:"array",description:"Structured execution evidence captured during rule evaluation"},summary:{type:"object",description:"High-level execution summary",properties:{
+totalTargets:{type:"integer"},executedRules:{type:"integer"},matchedRules:{type:"integer"}}},surface_artifacts:{type:"object",description:"Normalized findings a\
+nd evidences prepared for upper-layer ingestion",properties:{findings:{type:"array",description:"Normalized vulnerability findings"},evidences:{type:"array",description:"\
+Normalized evidence records"}}}}},error:{type:"string",description:"Error message if the risk verification run fails"}}}}pluginGlobals.get_input_schema=get_input_schema;
+pluginGlobals.get_output_schema=get_output_schema;var RULE_FETCH_TIMEOUT_MS=1e4;async function runSequentially(tasks){const results=new Array(tasks.length);let nextIndex=0;
+const workers=Array.from({length:Math.min(16,tasks.length)},async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex++;results[currentIndex]=await tasks[currentIndex]()}});
+await Promise.all(workers);return results}function normalizeTarget(raw){if(!raw||typeof raw!=="string")return null;const trimmed=raw.trim().replace(/\/+$/,"");if(!trimmed)
+return null;return trimmed.startsWith("http://")||trimmed.startsWith("https://")?trimmed:`https://${trimmed}`}function getInputNumber(input,camelKey,snakeKey,fallback){
+const snakeValue=input?.[snakeKey];const camelValue=input?.[camelKey];const value=snakeValue??camelValue;const parsed=Number(value??fallback);return Number.isFinite(
+parsed)?parsed:fallback}function getInputBoolean(input,camelKey,snakeKey,fallback){const snakeValue=input?.[snakeKey];const camelValue=input?.[camelKey];return typeof snakeValue===
+"boolean"?snakeValue:typeof camelValue==="boolean"?camelValue:fallback}function getInputString(input,camelKey,snakeKey,fallback=""){const snakeValue=input?.[snakeKey];
+const camelValue=input?.[camelKey];const value=snakeValue??camelValue;return typeof value==="string"&&value.trim().length>0?value:fallback}function parseMetadata(value){
+if(!value)return{};if(typeof value==="string"){try{return JSON.parse(value)}catch{return{}}}return typeof value==="object"?value:{}}function asArray(value){return Array.
+isArray(value)?value:value==null?[]:[value]}function parseTitle(html){const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);return match?.[1]?.trim()||""}function joinUrl(baseUrl,path){
+return`${baseUrl}/${String(path||"").replace(/^\/+/,"")}`}function deepGet(source,path){if(!path)return source;return path.split(".").reduce((acc,key)=>{if(acc==
+null)return void 0;if(key.endsWith("]")){const match=key.match(/^([^[\]]+)\[(\d+)\]$/);if(!match)return acc?.[key];const[,arrayKey,indexText]=match;return acc?.[arrayKey]?.[Number(
+indexText)]}return acc?.[key]},source)}function renderTemplate(value,context){if(typeof value!=="string")return value;return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g,
+(_,expr)=>{const resolved=deepGet(context,String(expr).trim());if(resolved==null)return"";return typeof resolved==="string"?resolved:JSON.stringify(resolved)})}
+function tryParseJson(body){try{return JSON.parse(body)}catch{return void 0}}function matcherHit(ctx,matcher){const part=String(matcher?.part||"body").toLowerCase();
+const type=String(matcher?.type||"contains").toLowerCase();const expected=matcher?.value;if(part==="status"){if(type==="in"&&Array.isArray(expected)){return expected.
+includes(ctx.status)}return ctx.status===expected}const source=part==="header"?String(ctx.headers[String(matcher?.key||"").toLowerCase()]||""):part==="title"?ctx.
+title:part==="json"?deepGet(ctx.json||{},String(matcher?.path||matcher?.key||"")):ctx.body;if(type==="exists"){return source!==void 0&&source!==null&&String(source).
+length>0}if(type==="equals")return String(source)===String(expected??"");if(type==="in"&&Array.isArray(expected)){return expected.map(String).includes(String(source))}
+if(type==="regex"){try{return new RegExp(String(expected||""),"i").test(String(source||""))}catch{return false}}return String(source||"").toLowerCase().includes(
+String(expected||"").toLowerCase())}function matchAll(ctx,matchers,operator){if(!Array.isArray(matchers)||matchers.length===0)return false;return String(operator||
+"and").toLowerCase()==="or"?matchers.some(matcher=>matcherHit(ctx,matcher)):matchers.every(matcher=>matcherHit(ctx,matcher))}function evaluateCondition(condition,context){
+if(condition?.matchers){return matchAll(context,asArray(condition.matchers),condition.operator||"and")}const field=String(condition?.field||"");const op=String(
+condition?.op||"equals").toLowerCase();const actual=deepGet(context,field);const expected=condition?.value;if(op==="exists"){return actual!==void 0&&actual!==null&&
+String(actual).length>0}if(op==="contains"){return String(actual||"").toLowerCase().includes(String(expected||"").toLowerCase())}if(op==="in"&&Array.isArray(expected)){
+return expected.map(String).includes(String(actual))}if(op==="regex"){try{return new RegExp(String(expected||""),"i").test(String(actual||""))}catch{return false}}
+return String(actual)===String(expected)}function evaluatePreconditions(preconditions,context){if(!Array.isArray(preconditions)||preconditions.length===0)return true;
+return preconditions.every(condition=>evaluateCondition(condition,context))}function getObservedFingerprints(input){return[...asArray(input.fingerprints),...asArray(
+input.technologies).map(item=>typeof item==="string"?item:item?.name||"")].filter(Boolean).map(item=>String(item).toLowerCase())}function ruleMatchesFingerprintScope(rule,observedFingerprints){
+const metadata=parseMetadata(rule.metadata);if(metadata.enabled===false)return false;const scope=metadata.match_scope||{};const expectedFingerprints=asArray(scope.
+fingerprints).map(item=>String(item).toLowerCase());if(expectedFingerprints.length>0&&!expectedFingerprints.some(item=>observedFingerprints.includes(item))){return false}
+return true}function ruleApplies(rule,input,targetContext){if(!ruleMatchesFingerprintScope(rule,getObservedFingerprints(input))){return false}return evaluatePreconditions(
+asArray(parseMetadata(rule.metadata).preconditions),targetContext)}function dedupeRules(rules){const seen=new Set;const deduped=[];for(const rule of rules){const metadata=parseMetadata(
+rule.metadata);const ruleId=String(rule.word||metadata.name||"").trim().toLowerCase();if(!ruleId||seen.has(ruleId))continue;seen.add(ruleId);deduped.push({...rule,
+metadata})}return deduped}async function loadStructuredDictionary(idOrName){if(!Sentinel?.Dictionary?.getEntries)return[];try{const entries=await Sentinel.Dictionary.
+getEntries(idOrName,1e4);return entries.filter(item=>item&&typeof item.word==="string").map(item=>({word:item.word,category:item.category||null,metadata:parseMetadata(
+item.metadata)}))}catch{return[]}}async function loadRules(input){if(Array.isArray(input.dictionaryEntries)&&input.dictionaryEntries.length>0){return input.dictionaryEntries.
+map(entry=>({...entry,metadata:parseMetadata(entry.metadata)}))}const defaultDictionaryId=Sentinel?.Dictionary?.getDefaultId?await Sentinel.Dictionary.getDefaultId(
+"poc_rule"):null;const candidates=[input.dictionaryId,input?.dictionary_id,defaultDictionaryId,"builtin_safe_poc_rules","Safe POC Rules"].filter(value=>typeof value===
+"string"&&value.trim().length>0);for(const candidate of candidates){const rules=await loadStructuredDictionary(candidate);if(rules.length>0)return rules}return[]}
+function normalizeRequests(metadata){const requests=Array.isArray(metadata.requests)?metadata.requests:metadata.request?[metadata.request]:[];return requests.map(
+(request,index)=>({id:request?.id||`step_${index+1}`,method:String(request?.method||"GET").toUpperCase(),path:request?.path||"/",headers:request?.headers||{},body:request?.
+body,matchers:Array.isArray(request?.matchers)?request.matchers:void 0,extractors:Array.isArray(request?.extractors)?request.extractors:[]}))}function buildRequestContext(baseContext,executionContext){
+return{...baseContext,...executionContext,steps:executionContext.steps||{},extracted:executionContext.extracted||{}}}function applyExtractors(extractors,responseContext){
+const extracted={};for(const extractor of extractors){const name=String(extractor?.name||"").trim();if(!name)continue;const sourcePart=String(extractor?.part||"\
+body").toLowerCase();const source=sourcePart==="header"?String(responseContext.headers[String(extractor?.key||"").toLowerCase()]||""):sourcePart==="title"?responseContext.
+title:sourcePart==="json"?deepGet(responseContext.json||{},String(extractor?.path||extractor?.key||"")):responseContext.body;if(extractor?.type==="regex"){try{const match=String(
+source||"").match(new RegExp(String(extractor?.pattern||extractor?.value||""),"i"));if(match?.[1])extracted[name]=match[1]}catch{continue}continue}if(extractor?.
+type==="json_path"){extracted[name]=deepGet(responseContext.json||{},String(extractor?.path||""));continue}extracted[name]=source}return extracted}async function executeRule(target,rule,input,onStep){
+const metadata=parseMetadata(rule.metadata);const baseContext={target,base_url:target,url:target,rule_id:rule.word,category:rule.category||"",variables:input.variables||
+{},fingerprints:asArray(input.fingerprints),technologies:asArray(input.technologies).map(item=>typeof item==="string"?item:item?.name||"")};if(!ruleApplies(rule,
+input,baseContext)){return{matched:false}}const requests=normalizeRequests(metadata);if(requests.length===0)return{matched:false};const executionContext={steps:{},
+extracted:{}};const evidenceSteps=[];let lastResponseContext=null;for(const request of requests){const context=buildRequestContext(baseContext,executionContext);
+const method=String(request.method||"GET").toUpperCase();if(input.safe_mode!==false&&!SAFE_METHODS.has(method)){return{matched:false}}const renderedPath=renderTemplate(
+request.path,context);const url=joinUrl(target,renderedPath);const headers=Object.fromEntries(Object.entries(request.headers||{}).map(([key,value])=>[key,renderTemplate(
+value,context)]));const body=request.body==null?void 0:renderTemplate(request.body,context);try{const response=await fetch(url,{method,headers:{"User-Agent":input.
+userAgent||"Sentinel-Risk-Scanner/2.0",...headers},body:body==null?void 0:String(body),timeout:RULE_FETCH_TIMEOUT_MS});const responseBody=await response.text();
+const responseHeaders={};response.headers.forEach((value,key)=>{responseHeaders[String(key).toLowerCase()]=value});const responseContext={status:response.status,
+body:responseBody,headers:responseHeaders,title:parseTitle(responseBody),json:tryParseJson(responseBody),url};const extracted=applyExtractors(asArray(request.extractors),
+responseContext);executionContext.steps[request.id]=responseContext;executionContext.extracted={...executionContext.extracted,...extracted};lastResponseContext=
+responseContext;const stepMatchers=Array.isArray(request.matchers)?request.matchers:[];const hasStepMatchers=stepMatchers.length>0;const stepMatched=hasStepMatchers?
+matchAll(responseContext,stepMatchers,request.operator||"and"):false;evidenceSteps.push({id:request.id,method,url,status:response.status,matched:hasStepMatchers?
+stepMatched:void 0,extracted});if(hasStepMatchers&&!stepMatched){return{matched:false,evidence:{rule_id:rule.word,target,steps:evidenceSteps}}}}catch(error){evidenceSteps.
+push({id:request.id,method,url,matched:false,extracted:{}});return{matched:false,evidence:{rule_id:rule.word,target,steps:evidenceSteps,error:error instanceof Error?
+error.message:String(error)}}}if(onStep)await onStep(evidenceSteps[evidenceSteps.length-1],evidenceSteps.length-1)}const finalMatchers=Array.isArray(metadata.matchers)?
+metadata.matchers:[];const finalMatched=finalMatchers.length===0?true:lastResponseContext!=null&&matchAll(lastResponseContext,finalMatchers,metadata.operator||"\
+and");const evidence={rule_id:rule.word,target,steps:evidenceSteps,final_matchers:finalMatchers,extracted:executionContext.extracted};if(!finalMatched||!lastResponseContext){
+return{matched:false,evidence}}const finding={title:metadata.name||rule.word,severity:metadata.severity||"medium",url:lastResponseContext.url,description:metadata.
+description||`Risk verification rule ${rule.word} matched.`,impact:metadata.impact||"",remediation:metadata.remediation||"Restrict access and harden the affecte\
+d component.",cwe:metadata.cwe||""};return{matched:true,finding,evidence}}async function analyze(input){try{const stream=createMonitorResultStream(input);const writeTarget=createMonitorTargetWriter(
+input,stream,normalizeTarget);if(!input||typeof input!=="object"){return{success:false,error:"Invalid input: expected an object payload"}}const safeMode=getInputBoolean(
+input,"safe_mode","safe_mode",true);const maxRules=getInputNumber(input,"maxRules","max_rules",20);const userAgent=getInputString(input,"userAgent","user_agent",
+"Sentinel-Risk-Scanner/2.0");const stopOnFirstHit=getInputBoolean(input,"stopOnFirstHit","stop_on_first_hit",false);const normalizedInput={...input,safe_mode:safeMode,
+maxRules,userAgent,stopOnFirstHit,dictionaryId:getInputString(input,"dictionaryId","dictionary_id")||input.dictionaryId};const monitorExecution=input.__monitorExecution;
+const targets=Array.from(new Set([normalizeTarget(input.url),normalizeTarget(input.base_url),...asArray(input.targets).map(normalizeTarget)].filter(value=>Boolean(
+value))));if(targets.length===0){return{success:false,error:"At least one target URL is required"}}const observedFingerprints=getObservedFingerprints(normalizedInput);
+const allRules=dedupeRules(await loadRules(normalizedInput));if(allRules.length===0){return{success:false,error:"No risk verification rules loaded. Configure di\
+ctionaryEntries or a poc_rule dictionary with explicit requests and matchers."}}const rules=allRules.filter(rule=>{const metadata=parseMetadata(rule.metadata);if(metadata.
+enabled===false)return false;if(safeMode&&metadata.safe_mode===false)return false;return ruleMatchesFingerprintScope(rule,observedFingerprints)}).slice(0,maxRules);
+const totalProgressUnits=targets.length*Math.max(rules.length,1)+2;await reportMonitorProgress(monitorExecution,{current:0,total:totalProgressUnits,phase:"prepa\
+re",message:"Preparing risk verification"});const findings=[];const evidence=[];const vulnerabilityFindings=[];const scanTasks=[];for(const target of targets){for(const rule of rules){
+scanTasks.push({target,rule})}}let stopRequested=false;let executedRuleCount=0;const failedTargets=new Set;await runSequentially(scanTasks.map(({target,rule})=>async()=>{
+stream.assertHealthy();if(stopRequested)return;executedRuleCount+=1;const ruleKey=`rule:${rule.word}`;const result=await executeRule(target,rule,normalizedInput,
+async(step,index)=>{await writeTarget(target,`${ruleKey}:step:${index}`,{success:true,data:{results:[{target,rule_id:rule.word,step}]}},{complete:false})});const metadata=parseMetadata(
+rule.metadata);const finding=result.matched&&result.finding?result.finding:void 0;const surfaceFinding=finding?{title:finding.title,severity:finding.severity,target:finding.
+url,vulnerability_type:metadata.finding_type||rule.category||"risk_verification",description:finding.description,source:"risk_scanner"}:void 0;const surfaceEvidence=result.
+evidence?{asset_type:"web",asset_key:target,evidence_type:"risk_verification",title:`Risk verification: ${metadata.name||rule.word}`,content_json:result.evidence,
+source:"risk_scanner"}:void 0;const error=result.evidence?.error;if(error)failedTargets.add(target);await writeTarget(target,ruleKey,{success:true,data:{results:[
+{target,rule_id:rule.word,matched:result.matched,error}],findings:finding?[confirmedMonitorFinding(finding,metadata.finding_type||rule.category||"risk_verificat\
+ion",result.evidence)]:[],surface_artifacts:{evidences:surfaceEvidence?[surfaceEvidence]:[]},summary:{executedRules:1,matchedRules:finding?1:0}}},{complete:false,
+status:error?"failed":"ok",error});if(!stream.enabled){if(result.evidence)evidence.push(result.evidence);if(finding)findings.push(finding);if(surfaceFinding)vulnerabilityFindings.
+push(surfaceFinding)}if(finding&&stopOnFirstHit)stopRequested=true;await reportMonitorProgress(monitorExecution,{current:executedRuleCount,total:totalProgressUnits,
+currentTarget:target,phase:"probe",message:`Executing verification rules for ${target}`})}));for(const target of targets)await writeTarget(target,"target-comple\
+te",{success:true,data:{}},{complete:true,status:failedTargets.has(target)?"failed":stopRequested?"skipped":"ok"});await reportMonitorProgress(monitorExecution,
+{current:totalProgressUnits-1,total:totalProgressUnits,phase:"compare",message:"Summarizing risk verification results"});await reportMonitorProgress(monitorExecution,
+{current:totalProgressUnits,total:totalProgressUnits,phase:"build",message:"Building risk scan results"});return await stream.finish({success:true,data:{findings,
+evidence,summary:{totalTargets:targets.length,executedRules:executedRuleCount,matchedRules:findings.length},surface_artifacts:{findings:vulnerabilityFindings,evidences:evidence.
+map(item=>({asset_type:"web",asset_key:item.target,evidence_type:"risk_verification",title:`Risk verification: ${item.rule_id}`,content_json:item,source:"risk_s\
+canner"}))}}})}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

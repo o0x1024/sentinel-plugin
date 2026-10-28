@@ -13,6 +13,11 @@ const iconBytes = Uint8Array.from([0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0, 
 const nowIso = new Date().toISOString();
 
 const dictionaryEntriesById: Record<string, Array<Record<string, unknown>>> = {
+    builtin_service_probe_rules: [{
+        id: "owned-nginx-service", word: "nginx", category: "web_server",
+        metadata: { name: "nginx", product: "nginx", asset_category: "web_server",
+            matchers: [{ part: "header", type: "contains", value: "nginx" }] },
+    }],
     builtin_web_fingerprint_rules: [
         {
             id: "fingerprint-nextjs",
@@ -206,6 +211,10 @@ async function fetchStub(input: RequestInfo | URL, init?: RequestInit): Promise<
         });
     }
 
+    if (pathname === "/actuator/info") {
+        return Response.json({ app: { name: "Owned fixture" }, build: { version: "1.0" } });
+    }
+
     if (pathname === "/health") {
         return new Response("status=ok", {
             status: 200,
@@ -260,6 +269,7 @@ function installRuntimeStubs(): void {
                 if (dictType === "fingerprint_rule") return "builtin_web_fingerprint_rules";
                 if (dictType === "poc_rule") return "builtin_safe_poc_rules";
                 if (dictType === "sensitive_file") return "builtin_sensitive_files_web";
+                if (dictType === "service_probe_rule") return "builtin_service_probe_rules";
                 if (dictType === "service_fingerprint") return null;
                 return null;
             },
@@ -293,7 +303,7 @@ function installRuntimeStubs(): void {
                     engineUsed: "native",
                     engineExperimental: false,
                     results: request.targets.map((target) => ({
-                        target: `${target.host}:${target.port}/${target.protocol}`,
+                        target: `${target.host}:${target.port}`,
                         success: true,
                         available: true,
                         host: target.host,
@@ -327,9 +337,9 @@ function installRuntimeStubs(): void {
                         issuer: "CN=Smoke CA",
                         validFrom: nowIso,
                         validTo: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
-                        fingerprint: "AA:BB:CC:DD",
+                        fingerprintSha256: Array(32).fill("AA").join(":"),
                         serialNumber: "01AB",
-                        altNames: [domain, `www.${domain}`],
+                        subjectAltNames: [domain, `www.${domain}`],
                         protocol: "TLSv1.3",
                         cipher: "TLS_AES_128_GCM_SHA256",
                     },
@@ -783,6 +793,21 @@ const bountyTests: TestCase[] = [
             e(assertArrayNotEmpty(output, "data.results"));
             e(assertField(output, "data.snapshots"));
             e(assertField(output, "data.summary"));
+            return errors;
+        },
+    },
+    {
+        pluginId: "actuator_scanner",
+        file: "actuator_scanner.ts",
+        input: { targets: ["https://example.com"], actuator_endpoints: ["info"], include_actuator_prefix: true },
+        validate(output) {
+            const errors: string[] = [];
+            const findings = output.data?.findings;
+            if (!Array.isArray(findings) || !findings.some((finding: any) => finding.url === "https://example.com/actuator/info")) {
+                errors.push("actuator_scanner: known exposed info endpoint was not confirmed");
+            }
+            if (!output.data?.surface_artifacts?.findings?.length) errors.push("actuator_scanner: normalized findings missing");
+            if (!(output.data?.summary?.requestsMade > 0)) errors.push("actuator_scanner: no probe requests were made");
             return errors;
         },
     },

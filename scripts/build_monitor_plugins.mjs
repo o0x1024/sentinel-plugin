@@ -2,8 +2,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// Only the two module-based monitors need bundling. Runtime installation still
-// consumes the single self-contained file at each published download URL.
+// Every bounty monitor shares the acknowledged-result implementation. Runtime
+// installation consumes a self-contained file at each published download URL.
 const root = fileURLToPath(new URL('../', import.meta.url));
 const args = process.argv.slice(2);
 const check = args.includes('--check');
@@ -15,11 +15,16 @@ if (args.some(arg => !acceptedArguments.has(arg))) throw new Error('Unknown buil
 const esbuild = await import(modulePath ? pathToFileURL(resolve(modulePath)).href : 'esbuild');
 if (esbuild.version !== '0.21.5') throw new Error('Monitor bundles require esbuild 0.21.5');
 
-for (const id of ['api_monitor', 'subdomain_enumerator']) {
+const catalog = JSON.parse(await readFile(resolve(root, 'plugins.json'), 'utf8'));
+const monitors = catalog.plugins.filter(plugin => plugin.main_category === 'bounty');
+for (const plugin of monitors) {
+  const { id } = plugin;
   const entry = `source/bounty/${id}/index.ts`;
   const source = await readFile(resolve(root, entry), 'utf8');
   const metadata = source.slice(0, source.indexOf('*/') + 2);
   if (!metadata.includes(`@plugin ${id}`)) throw new Error(`${id}: missing source metadata`);
+  if (!metadata.includes(`@version ${plugin.version}\n`)) throw new Error(`${id}: source/catalog version differs`);
+  if (!metadata.includes('monitor:results-stream-v1')) throw new Error(`${id}: source must declare monitor:results-stream-v1`);
   const result = await esbuild.build({
     absWorkingDir: root,
     entryPoints: [entry],

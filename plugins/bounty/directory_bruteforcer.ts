@@ -3,7 +3,7 @@
  *
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.8
+ * @version 1.2.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -12,559 +12,124 @@
  * @category discovery
  * @seed_bindings []
  * @default_severity info
- * @tags directory, bruteforce, discovery, fuzzing, web, capability:fetch, capability:dictionary, capability:monitor-events
+ * @tags directory, bruteforce, discovery, fuzzing, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
  * @description Discover hidden directories, files, and endpoints on web servers using wordlist-based brute forcing
  */
-
-// Sentinel Dictionary API declaration
-declare const Sentinel: {
-    Dictionary: {
-        get(idOrName: string): Promise<any>;
-        getWords(idOrName: string, limit?: number): Promise<string[]>;
-        list(filter?: { dictType?: string; category?: string }): Promise<any[]>;
-        getMergedWords(idsOrNames: string[], deduplicate?: boolean): Promise<string[]>;
-    };
-    Monitor?: {
-        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
-    };
-};
-
-interface ToolInput {
-    url: string;
-    wordlist?: string;
-    dictionaryId?: string;  // Use dictionary from DB by ID or name
-    extensions?: string[];
-    concurrency?: number;
-    userAgent?: string;
-    followRedirects?: boolean;
-    statusCodes?: number[];
-    excludeStatusCodes?: number[];
-    excludeLength?: number[];
-    recursive?: boolean;
-    maxDepth?: number;
-    customWordlist?: string[];
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-interface DiscoveredPath {
-    url: string;
-    path: string;
-    statusCode: number;
-    contentLength: number;
-    contentType?: string;
-    redirectUrl?: string;
-    responseTime: number;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        baseUrl: string;
-        discovered: DiscoveredPath[];
-        summary: {
-            totalRequests: number;
-            discovered: number;
-            byStatusCode: Record<string, number>;
-            scanTime: number;
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-const DEFAULT_CONCURRENCY = 32;
-const MIN_CONCURRENCY = 1;
-const MAX_CONCURRENCY = 32;
-const DEFAULT_TIMEOUT_MS = 3000;
-const MIN_TIMEOUT_MS = 3000;
-const MAX_TIMEOUT_MS = 3000;
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.max(min, Math.min(Math.floor(parsed), max));
-}
-
-// Fallback wordlists (used when dictionary is not available)
-const FALLBACK_WORDLISTS: Record<string, string[]> = {
-    common: [
-        "admin", "login", "dashboard", "api", "backup", "config", "upload", "test",
-        "dev", "staging", "robots.txt", "sitemap.xml", ".git", ".env", "wp-admin",
-    ],
-    sensitive: [
-        ".git/config", ".env", ".htaccess", "wp-config.php", "config.php",
-        "backup.sql", "dump.sql", "phpinfo.php",
-    ],
-    api: [
-        "api", "api/v1", "api/v2", "graphql", "swagger", "health", "status",
-    ],
-    backup: [
-        "backup", "backup.zip", "backup.sql", "db.sql", "dump.sql",
-    ],
-};
-
-// Dictionary name mapping for built-in wordlist types
-const DICTIONARY_NAMES: Record<string, string> = {
-    common: "Directory Common",
-    sensitive: "Directory Sensitive",
-    api: "Directory API",
-    backup: "Directory Backup",
-};
-
-/**
- * Load wordlist from dictionary or fallback
- */
-async function loadWordlist(wordlistType: string): Promise<string[]> {
-    const dictName = DICTIONARY_NAMES[wordlistType];
-    if (!dictName) {
-        return FALLBACK_WORDLISTS[wordlistType] || FALLBACK_WORDLISTS.common;
-    }
-    
-    try {
-        // Try to load from Sentinel Dictionary
-        if (typeof Sentinel !== "undefined" && Sentinel.Dictionary) {
-            const words = await Sentinel.Dictionary.getWords(dictName);
-            if (words && words.length > 0) {
-                return words;
-            }
-        }
-    } catch (e) {
-        console.debug(`Failed to load dictionary "${dictName}", using fallback`);
-    }
-    
-    return FALLBACK_WORDLISTS[wordlistType] || FALLBACK_WORDLISTS.common;
-}
-
-/**
- * Load wordlist by dictionary ID or name
- */
-async function loadDictionaryById(idOrName: string): Promise<string[]> {
-    try {
-        if (typeof Sentinel !== "undefined" && Sentinel.Dictionary) {
-            const words = await Sentinel.Dictionary.getWords(idOrName);
-            if (words && words.length > 0) {
-                return words;
-            }
-        }
-    } catch (e) {
-        console.error(`Failed to load dictionary "${idOrName}": ${e}`);
-    }
-    return [];
-}
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: {
-                type: "string",
-                description: "Target base URL to scan"
-            },
-            wordlist: {
-                type: "string",
-                enum: ["common", "sensitive", "api", "backup", "all"],
-                description: "Built-in wordlist type. Default: common",
-                default: "common"
-            },
-            dictionaryId: {
-                type: "string",
-                "x-control": "dictionary-picker",
-                "x-dictionary-type": "path",
-                description: "Dictionary ID or name from Sentinel dictionary module (overrides wordlist)"
-            },
-            extensions: {
-                type: "array",
-                items: { type: "string" },
-                description: "File extensions to append (e.g., ['php', 'html', 'js'])",
-                default: []
-            },
-            concurrency: {
-                type: "integer",
-                description: "Maximum concurrent path probes",
-                default: DEFAULT_CONCURRENCY,
-                minimum: MIN_CONCURRENCY,
-                maximum: MAX_CONCURRENCY
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            followRedirects: {
-                type: "boolean",
-                description: "Follow HTTP redirects",
-                default: false
-            },
-            statusCodes: {
-                type: "array",
-                items: { type: "integer" },
-                description: "Status codes to consider as found. Default: [200, 201, 204, 301, 302, 307, 308, 401, 403]",
-                default: [200, 201, 204, 301, 302, 307, 308, 401, 403]
-            },
-            excludeStatusCodes: {
-                type: "array",
-                items: { type: "integer" },
-                description: "Status codes to exclude from results",
-                default: []
-            },
-            excludeLength: {
-                type: "array",
-                items: { type: "integer" },
-                description: "Content lengths to exclude (for filtering false positives)",
-                default: []
-            },
-            recursive: {
-                type: "boolean",
-                description: "Recursively scan discovered directories",
-                default: false
-            },
-            maxDepth: {
-                type: "integer",
-                description: "Maximum recursion depth",
-                default: 2,
-                minimum: 1,
-                maximum: 5
-            },
-            customWordlist: {
-                type: "array",
-                items: { type: "string" },
-                description: "Custom wordlist to use instead of built-in"
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    baseUrl: { type: "string", description: "Base URL scanned" },
-                    discovered: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                url: { type: "string" },
-                                path: { type: "string" },
-                                statusCode: { type: "integer" },
-                                contentLength: { type: "integer" }
-                            }
-                        },
-                        description: "Discovered paths"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalRequests: { type: "integer" },
-                            discovered: { type: "integer" }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Build URL from base and path
- */
-function buildUrl(baseUrl: string, path: string): string {
-    const base = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-    const p = path.startsWith("/") ? path : `/${path}`;
-    return `${base}${p}`;
-}
-
-/**
- * Probe a single path
- */
-async function probePath(
-    baseUrl: string,
-    path: string,
-    options: {
-        userAgent: string;
-        followRedirects: boolean;
-    }
-): Promise<DiscoveredPath | null> {
-    const url = buildUrl(baseUrl, path);
-    const startTime = performance.now();
-    
-    try {
-        const response = await fetch(url, {
-            method: "GET",
-            headers: {
-                "User-Agent": options.userAgent,
-                "Accept": "*/*",
-            },
-            redirect: options.followRedirects ? "follow" : "manual",
-            timeout: DEFAULT_TIMEOUT_MS,
-        });
-        
-        const responseTime = Math.round(performance.now() - startTime);
-        
-        // Get content length
-        let contentLength = parseInt(response.headers.get("content-length") || "0", 10);
-        if (!contentLength) {
-            try {
-                const text = await response.text();
-                contentLength = text.length;
-            } catch {
-                // Ignore
-            }
-        }
-        
-        return {
-            url,
-            path,
-            statusCode: response.status,
-            contentLength,
-            contentType: response.headers.get("content-type") || undefined,
-            redirectUrl: response.redirected ? response.url : undefined,
-            responseTime,
-        };
-        
-    } catch {
-        return null;
-    }
-}
-
-async function runConcurrently<T>(
-    tasks: Array<() => Promise<T>>,
-    concurrency: number,
-): Promise<T[]> {
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-    const workerCount = Math.min(concurrency, tasks.length);
-
-    async function worker() {
-        while (nextIndex < tasks.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            results[index] = await tasks[index]();
-        }
-    }
-
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return results;
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    const startTime = performance.now();
-    
-    try {
-        // Validate input
-        if (!input.url || typeof input.url !== "string") {
-            return {
-                success: false,
-                error: "Invalid input: url parameter is required"
-            };
-        }
-        
-        let baseUrl = input.url;
-        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
-            baseUrl = `https://${baseUrl}`;
-        }
-        
-        const concurrency = clampInteger(
-            input.concurrency,
-            DEFAULT_CONCURRENCY,
-            MIN_CONCURRENCY,
-            MAX_CONCURRENCY,
-        );
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const followRedirects = input.followRedirects === true;
-        const statusCodes = input.statusCodes || [200, 201, 204, 301, 302, 307, 308, 401, 403];
-        const excludeStatusCodes = input.excludeStatusCodes || [];
-        const excludeLength = input.excludeLength || [];
-        const extensions = [...new Set((input.extensions || []).map((ext) => ext.trim()).filter(Boolean))];
-        
-        // Build wordlist
-        let words: string[] = [];
-        if (input.customWordlist && input.customWordlist.length > 0) {
-            // Use custom wordlist provided in input
-            words = input.customWordlist.map((word) => String(word).trim()).filter(Boolean);
-        } else if (input.dictionaryId) {
-            // Load from specified dictionary
-            words = await loadDictionaryById(input.dictionaryId);
-            if (words.length === 0) {
-                return {
-                    success: false,
-                    error: `Dictionary "${input.dictionaryId}" not found or empty`
-                };
-            }
-        } else {
-            // Load from built-in wordlist type (with dictionary fallback)
-            const wordlistName = input.wordlist || "common";
-            if (wordlistName === "all") {
-                const [common, sensitive, api, backup] = await Promise.all([
-                    loadWordlist("common"),
-                    loadWordlist("sensitive"),
-                    loadWordlist("api"),
-                    loadWordlist("backup"),
-                ]);
-                words = [...common, ...sensitive, ...api, ...backup];
-            } else {
-                words = await loadWordlist(wordlistName);
-            }
-        }
-        
-        // Deduplicate
-        words = [...new Set(words.map((word) => String(word).trim()).filter(Boolean))];
-        
-        // Build paths with extensions
-        const paths: string[] = [];
-        for (const word of words) {
-            paths.push(word);
-            for (const ext of extensions) {
-                const e = ext.startsWith(".") ? ext : `.${ext}`;
-                paths.push(`${word}${e}`);
-            }
-        }
-        const uniquePaths = [...new Set(paths)].sort((left, right) => left.length - right.length || left.localeCompare(right));
-        
-        // Create probe tasks
-        const monitorExecution = input.__monitorExecution;
-        await reportMonitorProgress(monitorExecution, {
-            current: 0,
-            total: uniquePaths.length,
-            phase: "prepare",
-            message: `Preparing directory brute force (${uniquePaths.length} paths, concurrency ${concurrency})`,
-        });
-
-        let completedPaths = 0;
-        const tasks = uniquePaths.map(path => async () => {
-            try {
-                return await probePath(baseUrl, path, {
-                    userAgent,
-                    followRedirects,
-                });
-            } finally {
-                completedPaths += 1;
-                await reportMonitorProgress(monitorExecution, {
-                    current: completedPaths,
-                    total: uniquePaths.length,
-                    currentTarget: buildUrl(baseUrl, path),
-                    phase: "probe",
-                    message: `Probed ${path}`,
-                });
-            }
-        });
-        
-        const results = await runConcurrently(tasks, concurrency);
-        
-        // Filter results
-        const discovered: DiscoveredPath[] = [];
-        const byStatusCode: Record<string, number> = {};
-        
-        for (const result of results) {
-            if (!result) continue;
-            
-            // Check status code
-            if (!statusCodes.includes(result.statusCode)) continue;
-            if (excludeStatusCodes.includes(result.statusCode)) continue;
-            
-            // Check content length
-            if (excludeLength.includes(result.contentLength)) continue;
-            
-            discovered.push(result);
-            
-            const code = String(result.statusCode);
-            byStatusCode[code] = (byStatusCode[code] || 0) + 1;
-        }
-        
-        // Sort by status code, then by path
-        discovered.sort((a, b) => {
-            if (a.statusCode !== b.statusCode) {
-                return a.statusCode - b.statusCode;
-            }
-            return a.path.localeCompare(b.path);
-        });
-        
-        const scanTime = Math.round(performance.now() - startTime);
-        
-        return {
-            success: true,
-            data: {
-                baseUrl,
-                discovered,
-                summary: {
-                    totalRequests: uniquePaths.length,
-                    discovered: discovered.length,
-                    byStatusCode,
-                    scanTime,
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/bounty/directory_bruteforcer/index.ts; edit the source modules.
+var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function object(value){return value!==null&&typeof value==="object"&&!Array.isArray(
+value)}function jsonBytes(value){const text=JSON.stringify(value);let bytes=0;for(let index=0;index<text.length;index++){const code=text.charCodeAt(index);if(code<
+128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=3}return bytes}function copyOutput(output){if(!object(output)||
+output.success!==true||!object(output.data)){throw new Error("Monitor result delta must contain success:true and an object data")}return JSON.parse(JSON.stringify(
+{success:true,data:output.data}))}function mergeValue(left,right,summary=false){if(Array.isArray(left)&&Array.isArray(right))return[...left,...right];if(summary&&
+typeof left==="number"&&typeof right==="number")return left+right;if(object(left)&&object(right)){const merged={...left};for(const[key,value]of Object.entries(right)){
+merged[key]=key in merged?mergeValue(merged[key],value,summary):value}return merged}return right}function mergeData(left,right){const data={...left};for(const[key,
+value]of Object.entries(right)){if(key==="snapshots"){if(!object(value))throw new Error("Monitor snapshot delta must be an object");data.snapshots={...data.snapshots,
+...value}}else{data[key]=key in data?mergeValue(data[key],value,key==="summary"):value}}return data}function positiveLimit(value,maximum,label){if(!Number.isInteger(
+value)||Number(value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}
+function createMonitorResultStream(input){const context=object(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},
+async record(_target,_key,_output,_options){},async finish(finalOutput){return finalOutput}}}if(!object(context)||!object(context.result_stream)||context.result_stream.
+protocol!=="monitor-results-v1"){throw new Error("Monitor execution requires the monitor-results-v1 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.
+commitResults!=="function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.
+targets)||stream.targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(
+stream.targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,
+"max_pending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let data={};let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;let submittedBatches=0;
+let maxPendingObserved=0;let backpressureMs=0;function assertHealthy(){if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already fini\
+shed")}function latch(error){failed||(failed=error instanceof Error?error:new Error(String(error)));return failed}async function capacity(){const start=Date.now();
+while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){
+assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+1,work:buffered,output:{success:true,data}};if(jsonBytes(request)>byteLimit)
+throw new Error("Monitor result batch exceeds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];
+data={};lastCommitAt=Date.now();submittedBatches++;let commit;commit=Promise.resolve().then(async()=>{const ack=await monitor.commitResults(request);if(ack?.ok!==
+true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`)}committedItems+=request.work.length}).catch(
+error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,
+pending.size);await capacity()}function exclusive(action){const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.
+then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||
+!expected.has(target))throw new Error("Monitor work target is not owned by this execution");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Mon\
+itor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error("Monitor work cannot follow a completed target");const identity=JSON.
+stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats an unacknowledged target/key");const status=options.status??"ok";if(![
+"ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");const item={target,key,status,complete:options.complete!==false};if(options.
+error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;const delta=copyOutput(output);const single={
+sequence:sequence+1,work:[item],output:delta};if(jsonBytes(single)>byteLimit)throw new Error("A single monitor work result exceeds the JSON byte limit");let combined=mergeData(
+data,delta.data);const candidate={sequence:sequence+1,work:[...buffered,item],output:{success:true,data:combined}};if(buffered.length&&jsonBytes(candidate)>byteLimit){
+await flush();combined=delta.data}buffered.push(item);data=combined;bufferedKeys.add(identity);if(item.complete)completed.add(target);if(buffered.length>=chunkSize||
+Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){return exclusive(async()=>{assertHealthy();await flush();await Promise.
+all(pending);if(failed)throw failed;const finalRecord=object(finalOutput)?finalOutput:void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.
+error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an unsuccessful execution")}if(completed.size!==expected.size){throw new Error(`M\
+onitor result stream ended before all targets completed (${completed.size}/${expected.size})`)}const finalDiagnostics=finalRecord&&object(finalRecord.data)&&object(
+finalRecord.data.summary)&&object(finalRecord.data.summary.diagnostics)?finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(
+finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{
+diagnostics:{...pluginMetrics,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,max_pending_commits:maxPendingObserved,
+backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}function createMonitorTargetWriter(input,stream,normalize=target=>target){const context=input?.__monitorExecution;const originals=context?.result_stream?.targets;
+const aliases=new Map;if(stream.enabled){if(!Array.isArray(originals))throw new Error("Monitor stream is missing host target identities");for(const original of originals){
+if(typeof original!=="string")throw new Error("Monitor target identity must be a string");const normalized=normalize(original);if(!normalized)continue;const values=aliases.
+get(normalized)||[];if(!values.includes(original))values.push(original);aliases.set(normalized,values)}}return async(target,key,output,options)=>{if(!stream.enabled)
+return;const owners=aliases.get(target);if(!owners?.length)throw new Error("Completed work does not belong to an injected monitor target");const data=output&&typeof output===
+"object"?output.data:void 0;const artifacts=data?.surface_artifacts;for(let index=0;index<owners.length;index++){let delta=index===0?output:{success:true,data:{}};
+if(artifacts&&typeof artifacts==="object"){const bound=index===0?{...artifacts}:{};for(const kind of["evidences","fingerprints","changes"]){if(!Array.isArray(artifacts[kind]))
+continue;const refersToTarget=artifact=>artifact?.asset_type==="web"&&typeof artifact.asset_key==="string"&&normalize(artifact.asset_key)===target;const entries=index===
+0?artifacts[kind]:artifacts[kind].filter(refersToTarget);if(index>0&&entries.length===0)continue;bound[kind]=entries.map(artifact=>refersToTarget(artifact)?{...artifact,
+asset_key:owners[index]}:artifact)}if(index===0||Object.keys(bound).length>0){delta={success:true,data:{...index===0?data:{},surface_artifacts:bound}}}}await stream.
+record(owners[index],key,delta,options)}}}var pluginGlobals=globalThis;var DEFAULT_CONCURRENCY=32;var MIN_CONCURRENCY=1;var MAX_CONCURRENCY=32;var DEFAULT_TIMEOUT_MS=3e3;async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{
+taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
+started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}function clampInteger(value,fallback,min,max){
+const parsed=Number(value);if(!Number.isFinite(parsed))return fallback;return Math.max(min,Math.min(Math.floor(parsed),max))}var FALLBACK_WORDLISTS={common:["ad\
+min","login","dashboard","api","backup","config","upload","test","dev","staging","robots.txt","sitemap.xml",".git",".env","wp-admin"],sensitive:[".git/config","\
+.env",".htaccess","wp-config.php","config.php","backup.sql","dump.sql","phpinfo.php"],api:["api","api/v1","api/v2","graphql","swagger","health","status"],backup:[
+"backup","backup.zip","backup.sql","db.sql","dump.sql"]};var DICTIONARY_NAMES={common:"Directory Common",sensitive:"Directory Sensitive",api:"Directory API",backup:"\
+Directory Backup"};async function loadWordlist(wordlistType){const dictName=DICTIONARY_NAMES[wordlistType];if(!dictName){return FALLBACK_WORDLISTS[wordlistType]||
+FALLBACK_WORDLISTS.common}try{if(typeof Sentinel!=="undefined"&&Sentinel.Dictionary){const words=await Sentinel.Dictionary.getWords(dictName);if(words&&words.length>
+0){return words}}}catch(e){console.debug(`Failed to load dictionary "${dictName}", using fallback`)}return FALLBACK_WORDLISTS[wordlistType]||FALLBACK_WORDLISTS.
+common}async function loadDictionaryById(idOrName){try{if(typeof Sentinel!=="undefined"&&Sentinel.Dictionary){const words=await Sentinel.Dictionary.getWords(idOrName);
+if(words&&words.length>0){return words}}}catch(e){console.error(`Failed to load dictionary "${idOrName}": ${e}`)}return[]}function get_input_schema(){return{type:"\
+object",properties:{targets:{type:"array",items:{type:"string"},description:"Web targets supplied by the monitor host"},url:{type:"string",description:"Target b\
+ase URL to scan"},wordlist:{type:"string",enum:["common","sensitive","api","backup","all"],description:"Built-in wordlist type. Default: common",default:"common"},
+dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionary-type":"path",description:"Dictionary ID or name from Sentinel dictionary module (overr\
+ides wordlist)"},extensions:{type:"array",items:{type:"string"},description:"File extensions to append (e.g., ['php', 'html', 'js'])",default:[]},concurrency:{type:"\
+integer",description:"Maximum concurrent path probes",default:DEFAULT_CONCURRENCY,minimum:MIN_CONCURRENCY,maximum:MAX_CONCURRENCY},userAgent:{type:"string",description:"\
+Custom User-Agent header"},followRedirects:{type:"boolean",description:"Follow HTTP redirects",default:false},statusCodes:{type:"array",items:{type:"integer"},description:"\
+Status codes to consider as found. Default: [200, 201, 204, 301, 302, 307, 308, 401, 403]",default:[200,201,204,301,302,307,308,401,403]},excludeStatusCodes:{type:"\
+array",items:{type:"integer"},description:"Status codes to exclude from results",default:[]},excludeLength:{type:"array",items:{type:"integer"},description:"Con\
+tent lengths to exclude (for filtering false positives)",default:[]},recursive:{type:"boolean",description:"Recursively scan discovered directories",default:false},
+maxDepth:{type:"integer",description:"Maximum recursion depth",default:2,minimum:1,maximum:5},customWordlist:{type:"array",items:{type:"string"},description:"Cu\
+stom wordlist to use instead of built-in"}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"object",properties:{success:{
+type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{baseUrl:{type:"string",description:"Base URL scanned"},discovered:{
+type:"array",items:{type:"object",properties:{url:{type:"string"},path:{type:"string"},statusCode:{type:"integer"},contentLength:{type:"integer"}}},description:"\
+Discovered paths"},summary:{type:"object",properties:{totalRequests:{type:"integer"},discovered:{type:"integer"}}}}},error:{type:"string",description:"Error mes\
+sage if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function buildUrl(baseUrl,path){const base=baseUrl.endsWith("/")?baseUrl.slice(0,-1):baseUrl;
+const p=path.startsWith("/")?path:`/${path}`;return`${base}${p}`}async function probePath(baseUrl,path,options){const url=buildUrl(baseUrl,path);const startTime=performance.
+now();try{const response=await fetch(url,{method:"GET",headers:{"User-Agent":options.userAgent,"Accept":"*/*"},redirect:options.followRedirects?"follow":"manual",
+timeout:DEFAULT_TIMEOUT_MS});const responseTime=Math.round(performance.now()-startTime);let contentLength=parseInt(response.headers.get("content-length")||"0",10);
+if(!contentLength){try{const text=await response.text();contentLength=text.length}catch{}}return{url,path,statusCode:response.status,contentLength,contentType:response.
+headers.get("content-type")||void 0,redirectUrl:response.redirected?response.url:void 0,responseTime}}catch(error){return{url,path,statusCode:0,contentLength:0,
+responseTime:Math.round(performance.now()-startTime),error:error instanceof Error?error.message:String(error)}}}async function runConcurrently(tasks,concurrency,retainResults=true){
+const results=retainResults?new Array(tasks.length):[];let nextIndex=0;const workerCount=Math.min(concurrency,tasks.length);async function worker(){while(nextIndex<
+tasks.length){const index=nextIndex;nextIndex+=1;const result=await tasks[index]();if(retainResults)results[index]=result}}await Promise.all(Array.from({length:workerCount},
+()=>worker()));return results}async function analyze(input){const startTime=performance.now();try{const stream=createMonitorResultStream(input);const normalizeBase=value=>/^https?:\/\//.
+test(value)?value:`https://${value}`;const rawTargets=[...new Set([...Array.isArray(input.targets)?input.targets:[],input.url].filter(value=>typeof value==="str\
+ing"&&value.trim().length>0))];if(rawTargets.length===0)return{success:false,error:"At least one web URL is required"};const baseUrls=[...new Set(rawTargets.map(
+normalizeBase))];const baseUrl=baseUrls[0];const writeTarget=createMonitorTargetWriter(input,stream,normalizeBase);const concurrency=clampInteger(input.concurrency,
+DEFAULT_CONCURRENCY,MIN_CONCURRENCY,MAX_CONCURRENCY);const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";const followRedirects=input.
+followRedirects===true;const statusCodes=input.statusCodes||[200,201,204,301,302,307,308,401,403];const excludeStatusCodes=input.excludeStatusCodes||[];const excludeLength=input.
+excludeLength||[];const extensions=[...new Set((input.extensions||[]).map(ext=>ext.trim()).filter(Boolean))];let words=[];if(input.customWordlist&&input.customWordlist.
+length>0){words=input.customWordlist.map(word=>String(word).trim()).filter(Boolean)}else if(input.dictionaryId){words=await loadDictionaryById(input.dictionaryId);
+if(words.length===0){return{success:false,error:`Dictionary "${input.dictionaryId}" not found or empty`}}}else{const wordlistName=input.wordlist||"common";if(wordlistName===
+"all"){const[common,sensitive,api,backup]=await Promise.all([loadWordlist("common"),loadWordlist("sensitive"),loadWordlist("api"),loadWordlist("backup")]);words=
+[...common,...sensitive,...api,...backup]}else{words=await loadWordlist(wordlistName)}}words=[...new Set(words.map(word=>String(word).trim()).filter(Boolean))];
+const paths=[];for(const word of words){paths.push(word);for(const ext of extensions){const e=ext.startsWith(".")?ext:`.${ext}`;paths.push(`${word}${e}`)}}const uniquePaths=[
+...new Set(paths)].sort((left,right)=>left.length-right.length||left.localeCompare(right));const monitorExecution=input.__monitorExecution;await reportMonitorProgress(
+monitorExecution,{current:0,total:uniquePaths.length*baseUrls.length,phase:"prepare",message:`Preparing directory brute force (${uniquePaths.length} paths, conc\
+urrency ${concurrency})`});let completedPaths=0;const remaining=new Map(baseUrls.map(target=>[target,uniquePaths.length]));const accepted=result=>Boolean(result&&
+!result.error&&statusCodes.includes(result.statusCode)&&!excludeStatusCodes.includes(result.statusCode)&&!excludeLength.includes(result.contentLength));const tasks=baseUrls.
+flatMap(target=>uniquePaths.map(path=>async()=>{stream.assertHealthy();const result=await probePath(target,path,{userAgent,followRedirects});const found=accepted(
+result)?[result]:[];const left=remaining.get(target)-1;remaining.set(target,left);await writeTarget(target,buildUrl(target,path),{success:true,data:{results:result?
+[result]:[],discovered:found,summary:{totalRequests:1,discovered:found.length}}},{status:result?.error||!result?"failed":"ok",error:result?.error,complete:left===
+0});completedPaths+=1;await reportMonitorProgress(monitorExecution,{current:completedPaths,total:uniquePaths.length*baseUrls.length,currentTarget:buildUrl(target,
+path),phase:"probe",message:`Probed ${path}`});return result}));if(uniquePaths.length===0)for(const target of baseUrls){await writeTarget(target,"empty-wordlist",
+{success:true,data:{discovered:[]}},{status:"skipped",complete:true})}const results=await runConcurrently(tasks,concurrency,!stream.enabled);const discovered=[];
+const byStatusCode={};for(const result of results){if(!result)continue;if(!statusCodes.includes(result.statusCode))continue;if(excludeStatusCodes.includes(result.
+statusCode))continue;if(excludeLength.includes(result.contentLength))continue;discovered.push(result);const code=String(result.statusCode);byStatusCode[code]=(byStatusCode[code]||
+0)+1}discovered.sort((a,b)=>{if(a.statusCode!==b.statusCode){return a.statusCode-b.statusCode}return a.path.localeCompare(b.path)});const scanTime=Math.round(performance.
+now()-startTime);return await stream.finish({success:true,data:{baseUrl,discovered,summary:{totalRequests:uniquePaths.length*baseUrls.length,discovered:discovered.
+length,byStatusCode,scanTime}}})}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

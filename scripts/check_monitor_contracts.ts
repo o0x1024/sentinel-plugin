@@ -2,6 +2,8 @@
 type SeedBinding = { seed_type: string; input_key: string };
 type Contract = {
     id: string;
+    version?: string;
+    stream_tag?: string;
     monitor_type: string;
     input_mode: "asset" | "seed" | "hybrid";
     target_asset_types: string[];
@@ -57,6 +59,13 @@ for (const contract of catalog.plugins as Contract[]) {
     for (const field of fields) {
         assert(JSON.stringify(entry[field]) === JSON.stringify(contract[field]), `${contract.id}: manifest drift at ${field}`);
     }
+    if (entry.main_category === "bounty") {
+        assert(contract.version === entry.version, `${contract.id}: reviewed version drift`);
+        assert(contract.stream_tag === "monitor:results-stream-v1", `${contract.id}: reviewed result-stream contract required`);
+        assert(entry.tags.includes(contract.stream_tag), `${contract.id}: manifest result-stream declaration missing`);
+        assert(!entry.tags.includes("monitor:technology-stream-v1"), `${contract.id}: obsolete technology-stream declaration`);
+        assert(contract.capability_tags.includes("capability:monitor-events"), `${contract.id}: acknowledged results require monitor-events`);
+    }
     assert(["asset", "seed", "hybrid"].includes(contract.input_mode), `${contract.id}: explicit input_mode required`);
     const hasAssets = contract.target_asset_types.length > 0;
     const hasSeeds = contract.seed_bindings.length > 0;
@@ -74,9 +83,13 @@ for (const contract of catalog.plugins as Contract[]) {
     const source = await Deno.readTextFile(sourceUrl);
     assert(source.split("\n").length <= 2001, `${contract.id}: source exceeds 2000 lines`);
     assert(headerValue(source, "plugin") === contract.id, `${contract.id}: header id drift`);
+    assert(headerValue(source, "version") === entry.version, `${contract.id}: published version drift`);
     assert(JSON.stringify(declaredCapabilities(headerValue(source, "tags").split(",").map(tag => tag.trim()))) === JSON.stringify(contract.capability_tags), `${contract.id}: published capability drift`);
-    if (["api_monitor", "subdomain_enumerator"].includes(contract.id)) {
+    if (entry.main_category === "bounty") {
         const moduleSource = await Deno.readTextFile(new URL(`source/bounty/${contract.id}/index.ts`, root));
+        assert(headerValue(moduleSource, "version") === entry.version, `${contract.id}: authoritative module version drift`);
+        assert(headerValue(moduleSource, "tags").split(",").map(tag => tag.trim()).includes(contract.stream_tag!), `${contract.id}: authoritative result-stream declaration missing`);
+        assert(headerValue(source, "tags").split(",").map(tag => tag.trim()).includes(contract.stream_tag!), `${contract.id}: published result-stream declaration missing`);
         assert(JSON.stringify(declaredCapabilities(headerValue(moduleSource, "tags").split(",").map(tag => tag.trim()))) === JSON.stringify(contract.capability_tags), `${contract.id}: authoritative module capability drift`);
     }
     for (const field of ["monitor_type", "input_mode"] as const) {
@@ -106,5 +119,8 @@ for (const contract of catalog.plugins as Contract[]) {
         assert(field?.type === "array" && field.items && acceptsString(field.items), `${contract.id}: ${binding.input_key} must accept a string array`);
     }
     console.log(`${contract.id}: ${contract.input_mode}, ${contract.target_asset_types.length} target types, ${contract.seed_bindings.length} seed bindings, ${contract.capability_tags.length} capabilities`);
+}
+for (const plugin of manifest.plugins.filter((entry: { main_category: string }) => entry.main_category === "bounty")) {
+    assert(visited.has(plugin.id), `${plugin.id}: bounty monitor missing its reviewed contract`);
 }
 console.log(`Validated ${visited.size} monitor contracts against manifest, published headers, and executable schemas; no plugins executed.`);

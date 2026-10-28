@@ -1,0 +1,896 @@
+/**
+ * Service Monitor Tool
+ *
+ * @plugin service_monitor
+ * @name Service Monitor
+ * @version 1.0.9
+ * @author Sentinel Team
+ * @main_category bounty
+ * @monitor_type service
+ * @input_mode asset
+ * @target_asset_types ["service"]
+ * @category monitor
+ * @seed_bindings []
+ * @default_severity medium
+ * @tags service, monitor, change-detection, banner, version, asm, network, capability:network-scan, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @description Monitor exposed services for availability, banner, product, and version changes with structured snapshots and change events
+ */
+import { createMonitorResultStream } from "../../shared/monitor_results.ts";
+import { createMonitorTargetWriter } from "../../shared/monitor_target_writer.ts";
+
+declare const Sentinel: {
+    Dictionary?: {
+        getEntries?(idOrName: string, limit?: number): Promise<any[]>;
+        getDefaultId?(dictType: string): Promise<string | null>;
+    };
+    Network?: {
+        probeServices?(request: {
+            targets: Array<{ host: string; port: number; protocol: string }>;
+            rules?: Array<{ id?: string; word: string; category?: string | null; metadata?: any }>;
+            dictionaryId?: string;
+            followHttpRedirects?: boolean;
+            readBanner?: boolean;
+            engine?: string;
+            monitorProgress?: MonitorExecutionContext;
+        }): Promise<{
+            success: boolean;
+            results: Array<MonitorResult>;
+            ruleCount?: number;
+            engineRequested: string;
+            engineUsed: string;
+            engineExperimental: boolean;
+            fallbackReason?: string;
+            error?: string;
+        }>;
+        getServiceProbeCapabilities?(): Promise<{
+            default_engine: string;
+            engines: Array<{
+                id: string;
+                experimental: boolean;
+                available: boolean;
+                implemented: boolean;
+            }>;
+        }>;
+    };
+};
+
+interface PortLikeTarget {
+    host_key?: string;
+    ip_or_host?: string;
+    host?: string;
+    port?: number;
+    port_number?: number;
+    transport_protocol?: string;
+    protocol?: string;
+    value?: string;
+    type?: string;
+    service_name?: string;
+}
+
+interface ToolInput {
+    targets?: Array<string | PortLikeTarget>;
+    target_objects?: Array<string | PortLikeTarget>;
+    service_targets?: Array<string | PortLikeTarget>;
+    dictionaryId?: string;
+    dictionaryEntries?: RuleEntry[];
+    followHttpRedirects?: boolean;
+    readBanner?: boolean;
+    serviceProbeEngine?: string;
+    previousSnapshots?: Record<string, ServiceSnapshot>;
+    __monitorExecution?: MonitorExecutionContext;
+}
+
+interface MonitorResult {
+    target: string;
+    success: boolean;
+    available: boolean;
+    host: string;
+    port: number;
+    protocol: string;
+    serviceName?: string;
+    productName?: string;
+    vendor?: string;
+    version?: string;
+    banner?: string;
+    serverHeader?: string;
+    title?: string;
+    statusCode?: number;
+    confidence?: number;
+    matchedRuleId?: string;
+    error?: string;
+}
+
+interface RuleEntry {
+    id?: string;
+    word: string;
+    category?: string | null;
+    metadata?: any;
+}
+
+interface ServiceSnapshot {
+    target: string;
+    host: string;
+    port: number;
+    protocol: string;
+    available: boolean;
+    serviceName?: string;
+    productName?: string;
+    vendor?: string;
+    version?: string;
+    banner?: string;
+    serverHeader?: string;
+    title?: string;
+    statusCode?: number;
+    error?: string;
+    lastChecked: string;
+}
+
+interface ChangeEvent {
+    id: string;
+    assetId: string;
+    eventType: string;
+    severity: "low" | "medium" | "high" | "critical";
+    title: string;
+    description: string;
+    oldValue?: string;
+    newValue?: string;
+    detectionMethod: string;
+    tags: string[];
+    autoTriggerEnabled: boolean;
+    riskScore: number;
+    metadata: Record<string, any>;
+}
+
+interface ToolOutput {
+    success: boolean;
+    data?: {
+        results: MonitorResult[];
+        changeEvents: ChangeEvent[];
+        snapshots: Record<string, ServiceSnapshot>;
+        summary: {
+            totalTargets: number;
+            successfulChecks: number;
+            failedChecks: number;
+            reachableServices: number;
+            unreachableServices: number;
+            serviceChanges: number;
+            availabilityChanges: number;
+            probeEngineRequested: string;
+            probeEngineUsed: string;
+            probeEngineExperimental: boolean;
+            probeEngineFallbackReason?: string;
+        };
+        surface_artifacts?: Record<string, any[]>;
+    };
+    error?: string;
+}
+
+interface ServiceProbeEngineCapability {
+    id: string;
+    experimental: boolean;
+    available: boolean;
+    implemented: boolean;
+}
+
+interface ServiceProbeCapabilitiesResponse {
+    default_engine: string;
+    engines: ServiceProbeEngineCapability[];
+}
+
+interface ResolvedServiceProbeEngine {
+    requested: string;
+    used: string;
+    experimental: boolean;
+    fallbackReason?: string;
+}
+
+interface NativeServiceProbeResponse {
+    success: boolean;
+    results: MonitorResult[];
+    ruleCount?: number;
+    engineRequested: string;
+    engineUsed: string;
+    engineExperimental: boolean;
+    fallbackReason?: string;
+    error?: string;
+}
+
+interface MonitorExecutionContext {
+    task_id: string;
+    task_name: string;
+    program_id: string;
+    execution_mode: string;
+    started_at: string;
+    current_plugin: string;
+    current_plugin_index: number;
+    completed_steps: number;
+    total_steps: number;
+    imported_assets?: number;
+}
+
+async function reportMonitorProgress(
+    monitorExecution: MonitorExecutionContext | undefined,
+    update: Record<string, unknown>,
+): Promise<boolean> {
+    if (!monitorExecution) return false;
+    try {
+        return Boolean(await Sentinel.Monitor?.reportProgress?.({
+            monitorProgress: {
+                taskId: monitorExecution.task_id,
+                taskName: monitorExecution.task_name,
+                programId: monitorExecution.program_id,
+                executionMode: monitorExecution.execution_mode,
+                startedAt: monitorExecution.started_at,
+                currentPlugin: monitorExecution.current_plugin,
+                currentPluginIndex: monitorExecution.current_plugin_index,
+                completedSteps: monitorExecution.completed_steps,
+                totalSteps: monitorExecution.total_steps,
+                importedAssets: monitorExecution.imported_assets,
+            },
+            ...update,
+        }));
+    } catch {
+        return false;
+    }
+}
+
+type PluginGlobals = typeof globalThis & {
+    get_input_schema?: typeof get_input_schema;
+    get_output_schema?: typeof get_output_schema;
+    analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
+const HTTP_PORTS = new Set([80, 81, 443, 8000, 8080, 8081, 8443, 8888, 9000]);
+const TLS_PORTS = new Set([443, 8443, 9443]);
+
+const DEFAULT_SERVICE_NAMES: Record<number, string> = {
+    21: "ftp",
+    22: "ssh",
+    23: "telnet",
+    25: "smtp",
+    53: "dns",
+    80: "http",
+    110: "pop3",
+    143: "imap",
+    443: "https",
+    445: "smb",
+    993: "imaps",
+    995: "pop3s",
+    1433: "mssql",
+    1521: "oracle",
+    3306: "mysql",
+    3389: "rdp",
+    5432: "postgresql",
+    5900: "vnc",
+    6379: "redis",
+    8080: "http",
+    8443: "https",
+    9200: "elasticsearch",
+    27017: "mongodb",
+};
+
+function parseMetadata(value: any): Record<string, any> {
+    if (!value) return {};
+    if (typeof value === "string") {
+        try {
+            return JSON.parse(value);
+        } catch {
+            return {};
+        }
+    }
+    return typeof value === "object" ? value : {};
+}
+
+async function loadDictionaryEntries(idOrName: string): Promise<RuleEntry[]> {
+    if (typeof Sentinel?.Dictionary?.getEntries !== "function") throw new Error("Native service rule dictionary API is unavailable");
+    const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
+    if (!Array.isArray(entries) || !entries.length) throw new Error("Service rule dictionary is empty or invalid");
+    return entries.map((entry: any) => {
+        if (!entry || typeof entry.word !== "string" || !entry.word.trim()) throw new Error("Service rule dictionary contains an invalid entry");
+        return { id: entry.id, word: entry.word, category: entry.category, metadata: parseMetadata(entry.metadata) };
+    });
+}
+
+async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
+    if (Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length) {
+        return input.dictionaryEntries.map(entry => ({ ...entry, metadata: parseMetadata(entry.metadata) }));
+    }
+    return await loadDictionaryEntries(await resolveRuleDictionaryId(input));
+}
+
+async function resolveRuleDictionaryId(input: ToolInput): Promise<string> {
+    if (input.dictionaryId !== undefined) {
+        if (typeof input.dictionaryId !== "string" || !input.dictionaryId || input.dictionaryId.trim() !== input.dictionaryId) throw new Error("Service rule dictionary ID must be an unpadded string");
+        return input.dictionaryId;
+    }
+    if (typeof Sentinel?.Dictionary?.getDefaultId !== "function") throw new Error("Native service rule default dictionary API is unavailable");
+    const id = await Sentinel.Dictionary.getDefaultId("service_probe_rule");
+    if (typeof id !== "string" || !id || id.trim() !== id) throw new Error("No default service rule dictionary is configured");
+    return id;
+}
+
+function normalizeTarget(raw: string | PortLikeTarget): { host: string; port: number; protocol: string } | null {
+    if (typeof raw === "string") {
+        if (!raw || raw.trim() !== raw) return null;
+        try {
+            const explicitUrl = raw.includes("://");
+            const suffix = !explicitUrl ? raw.match(/\/(tcp|udp)$/)?.[1] : undefined;
+            const value = suffix ? raw.slice(0, -(suffix.length + 1)) : raw;
+            const parsed = new URL(explicitUrl ? value : `tcp://${value}`);
+            const protocol = suffix || parsed.protocol.slice(0, -1);
+            const port = Number(parsed.port || (protocol === "https" ? 443 : protocol === "http" ? 80 : 0));
+            if (!parsed.hostname || !["tcp", "http", "https"].includes(protocol) || !Number.isInteger(port) || port <= 0 || port > 65535 || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) return null;
+            return { host: parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase(), port, protocol };
+        } catch { return null; }
+    }
+    if (!raw || typeof raw !== "object") return null;
+    const hostValue = raw.ip_or_host ?? raw.host ?? raw.host_key;
+    const portValue = raw.port ?? raw.port_number;
+    let identity: { host: string; port: number; protocol: string } | null;
+    if (hostValue !== undefined || portValue !== undefined) {
+        const host = String(hostValue || "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+        const port = Number(portValue);
+        if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null;
+        identity = { host, port, protocol: "tcp" };
+    } else { identity = typeof raw.value === "string" ? normalizeTarget(raw.value) : null; }
+    if (!identity) return null;
+    const transport = raw.transport_protocol ?? (raw.protocol === "tcp" || raw.protocol === "udp" ? raw.protocol : "tcp");
+    if (transport !== "tcp") return null;
+    const application = [raw.protocol, raw.service_name].find(value => value === "http" || value === "https");
+    return { ...identity, protocol: application || identity.protocol };
+}
+
+function collectRawTargets(input: ToolInput): Array<string | PortLikeTarget> {
+    const rawTargets = [
+        ...(Array.isArray(input.service_targets) ? input.service_targets : []),
+        ...(Array.isArray(input.target_objects) ? input.target_objects : []),
+        ...(Array.isArray(input.targets) ? input.targets : []),
+    ];
+
+    return rawTargets.filter((target) => {
+        if (typeof target === "string") {
+            return target.trim().length > 0;
+        }
+        if (!target || typeof target !== "object") {
+            return false;
+        }
+        return !target.type || target.type === "service";
+    });
+}
+
+function serviceKey(host: string, port: number): string {
+    return `${host.includes(":") ? `[${host}]` : host}:${port}`;
+}
+
+function serviceArtifactKey(host: string, port: number): string { return `${serviceKey(host, port)}/tcp`; }
+
+function dedupeTargets(targets: Array<{ host: string; port: number; protocol: string }>): Array<{ host: string; port: number; protocol: string }> {
+    const deduped = new Map<string, { host: string; port: number; protocol: string }>();
+    for (const target of targets) {
+        const key = serviceKey(target.host, target.port);
+        const existing = deduped.get(key);
+        if (!existing) {
+            deduped.set(key, target);
+            continue;
+        }
+
+        const existingPriority = existing.protocol === "https" ? 3 : existing.protocol === "http" ? 2 : 1;
+        const currentPriority = target.protocol === "https" ? 3 : target.protocol === "http" ? 2 : 1;
+        if (currentPriority > existingPriority) {
+            deduped.set(key, target);
+        }
+    }
+
+    return Array.from(deduped.values());
+}
+
+function findPreviousSnapshot(
+    previousSnapshots: Record<string, ServiceSnapshot>,
+    current: { target: string; host: string; port: number; protocol: string },
+): ServiceSnapshot | undefined {
+    return previousSnapshots[serviceKey(current.host, current.port)];
+}
+
+function inferServiceName(port: number, protocol: string, banner?: string, serverHeader?: string): string {
+    const normalizedBanner = `${banner || ""} ${serverHeader || ""}`.toLowerCase();
+    if (normalizedBanner.includes("ssh")) return "ssh";
+    if (normalizedBanner.includes("smtp")) return "smtp";
+    if (normalizedBanner.includes("redis")) return "redis";
+    if (normalizedBanner.includes("mysql")) return "mysql";
+    if (normalizedBanner.includes("postgres")) return "postgresql";
+    if (normalizedBanner.includes("mongodb")) return "mongodb";
+    if (normalizedBanner.includes("elasticsearch")) return "elasticsearch";
+    if (HTTP_PORTS.has(port) || normalizedBanner.includes("http")) {
+        return TLS_PORTS.has(port) || protocol === "https" ? "https" : "http";
+    }
+    return DEFAULT_SERVICE_NAMES[port] || protocol || "unknown";
+}
+
+function extractProductInfo(banner?: string, serverHeader?: string): {
+    productName?: string;
+    vendor?: string;
+    version?: string;
+} {
+    const source = `${serverHeader || ""} ${banner || ""}`.trim();
+    if (!source) return {};
+
+    const patterns = [
+        /(?<product>nginx)\/(?<version>[\d.]+)/i,
+        /(?<product>apache(?: httpd)?)\/(?<version>[\d.]+)/i,
+        /(?<product>microsoft-iis)\/(?<version>[\d.]+)/i,
+        /(?<product>openssh)[-_](?<version>[\d.p]+)/i,
+        /(?<product>redis)[-_ ]server v=(?<version>[\d.]+)/i,
+        /(?<product>postgres(?:ql)?)\s+(?<version>[\d.]+)/i,
+        /(?<product>mysql)[-_ ](?<version>[\d.]+)/i,
+        /(?<product>elasticsearch)\/(?<version>[\d.]+)/i,
+    ];
+
+    for (const pattern of patterns) {
+        const match = source.match(pattern);
+        if (!match?.groups?.product) continue;
+        const productName = match.groups.product.toLowerCase();
+        let vendor: string | undefined;
+        if (productName.includes("nginx")) vendor = "NGINX";
+        if (productName.includes("apache")) vendor = "Apache";
+        if (productName.includes("iis")) vendor = "Microsoft";
+        if (productName.includes("openssh")) vendor = "OpenSSH";
+        if (productName.includes("redis")) vendor = "Redis";
+        if (productName.includes("mysql")) vendor = "Oracle";
+        if (productName.includes("postgres")) vendor = "PostgreSQL";
+        if (productName.includes("elasticsearch")) vendor = "Elastic";
+        return {
+            productName,
+            vendor,
+            version: match.groups.version,
+        };
+    }
+
+    return {
+        productName: source.split(/[ /]/)[0]?.toLowerCase(),
+    };
+}
+
+const SERVICE_FETCH_TIMEOUT_MS = 3000;
+
+async function runSequentially<T>(tasks: Array<() => Promise<T>>): Promise<T[]> {
+    const results = new Array<T>(tasks.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(16, tasks.length) }, async () => {
+        while (nextIndex < tasks.length) {
+            const currentIndex = nextIndex++;
+            results[currentIndex] = await tasks[currentIndex]();
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+
+function buildEventId(target: string, timestamp: string, suffix: string): string {
+    return `service-monitor-${suffix}-${target}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120);
+}
+
+function buildSnapshot(result: MonitorResult, timestamp: string): ServiceSnapshot {
+    return {
+        target: result.target,
+        host: result.host,
+        port: result.port,
+        protocol: result.protocol,
+        available: result.available,
+        serviceName: result.serviceName,
+        productName: result.productName,
+        vendor: result.vendor,
+        version: result.version,
+        banner: result.banner,
+        serverHeader: result.serverHeader,
+        title: result.title,
+        statusCode: result.statusCode,
+        error: result.error,
+        lastChecked: timestamp,
+    };
+}
+
+function calculateDiffs(previous: ServiceSnapshot, current: ServiceSnapshot): string[] {
+    const diffs: string[] = [];
+
+    if ((previous.serviceName || "") !== (current.serviceName || "")) {
+        diffs.push(`service ${JSON.stringify(previous.serviceName || "")} -> ${JSON.stringify(current.serviceName || "")}`);
+    }
+    if ((previous.productName || "") !== (current.productName || "")) {
+        diffs.push(`product ${JSON.stringify(previous.productName || "")} -> ${JSON.stringify(current.productName || "")}`);
+    }
+    if ((previous.version || "") !== (current.version || "")) {
+        diffs.push(`version ${JSON.stringify(previous.version || "")} -> ${JSON.stringify(current.version || "")}`);
+    }
+    if ((previous.serverHeader || "") !== (current.serverHeader || "")) {
+        diffs.push(`server header ${JSON.stringify(previous.serverHeader || "")} -> ${JSON.stringify(current.serverHeader || "")}`);
+    }
+    if ((previous.banner || "") !== (current.banner || "")) {
+        diffs.push(`banner ${JSON.stringify(previous.banner || "")} -> ${JSON.stringify(current.banner || "")}`);
+    }
+    if ((previous.title || "") !== (current.title || "")) {
+        diffs.push(`title ${JSON.stringify(previous.title || "")} -> ${JSON.stringify(current.title || "")}`);
+    }
+    if ((previous.statusCode || 0) !== (current.statusCode || 0)) {
+        diffs.push(`status ${previous.statusCode || "unknown"} -> ${current.statusCode || "unknown"}`);
+    }
+
+    return diffs;
+}
+
+function createAvailabilityEvent(
+    target: string,
+    previous: ServiceSnapshot,
+    current: ServiceSnapshot,
+    timestamp: string,
+): ChangeEvent {
+    const becameUnavailable = previous.available && !current.available;
+    return {
+        id: buildEventId(target, timestamp, becameUnavailable ? "unreachable" : "recovered"),
+        assetId: target,
+        eventType: becameUnavailable ? "service_unreachable" : "service_recovered",
+        severity: becameUnavailable ? "high" : "medium",
+        title: becameUnavailable ? `Service became unreachable: ${target}` : `Service recovered: ${target}`,
+        description: becameUnavailable
+            ? `${target} is no longer reachable${current.error ? ` (${current.error})` : ""}`
+            : `${target} is reachable again`,
+        oldValue: JSON.stringify(previous),
+        newValue: JSON.stringify(current),
+        detectionMethod: "service_monitor",
+        tags: ["service", "availability", becameUnavailable ? "down" : "up", "change"],
+        autoTriggerEnabled: true,
+        riskScore: becameUnavailable ? 75 : 48,
+        metadata: {
+            target,
+            previous,
+            current,
+        },
+    };
+}
+
+function createServiceChangeEvent(
+    target: string,
+    diffs: string[],
+    previous: ServiceSnapshot,
+    current: ServiceSnapshot,
+    timestamp: string,
+): ChangeEvent {
+    const impactful = previous.serviceName !== current.serviceName
+        || previous.productName !== current.productName
+        || previous.version !== current.version;
+    return {
+        id: buildEventId(target, timestamp, "change"),
+        assetId: target,
+        eventType: "service_change",
+        severity: impactful ? "high" : "medium",
+        title: `Service changed: ${target}`,
+        description: diffs.join("; "),
+        oldValue: JSON.stringify(previous),
+        newValue: JSON.stringify(current),
+        detectionMethod: "service_monitor",
+        tags: ["service", "fingerprint", "change"],
+        autoTriggerEnabled: true,
+        riskScore: impactful ? 70 : 54,
+        metadata: {
+            target,
+            previous,
+            current,
+            fields: diffs,
+        },
+    };
+}
+
+function isIpLiteral(value: string): boolean {
+    return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value) || value.includes(":");
+}
+
+async function resolveServiceProbeEngine(requestedEngine?: string): Promise<ResolvedServiceProbeEngine> {
+    const requested = requestedEngine ?? "native";
+    if (requested !== "native") throw new Error(`Unsupported service probe engine: ${requested}`);
+    return { requested, used: "native", experimental: false };
+}
+
+async function probeServicesWithNativeEngine(
+    targets: Array<{ host: string; port: number; protocol: string }>,
+    dictionaryId: string | null,
+    rules: RuleEntry[],
+    followHttpRedirects: boolean,
+    readBanner: boolean,
+    engine: string,
+    monitorExecution?: MonitorExecutionContext,
+): Promise<NativeServiceProbeResponse | null> {
+    if (
+        typeof Sentinel === "undefined"
+        || !Sentinel.Network
+        || typeof Sentinel.Network.probeServices !== "function"
+    ) {
+        throw new Error("Native service probing engine is not available");
+    }
+
+    return await Sentinel.Network.probeServices({
+        targets,
+        rules,
+        dictionaryId: dictionaryId || undefined,
+        followHttpRedirects,
+        readBanner,
+        engine,
+        monitorProgress: monitorExecution ? {
+            taskId: monitorExecution.task_id,
+            taskName: monitorExecution.task_name,
+            programId: monitorExecution.program_id,
+            executionMode: monitorExecution.execution_mode,
+            startedAt: monitorExecution.started_at,
+            currentPlugin: monitorExecution.current_plugin,
+            currentPluginIndex: monitorExecution.current_plugin_index,
+            completedSteps: monitorExecution.completed_steps,
+            totalSteps: monitorExecution.total_steps,
+            importedAssets: monitorExecution.imported_assets ?? 0,
+        } : undefined,
+    }) as NativeServiceProbeResponse;
+}
+
+export function get_input_schema() {
+    return {
+        type: "object",
+        properties: {
+            targets: {
+                type: "array",
+                description: "Port targets as strings like host:port or surface service objects",
+            },
+            target_objects: {
+                type: "array",
+                description: "Structured monitor targets. Service entries are preferred when present.",
+            },
+            service_targets: {
+                type: "array",
+                description: "Structured service endpoints with host, port, and protocol fields",
+            },
+            dictionaryId: {
+                type: "string",
+                "x-control": "dictionary-picker",
+                "x-dictionary-type": "service_probe_rule",
+                description: "Structured service fingerprint dictionary ID or name",
+            },
+            dictionaryEntries: {
+                type: "array",
+                description: "Structured service fingerprint rule entries injected by workflow",
+            },
+            followHttpRedirects: {
+                type: "boolean",
+                default: true,
+            },
+            readBanner: {
+                type: "boolean",
+                default: true,
+            },
+            serviceProbeEngine: {
+                type: "string",
+                enum: ["native"],
+                default: "native",
+                description: "Service probe engine. Native is the built-in Rust service identification engine.",
+            },
+            previousSnapshots: {
+                type: "object",
+                description: "Previous service snapshots keyed by service target for change detection",
+            },
+        },
+    };
+}
+
+pluginGlobals.get_input_schema = get_input_schema;
+
+export function get_output_schema() {
+    return {
+        type: "object",
+        properties: {
+            success: { type: "boolean" },
+            data: {
+                type: "object",
+                properties: {
+                    results: { type: "array" },
+                    changeEvents: { type: "array" },
+                    snapshots: { type: "object" },
+                    summary: { type: "object" },
+                    surface_artifacts: {
+                        type: "object",
+                        description: "Structured service monitoring artifacts",
+                    },
+                },
+            },
+            error: { type: "string" },
+        },
+    };
+}
+
+pluginGlobals.get_output_schema = get_output_schema;
+
+function projectServiceMonitorOutput(results: MonitorResult[], rules: RuleEntry[], timestamp: string, probeEngine: ResolvedServiceProbeEngine, ruleCount: number, previousSnapshots: Record<string, ServiceSnapshot>): ToolOutput {
+        const artifactKeys = new Map(results.map(result => [result.target, serviceArtifactKey(result.host, result.port)]));
+        const changeEvents: ChangeEvent[] = [];
+        const snapshots: Record<string, ServiceSnapshot> = {};
+
+        let successfulChecks = 0;
+        let failedChecks = 0;
+        let reachableServices = 0;
+        let unreachableServices = 0;
+        let serviceChanges = 0;
+        let availabilityChanges = 0;
+
+        for (const result of results) {
+            if (result.available) {
+                successfulChecks += 1;
+                reachableServices += 1;
+            } else {
+                failedChecks += 1;
+                unreachableServices += 1;
+            }
+
+            if (!result.success) continue;
+            const snapshot = buildSnapshot(result, timestamp);
+            snapshots[result.target] = snapshot;
+
+            const previous = findPreviousSnapshot(previousSnapshots, result);
+            if (!previous) {
+                continue;
+            }
+
+            if (previous.available !== snapshot.available) {
+                changeEvents.push(createAvailabilityEvent(result.target, previous, snapshot, timestamp));
+                availabilityChanges += 1;
+                if (!snapshot.available) {
+                    continue;
+                }
+            }
+
+            if (!previous.available || !snapshot.available) {
+                continue;
+            }
+
+            const diffs = calculateDiffs(previous, snapshot);
+            if (diffs.length > 0) {
+                changeEvents.push(createServiceChangeEvent(result.target, diffs, previous, snapshot, timestamp));
+                serviceChanges += 1;
+            }
+        }
+
+        const successfulResults = results.filter((result) => result.available);
+        const services = successfulResults.map((result) => ({
+            host_key: result.host,
+            ip_or_host: result.host,
+            port: result.port,
+            transport_protocol: "tcp",
+            protocol_name: result.protocol,
+            application_service_name: result.serviceName,
+            product_name: result.productName,
+            vendor: result.vendor,
+            version: result.version,
+            banner: result.banner || result.serverHeader,
+            source: "service_monitor",
+            confidence: 0.94,
+        }));
+
+        const evidences = results.map((result) => ({
+            asset_type: "service",
+            asset_key: serviceArtifactKey(result.host, result.port),
+            evidence_type: "service_monitor_snapshot",
+            title: `Service Monitor Snapshot: ${result.target}`,
+            content_text: result.available
+                ? `${result.serviceName || "unknown"} ${result.productName || ""} ${result.version || ""}`.trim()
+                : (result.error || "Service unreachable"),
+            content_json: snapshots[result.target] || result,
+            source: "service_monitor",
+        }));
+
+        const relations = successfulResults.map((result) => ({
+            from_type: isIpLiteral(result.host) ? "ip" : "domain",
+            from_key: result.host,
+            to_type: "service",
+            to_key: serviceArtifactKey(result.host, result.port),
+            relation_type: "exposes_service",
+            source: "service_monitor",
+            confidence: 0.94,
+        }));
+
+
+        return {
+            success: true,
+            data: {
+                results,
+                changeEvents,
+                snapshots,
+                summary: {
+                    totalTargets: results.length,
+                    successfulChecks,
+                    failedChecks,
+                    reachableServices,
+                    unreachableServices,
+                    serviceChanges,
+                    availabilityChanges,
+                    probeEngineRequested: probeEngine.requested,
+                    probeEngineUsed: probeEngine.used,
+                    probeEngineExperimental: probeEngine.experimental,
+                    probeEngineFallbackReason: probeEngine.fallbackReason,
+                },
+                surface_artifacts: {
+                    services,
+                    changes: changeEvents.map((event) => ({
+                        asset_key: artifactKeys.get(event.assetId),
+                        asset_type: "service",
+                        change_type: event.eventType,
+                        severity: event.severity,
+                        title: event.title,
+                        description: event.description,
+                        old_value: event.oldValue,
+                        new_value: event.newValue,
+                        risk_score: event.riskScore,
+                        source: "service_monitor",
+                        metadata: event.metadata,
+                    })),
+                    evidences,
+                    relations,
+                },
+            },
+        };
+}
+
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
+    try {
+        const stream = createMonitorResultStream(input);
+        const writeTarget = createMonitorTargetWriter(input, stream, value => { const parsed = normalizeTarget(value); return parsed ? serviceKey(parsed.host, parsed.port) : ""; });
+        const rawTargets = collectRawTargets(input);
+        if (rawTargets.length === 0) {
+            return {
+                success: false,
+                error: "Invalid input: service targets are required",
+            };
+        }
+
+        const normalizedTargets = dedupeTargets(rawTargets
+            .map(normalizeTarget)
+            .filter((target): target is NonNullable<typeof target> => Boolean(target)));
+
+        if (normalizedTargets.length === 0) {
+            return {
+                success: false,
+                error: "No valid service targets provided",
+            };
+        }
+
+        const followHttpRedirects = input.followHttpRedirects !== false;
+        const readBanner = input.readBanner !== false;
+        const monitorExecution = input.__monitorExecution;
+        const explicitRules = Array.isArray(input.dictionaryEntries) && input.dictionaryEntries.length > 0
+            ? await loadRules(input)
+            : [];
+        const dictionaryId = explicitRules.length ? null : await resolveRuleDictionaryId(input);
+        const requestedProbeEngine = await resolveServiceProbeEngine(input.serviceProbeEngine);
+        const previousSnapshots = input.previousSnapshots || {};
+        const timestamp = new Date().toISOString();
+        const rules = explicitRules.length ? explicitRules : await loadRules({ ...input, dictionaryId: dictionaryId || input.dictionaryId });
+        const probeEngine = requestedProbeEngine;
+        let ruleCount = rules.length;
+        const results: MonitorResult[] = [];
+        await runSequentially(normalizedTargets.map((target, index) => async (): Promise<void> => {
+            stream.assertHealthy();
+            const nativeProbe = await probeServicesWithNativeEngine([target], null, rules, followHttpRedirects, readBanner, requestedProbeEngine.used, monitorExecution);
+            if (!nativeProbe || !Array.isArray(nativeProbe.results) || nativeProbe.results.length !== 1) {
+                throw new Error(nativeProbe?.error || "Native service probe returned no authoritative endpoint result");
+            }
+            const result = { ...nativeProbe.results[0], target: serviceKey(nativeProbe.results[0].host, nativeProbe.results[0].port) };
+            if (result.host !== target.host || result.port !== target.port || result.target !== serviceKey(target.host, target.port)) throw new Error("Native service probe returned an unrelated endpoint");
+            ruleCount = nativeProbe.ruleCount ?? rules.length;
+            await writeTarget(serviceKey(target.host, target.port), "native-service-endpoint", projectServiceMonitorOutput([result], rules, timestamp, probeEngine, ruleCount, previousSnapshots) as any, { status: result.success ? "ok" : "failed", error: result.error });
+            if (!stream.enabled) results[index] = result;
+        }));
+        return await stream.finish(stream.enabled ? { success: true } : projectServiceMonitorOutput(results, rules, timestamp, probeEngine, ruleCount, previousSnapshots));
+
+    } catch (error: any) {
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+}
+
+pluginGlobals.analyze = analyze;

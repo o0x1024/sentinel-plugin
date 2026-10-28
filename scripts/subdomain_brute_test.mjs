@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { analyze, get_input_schema, get_output_schema } from '../plugins/bounty/subdomain_brute.ts';
 import { nativeSubdomainBruteFixture } from './subdomain_brute_fixture.ts';
+import { monitorExecution } from './monitor_stream_fixture.ts';
 const originalSentinel = globalThis.Sentinel;
 const originalFetch = globalThis.fetch;
 let requests;
@@ -24,7 +25,7 @@ test('catalog, metadata header, seed bindings and typed schema agree', async () 
     const contracts = JSON.parse(await readFile(new URL('./monitor_plugin_contracts.json', import.meta.url), 'utf8'));
     const entry = catalog.plugins.find(plugin => plugin.id === 'subdomain_brute');
     const contract = contracts.plugins.find(plugin => plugin.id === 'subdomain_brute');
-    assert.equal(entry.version, '1.0.0');
+    assert.equal(entry.version, '1.0.1');
     for (const field of ['id', 'monitor_type', 'input_mode', 'target_asset_types', 'seed_bindings']) assert.deepEqual(entry[field], contract[field]);
     assert.deepEqual(entry.tags.filter(tag => tag.startsWith('capability:')), contract.capability_tags);
     const source = await readFile(new URL('../plugins/bounty/subdomain_brute.ts', import.meta.url), 'utf8');
@@ -48,7 +49,10 @@ test('catalog, metadata header, seed bindings and typed schema agree', async () 
 test('forwards a complete multi-target batch and dictionary configuration in exactly one native call', async () => {
     const dictionary = ['api', 'www', 'dev'];
     const resolvers = ['127.0.0.1:5353'];
-    const monitor = Object.freeze({ task_id: 'monitor-1', program_id: 'program-1', plugin_run_id: 'native-run-1' });
+    const monitor = Object.freeze({ ...monitorExecution(['one.test', 'two.test'], { pluginId: 'subdomain_brute' }),
+        task_id: 'monitor-1', program_id: 'program-1' });
+    const commits = [];
+    globalThis.Sentinel.Monitor = { commitResults: async request => { commits.push(request); return { ok: true, sequence: request.sequence }; } };
     const input = Object.freeze({ targets: ['one.test', 'two.test'], dictionary_id: 'custom-dict-id', dictionary, resolvers, skip_wildcard: false, bandwidth_limit: '2M', dns_timeout_seconds: 3, max_wait_seconds: 30, max_retries: 2, query_types: ['a', 'aaaa'], resolve_records: false, raw_records: true, verify_mode: false, __monitorExecution: monitor });
     const output = await analyze(input);
     assert.equal(output.success, true);
@@ -61,9 +65,12 @@ test('forwards a complete multi-target batch and dictionary configuration in exa
     assert.equal(requests[0].__monitorExecution, monitor);
     for (const key of ['skip_wildcard', 'bandwidth_limit', 'dns_timeout_seconds', 'max_wait_seconds', 'max_retries', 'query_types', 'resolve_records', 'raw_records']) assert.deepEqual(requests[0][key], input[key]);
     assert.equal(output.data.summary.total_targets, 2);
-    assert.equal(output.data.changeEvents, output.data.change_events);
-    assert.equal(output.data.surface_artifacts.domains.length, 2);
-    assert.equal(output.data.surface_artifacts.changes, output.data.change_events);
+    assert.deepEqual(output.data.changeEvents, output.data.change_events);
+    assert.equal(output.data.stream_complete, true);
+    assert.equal(output.data.surface_artifacts.domains.length, 0);
+    assert.equal(commits.flatMap(request => request.output.data.surface_artifacts?.domains || []).length, 2);
+    assert.equal(commits.filter(request => request.work[0].complete).length, 2);
+    assert.deepEqual(output.data.surface_artifacts.changes, output.data.change_events);
 });
 
 test('keeps explicit ethernet selection and reports unsupported native transport without falling back', async () => {
