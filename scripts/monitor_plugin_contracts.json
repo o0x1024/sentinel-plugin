@@ -196,7 +196,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "1.4.10",
+      "version": "1.4.11",
       "stream_tag": "monitor:results-stream-v1"
     },
     {

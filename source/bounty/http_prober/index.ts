@@ -3,7 +3,7 @@
  *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.10
+ * @version 1.4.11
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -23,6 +23,7 @@ interface ToolInput {
     target_objects?: Array<string | ServiceLikeTarget>;
     service_targets?: Array<string | ServiceLikeTarget>;
     ports?: number[];
+    concurrency?: number;
     followRedirects?: boolean;
     maxRedirects?: number;
     userAgent?: string;
@@ -153,7 +154,7 @@ async function reportMonitorProgress(
 
 const DEFAULT_TIMEOUT = 3000;
 const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 1000;
 const DEFAULT_MAX_REDIRECTS = 2;
 const DEFAULT_PORTS = [80, 443, 8080, 8443];
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -250,6 +251,13 @@ export function get_input_schema() {
                 items: { type: "integer" },
                 description: `Ports to probe. Default: ${DEFAULT_PORTS.join(", ")}`,
                 default: DEFAULT_PORTS
+            },
+            concurrency: {
+                type: "integer",
+                description: "Maximum concurrent HTTP probes per execution. Requests also share the host global direct-fetch concurrency limit.",
+                default: DEFAULT_CONCURRENCY,
+                minimum: 1,
+                maximum: MAX_CONCURRENCY
             },
             followRedirects: {
                 type: "boolean",
@@ -764,13 +772,13 @@ async function probeUrl(
 /**
  * Run tasks with bounded plugin concurrency. Host enforces global direct-fetch limit.
  */
-async function runSequentially<T>(tasks: Array<() => Promise<T>>, retainResults = true): Promise<T[]> {
+async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number, retainResults = true): Promise<T[]> {
     if (tasks.length === 0) {
         return [];
     }
 
     const results: T[] = retainResults ? new Array<T>(tasks.length) : [];
-    const concurrency = Math.max(1, Math.min(MAX_CONCURRENCY, tasks.length));
+    const workerCount = Math.min(concurrency, tasks.length);
     let nextIndex = 0;
 
     const runNext = async (): Promise<void> => {
@@ -782,7 +790,7 @@ async function runSequentially<T>(tasks: Array<() => Promise<T>>, retainResults 
         }
     };
 
-    const workers = Array.from({ length: concurrency }, () => runNext());
+    const workers = Array.from({ length: workerCount }, () => runNext());
     await Promise.all(workers);
 
     return results;
@@ -1104,6 +1112,13 @@ function buildProbeDelta(
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
+        const concurrency = input.concurrency === undefined ? DEFAULT_CONCURRENCY : input.concurrency;
+        if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) {
+            return {
+                success: false,
+                error: `concurrency must be an integer between 1 and ${MAX_CONCURRENCY}`
+            };
+        }
         const stream = createMonitorResultStream(input);
         const rawTargets = Array.isArray(input.targets) ? input.targets : [];
         const validStringTargets = rawTargets.filter(
@@ -1242,7 +1257,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             }
         });
 
-        const results = await runSequentially(tasks, !stream.enabled);
+        const results = await runWithConcurrency(tasks, concurrency, !stream.enabled);
         await reportMonitorProgress(monitorExecution, {
             current: uniqueUrls.length + 1,
             total: totalProgressUnits,

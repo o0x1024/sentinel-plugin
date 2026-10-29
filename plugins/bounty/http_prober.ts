@@ -3,7 +3,7 @@
  *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.10
+ * @version 1.4.11
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -75,8 +75,9 @@ committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,c
 max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}async function reportMonitorProgress(monitorExecution,update){if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{
 taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
 started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
-totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}var DEFAULT_TIMEOUT=3e3;var MAX_CONCURRENCY=32;var DEFAULT_MAX_REDIRECTS=2;var DEFAULT_PORTS=[80,443,8080,8443];var DEFAULT_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleW\
-ebKit/537.36";var HTTP_PRIMARY_PORTS=new Set([80,8080]);var HTTPS_PRIMARY_PORTS=new Set([443,8443]);var RESPONSE_PREVIEW_BYTES=32*1024;function isIpLiteral(value){
+totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}var DEFAULT_TIMEOUT=3e3;var DEFAULT_CONCURRENCY=32;
+var MAX_CONCURRENCY=1e3;var DEFAULT_MAX_REDIRECTS=2;var DEFAULT_PORTS=[80,443,8080,8443];var DEFAULT_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple\
+WebKit/537.36";var HTTP_PRIMARY_PORTS=new Set([80,8080]);var HTTPS_PRIMARY_PORTS=new Set([443,8443]);var RESPONSE_PREVIEW_BYTES=32*1024;function isIpLiteral(value){
 return/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)||value.includes(":")}function dedupeStrings(values){const deduped=[];const seen={};for(const value of values){if(!value||
 seen[value])continue;seen[value]=true;deduped.push(value)}return deduped}var TECH_SIGNATURES={"nginx":[{header:"server",pattern:/nginx/i}],"apache":[{header:"se\
 rver",pattern:/apache/i}],"iis":[{header:"server",pattern:/microsoft-iis/i}],"cloudflare":[{header:"server",pattern:/cloudflare/i},{header:"cf-ray",pattern:/.+/}],
@@ -86,68 +87,69 @@ pattern:/SAMEORIGIN/i}],"wordpress":[{header:"link",pattern:/wp-json/i}],"varnis
 {header:"x-akamai-transformed",pattern:/.+/}]};var pluginGlobals=globalThis;function get_input_schema(){return{type:"object",properties:{targets:{type:"array",items:{
 type:"string"},description:"List of generic targets to probe (domains, IPs, or URLs)"},target_objects:{type:"array",description:"Structured target objects, incl\
 uding service endpoint assets"},service_targets:{type:"array",description:"Service endpoint targets such as host:port or structured service assets"},ports:{type:"\
-array",items:{type:"integer"},description:`Ports to probe. Default: ${DEFAULT_PORTS.join(", ")}`,default:DEFAULT_PORTS},followRedirects:{type:"boolean",description:"\
-Follow HTTP redirects",default:true},maxRedirects:{type:"integer",description:"Maximum number of redirects to follow",default:DEFAULT_MAX_REDIRECTS},userAgent:{
-type:"string",description:"Custom User-Agent header",default:DEFAULT_USER_AGENT},extractTitle:{type:"boolean",description:"Extract page title from HTML",default:true},
-extractHeaders:{type:"boolean",description:"Include response headers in results",default:false},checkHttps:{type:"boolean",description:"Check HTTPS protocol",default:true},
-checkHttp:{type:"boolean",description:"Check HTTP protocol",default:true},previousSnapshots:{type:"object",description:"Previous HTTP snapshots keyed by URL for\
- change detection"}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"\
-Whether the operation succeeded"},data:{type:"object",properties:{targets:{type:"array",items:{type:"string"},description:"Original target list"},results:{type:"\
-array",items:{type:"object",properties:{url:{type:"string",description:"Probed URL"},alive:{type:"boolean"},statusCode:{type:"integer"},title:{type:"string"},contentLength:{
-type:"integer"},server:{type:"string"},technologies:{type:"array",items:{type:"string"}}}},description:"Probe results for alive hosts"},changeEvents:{type:"arra\
-y",description:"Detected probe change events"},snapshots:{type:"object",description:"HTTP snapshots keyed by URL"},summary:{type:"object",properties:{total:{type:"\
-integer"},alive:{type:"integer"},dead:{type:"integer"}}},surface_artifacts:{type:"object",description:"Typed network surface artifacts for surface graph ingesti\
-on",properties:{webs:{type:"array",description:"Strict web assets with canonical_url, scheme, http_status_code, response_headers, and content_summary"},evidences:{
-type:"array",description:"Strict web evidences such as http_response_headers and http_response_body_summary"}}}}},error:{type:"string",description:"Error messag\
-e if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function extractTitle(html){const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);return match?
-match[1].trim():void 0}function buildContentSummary(text){return text.replace(/<script[\s\S]*?<\/script>/gi," ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(
-/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,500)}async function fetchProbe(url,init){return await fetch(url,{...init,timeout:init.timeout??DEFAULT_TIMEOUT})}
-function detectTechnologies(headers){const detected=[];for(const[tech,signatures]of Object.entries(TECH_SIGNATURES)){for(const sig of signatures){if(sig.header){
-const headerValue=headers[sig.header.toLowerCase()];if(headerValue&&sig.pattern.test(headerValue)){if(!detected.includes(tech)){detected.push(tech)}break}}}}return detected}
-function isHtmlContentType(contentType){return/(?:text\/html|application\/xhtml\+xml)/i.test(contentType||"")}function collectResponseHeaders(response){const headers={};
-response.headers.forEach((value,key)=>{headers[key.toLowerCase()]=value});return headers}function parseContentLength(headers){const contentRange=headers["conten\
-t-range"];if(contentRange){const match=contentRange.match(/bytes\s+\d+-\d+\/(\d+|\*)/i);if(match&&match[1]!=="*"){const totalLength=parseInt(match[1],10);if(Number.
-isFinite(totalLength)&&totalLength>0){return totalLength}}}const contentLength=parseInt(headers["content-length"]||"0",10);return Number.isFinite(contentLength)&&
-contentLength>0?contentLength:0}function shouldFetchBodyForTitle(statusCode,headers,extractTitleEnabled){if(!extractTitleEnabled||statusCode>=400){return false}
-const contentType=headers["content-type"];return!contentType||isHtmlContentType(contentType)}function resolveRedirectUrl(requestedUrl,response,headers){if(response.
-redirected&&response.url&&response.url!==requestedUrl){return response.url}const location=headers["location"];if(!location){return void 0}try{return new URL(location,
-requestedUrl).toString()}catch{return location}}function normalizeTarget(target,port,protocol){if(target.startsWith("http://")||target.startsWith("https://")){return target}
-const defaultPort=protocol==="https"?443:80;if(port===defaultPort){return`${protocol}://${target}`}return`${protocol}://${target}:${port}`}function normalizeServiceTarget(raw){
-if(typeof raw==="string"){const trimmed=raw.trim();if(!trimmed)return null;if(trimmed.startsWith("http://")||trimmed.startsWith("https://")){try{const parsed=new URL(
-trimmed);const protocol2=parsed.protocol.replace(":","").toLowerCase();const port2=Number(parsed.port||(protocol2==="https"?443:80));if(!parsed.hostname||!port2)
-return null;return{host:parsed.hostname,port:port2,protocol:protocol2}}catch{return null}}const normalized=trimmed.replace(/\/(?:tcp|udp)$/i,"");try{const parsed=new URL(
-`tcp://${normalized}`);const port2=Number(parsed.port||0);if(!parsed.hostname||!port2)return null;return{host:parsed.hostname,port:port2,protocol:"tcp"}}catch{const[
-hostPart,portPart]=normalized.split(":");const port2=Number(portPart||0);if(!hostPart||!port2)return null;return{host:hostPart,port:port2,protocol:"tcp"}}}if(!raw||
-typeof raw!=="object"){return null}if(raw.type&&raw.type!=="service"){return null}if(typeof raw.value==="string"&&raw.value.trim()){const normalized=normalizeServiceTarget(
-raw.value);if(normalized){return{...normalized,protocol:raw.protocol||raw.transport_protocol||normalized.protocol,serviceName:raw.service_name}}}const host=String(
-raw.ip_or_host||raw.host||raw.host_key||"").trim();const port=Number(raw.port??raw.port_number??0);const protocol=String(raw.protocol||raw.transport_protocol||"").
-trim().toLowerCase();const serviceName=String(raw.service_name||"").trim().toLowerCase();if(!host||!port)return null;return{host,port,protocol:protocol||void 0,
-serviceName:serviceName||void 0}}function collectServiceTargets(input){const rawTargets=[...Array.isArray(input.service_targets)?input.service_targets:[],...Array.
-isArray(input.target_objects)?input.target_objects:[]];const deduped=new Map;for(const rawTarget of rawTargets){const normalized=normalizeServiceTarget(rawTarget);
-if(!normalized)continue;const key=`${normalized.host}:${normalized.port}`;const existing=deduped.get(key);if(!existing){deduped.set(key,normalized);continue}const existingPriority=existing.
-protocol==="https"?3:existing.protocol==="http"?2:1;const currentPriority=normalized.protocol==="https"?3:normalized.protocol==="http"?2:1;if(currentPriority>existingPriority){
-deduped.set(key,normalized)}}return Array.from(deduped.values())}function buildCandidateUrlsFromServiceTarget(target,options){const protocols=[];const normalizedProtocol=(target.
-protocol||"").toLowerCase();const normalizedServiceName=(target.serviceName||"").toLowerCase();if((normalizedProtocol==="https"||normalizedServiceName==="https")&&
-options.checkHttps){protocols.push("https")}else if((normalizedProtocol==="http"||normalizedServiceName==="http")&&options.checkHttp){protocols.push("http")}else{
-const isHttpPrimary=HTTP_PRIMARY_PORTS.has(target.port);const isHttpsPrimary=HTTPS_PRIMARY_PORTS.has(target.port);if(options.checkHttp&&isHttpPrimary){protocols.
+array",items:{type:"integer"},description:`Ports to probe. Default: ${DEFAULT_PORTS.join(", ")}`,default:DEFAULT_PORTS},concurrency:{type:"integer",description:"\
+Maximum concurrent HTTP probes per execution. Requests also share the host global direct-fetch concurrency limit.",default:DEFAULT_CONCURRENCY,minimum:1,maximum:MAX_CONCURRENCY},
+followRedirects:{type:"boolean",description:"Follow HTTP redirects",default:true},maxRedirects:{type:"integer",description:"Maximum number of redirects to follo\
+w",default:DEFAULT_MAX_REDIRECTS},userAgent:{type:"string",description:"Custom User-Agent header",default:DEFAULT_USER_AGENT},extractTitle:{type:"boolean",description:"\
+Extract page title from HTML",default:true},extractHeaders:{type:"boolean",description:"Include response headers in results",default:false},checkHttps:{type:"bo\
+olean",description:"Check HTTPS protocol",default:true},checkHttp:{type:"boolean",description:"Check HTTP protocol",default:true},previousSnapshots:{type:"objec\
+t",description:"Previous HTTP snapshots keyed by URL for change detection"}}}}pluginGlobals.get_input_schema=get_input_schema;function get_output_schema(){return{
+type:"object",properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{targets:{type:"array",items:{type:"\
+string"},description:"Original target list"},results:{type:"array",items:{type:"object",properties:{url:{type:"string",description:"Probed URL"},alive:{type:"bo\
+olean"},statusCode:{type:"integer"},title:{type:"string"},contentLength:{type:"integer"},server:{type:"string"},technologies:{type:"array",items:{type:"string"}}}},
+description:"Probe results for alive hosts"},changeEvents:{type:"array",description:"Detected probe change events"},snapshots:{type:"object",description:"HTTP s\
+napshots keyed by URL"},summary:{type:"object",properties:{total:{type:"integer"},alive:{type:"integer"},dead:{type:"integer"}}},surface_artifacts:{type:"object",
+description:"Typed network surface artifacts for surface graph ingestion",properties:{webs:{type:"array",description:"Strict web assets with canonical_url, sche\
+me, http_status_code, response_headers, and content_summary"},evidences:{type:"array",description:"Strict web evidences such as http_response_headers and http_r\
+esponse_body_summary"}}}}},error:{type:"string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function extractTitle(html){
+const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);return match?match[1].trim():void 0}function buildContentSummary(text){return text.replace(/<script[\s\S]*?<\/script>/gi,
+" ").replace(/<style[\s\S]*?<\/style>/gi," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim().slice(0,500)}async function fetchProbe(url,init){return await fetch(
+url,{...init,timeout:init.timeout??DEFAULT_TIMEOUT})}function detectTechnologies(headers){const detected=[];for(const[tech,signatures]of Object.entries(TECH_SIGNATURES)){
+for(const sig of signatures){if(sig.header){const headerValue=headers[sig.header.toLowerCase()];if(headerValue&&sig.pattern.test(headerValue)){if(!detected.includes(
+tech)){detected.push(tech)}break}}}}return detected}function isHtmlContentType(contentType){return/(?:text\/html|application\/xhtml\+xml)/i.test(contentType||"")}
+function collectResponseHeaders(response){const headers={};response.headers.forEach((value,key)=>{headers[key.toLowerCase()]=value});return headers}function parseContentLength(headers){
+const contentRange=headers["content-range"];if(contentRange){const match=contentRange.match(/bytes\s+\d+-\d+\/(\d+|\*)/i);if(match&&match[1]!=="*"){const totalLength=parseInt(
+match[1],10);if(Number.isFinite(totalLength)&&totalLength>0){return totalLength}}}const contentLength=parseInt(headers["content-length"]||"0",10);return Number.
+isFinite(contentLength)&&contentLength>0?contentLength:0}function shouldFetchBodyForTitle(statusCode,headers,extractTitleEnabled){if(!extractTitleEnabled||statusCode>=
+400){return false}const contentType=headers["content-type"];return!contentType||isHtmlContentType(contentType)}function resolveRedirectUrl(requestedUrl,response,headers){
+if(response.redirected&&response.url&&response.url!==requestedUrl){return response.url}const location=headers["location"];if(!location){return void 0}try{return new URL(
+location,requestedUrl).toString()}catch{return location}}function normalizeTarget(target,port,protocol){if(target.startsWith("http://")||target.startsWith("http\
+s://")){return target}const defaultPort=protocol==="https"?443:80;if(port===defaultPort){return`${protocol}://${target}`}return`${protocol}://${target}:${port}`}
+function normalizeServiceTarget(raw){if(typeof raw==="string"){const trimmed=raw.trim();if(!trimmed)return null;if(trimmed.startsWith("http://")||trimmed.startsWith(
+"https://")){try{const parsed=new URL(trimmed);const protocol2=parsed.protocol.replace(":","").toLowerCase();const port2=Number(parsed.port||(protocol2==="https"?
+443:80));if(!parsed.hostname||!port2)return null;return{host:parsed.hostname,port:port2,protocol:protocol2}}catch{return null}}const normalized=trimmed.replace(
+/\/(?:tcp|udp)$/i,"");try{const parsed=new URL(`tcp://${normalized}`);const port2=Number(parsed.port||0);if(!parsed.hostname||!port2)return null;return{host:parsed.
+hostname,port:port2,protocol:"tcp"}}catch{const[hostPart,portPart]=normalized.split(":");const port2=Number(portPart||0);if(!hostPart||!port2)return null;return{
+host:hostPart,port:port2,protocol:"tcp"}}}if(!raw||typeof raw!=="object"){return null}if(raw.type&&raw.type!=="service"){return null}if(typeof raw.value==="stri\
+ng"&&raw.value.trim()){const normalized=normalizeServiceTarget(raw.value);if(normalized){return{...normalized,protocol:raw.protocol||raw.transport_protocol||normalized.
+protocol,serviceName:raw.service_name}}}const host=String(raw.ip_or_host||raw.host||raw.host_key||"").trim();const port=Number(raw.port??raw.port_number??0);const protocol=String(
+raw.protocol||raw.transport_protocol||"").trim().toLowerCase();const serviceName=String(raw.service_name||"").trim().toLowerCase();if(!host||!port)return null;return{
+host,port,protocol:protocol||void 0,serviceName:serviceName||void 0}}function collectServiceTargets(input){const rawTargets=[...Array.isArray(input.service_targets)?
+input.service_targets:[],...Array.isArray(input.target_objects)?input.target_objects:[]];const deduped=new Map;for(const rawTarget of rawTargets){const normalized=normalizeServiceTarget(
+rawTarget);if(!normalized)continue;const key=`${normalized.host}:${normalized.port}`;const existing=deduped.get(key);if(!existing){deduped.set(key,normalized);continue}
+const existingPriority=existing.protocol==="https"?3:existing.protocol==="http"?2:1;const currentPriority=normalized.protocol==="https"?3:normalized.protocol===
+"http"?2:1;if(currentPriority>existingPriority){deduped.set(key,normalized)}}return Array.from(deduped.values())}function buildCandidateUrlsFromServiceTarget(target,options){
+const protocols=[];const normalizedProtocol=(target.protocol||"").toLowerCase();const normalizedServiceName=(target.serviceName||"").toLowerCase();if((normalizedProtocol===
+"https"||normalizedServiceName==="https")&&options.checkHttps){protocols.push("https")}else if((normalizedProtocol==="http"||normalizedServiceName==="http")&&options.
+checkHttp){protocols.push("http")}else{const isHttpPrimary=HTTP_PRIMARY_PORTS.has(target.port);const isHttpsPrimary=HTTPS_PRIMARY_PORTS.has(target.port);if(options.
+checkHttp&&isHttpPrimary){protocols.push("http")}if(options.checkHttps&&isHttpsPrimary){protocols.push("https")}if(protocols.length===0&&options.probeUnknownPortsWithBoth){
+if(options.checkHttps){protocols.push("https")}if(options.checkHttp){protocols.push("http")}}}return protocols.map(protocol=>normalizeTarget(target.host,target.
+port,protocol))}function buildCandidateUrls(target,ports,options){if(target.startsWith("http://")||target.startsWith("https://")){return[target]}const urls=[];for(const port of ports){
+const protocols=[];const isHttpPrimary=HTTP_PRIMARY_PORTS.has(port);const isHttpsPrimary=HTTPS_PRIMARY_PORTS.has(port);if(options.checkHttp&&isHttpPrimary){protocols.
 push("http")}if(options.checkHttps&&isHttpsPrimary){protocols.push("https")}if(protocols.length===0&&options.probeUnknownPortsWithBoth){if(options.checkHttps){protocols.
-push("https")}if(options.checkHttp){protocols.push("http")}}}return protocols.map(protocol=>normalizeTarget(target.host,target.port,protocol))}function buildCandidateUrls(target,ports,options){
-if(target.startsWith("http://")||target.startsWith("https://")){return[target]}const urls=[];for(const port of ports){const protocols=[];const isHttpPrimary=HTTP_PRIMARY_PORTS.
-has(port);const isHttpsPrimary=HTTPS_PRIMARY_PORTS.has(port);if(options.checkHttp&&isHttpPrimary){protocols.push("http")}if(options.checkHttps&&isHttpsPrimary){
-protocols.push("https")}if(protocols.length===0&&options.probeUnknownPortsWithBoth){if(options.checkHttps){protocols.push("https")}if(options.checkHttp){protocols.
-push("http")}}if(protocols.length===0){if(options.checkHttps&&!options.checkHttp){protocols.push("https")}else if(options.checkHttp&&!options.checkHttps){protocols.
-push("http")}}for(const protocol of protocols){urls.push(normalizeTarget(target,port,protocol))}}return urls}async function probeUrl(url,options){const startTime=performance.
-now();const requestInit={method:"GET",headers:{"User-Agent":options.userAgent,"Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8","Accept\
--Language":"en-US,en;q=0.5"},redirect:options.followRedirects?"follow":"manual",maxRedirects:options.maxRedirects,maxBodyBytes:RESPONSE_PREVIEW_BYTES};try{const response=await fetchProbe(
-url,requestInit);const headers=collectResponseHeaders(response);let title;let contentLength=parseContentLength(headers);let contentSummary;if(shouldFetchBodyForTitle(
-response.status,headers,options.extractTitle)){try{const text=await response.text();title=extractTitle(text);contentSummary=buildContentSummary(text);if(!contentLength){
-contentLength=text.length}}catch{}}const technologies=detectTechnologies(headers);const result={url,alive:true,responseTime:Math.round(performance.now()-startTime),
-statusCode:response.status,statusText:response.statusText,title,contentLength,contentType:headers["content-type"],server:headers["server"],headers,technologies,
-contentSummary};result.redirectUrl=resolveRedirectUrl(url,response,headers);return result}catch(error){const responseTime=Math.round(performance.now()-startTime);
-return{url,alive:false,responseTime,error:error.message||String(error)}}}async function runSequentially(tasks,retainResults=true){if(tasks.length===0){return[]}
-const results=retainResults?new Array(tasks.length):[];const concurrency=Math.max(1,Math.min(MAX_CONCURRENCY,tasks.length));let nextIndex=0;const runNext=async()=>{
+push("https")}if(options.checkHttp){protocols.push("http")}}if(protocols.length===0){if(options.checkHttps&&!options.checkHttp){protocols.push("https")}else if(options.
+checkHttp&&!options.checkHttps){protocols.push("http")}}for(const protocol of protocols){urls.push(normalizeTarget(target,port,protocol))}}return urls}async function probeUrl(url,options){
+const startTime=performance.now();const requestInit={method:"GET",headers:{"User-Agent":options.userAgent,"Accept":"text/html,application/xhtml+xml,application/\
+xml;q=0.9,*/*;q=0.8","Accept-Language":"en-US,en;q=0.5"},redirect:options.followRedirects?"follow":"manual",maxRedirects:options.maxRedirects,maxBodyBytes:RESPONSE_PREVIEW_BYTES};
+try{const response=await fetchProbe(url,requestInit);const headers=collectResponseHeaders(response);let title;let contentLength=parseContentLength(headers);let contentSummary;
+if(shouldFetchBodyForTitle(response.status,headers,options.extractTitle)){try{const text=await response.text();title=extractTitle(text);contentSummary=buildContentSummary(
+text);if(!contentLength){contentLength=text.length}}catch{}}const technologies=detectTechnologies(headers);const result={url,alive:true,responseTime:Math.round(
+performance.now()-startTime),statusCode:response.status,statusText:response.statusText,title,contentLength,contentType:headers["content-type"],server:headers["s\
+erver"],headers,technologies,contentSummary};result.redirectUrl=resolveRedirectUrl(url,response,headers);return result}catch(error){const responseTime=Math.round(
+performance.now()-startTime);return{url,alive:false,responseTime,error:error.message||String(error)}}}async function runWithConcurrency(tasks,concurrency,retainResults=true){
+if(tasks.length===0){return[]}const results=retainResults?new Array(tasks.length):[];const workerCount=Math.min(concurrency,tasks.length);let nextIndex=0;const runNext=async()=>{
 while(nextIndex<tasks.length){const currentIndex=nextIndex;nextIndex+=1;const result=await tasks[currentIndex]();if(retainResults)results[currentIndex]=result}};
-const workers=Array.from({length:concurrency},()=>runNext());await Promise.all(workers);return results}function normalizeTechnologyList(technologies){return Array.
+const workers=Array.from({length:workerCount},()=>runNext());await Promise.all(workers);return results}function normalizeTechnologyList(technologies){return Array.
 from(new Set((technologies||[]).map(item=>String(item||"").trim()).filter(Boolean))).sort((left,right)=>left.localeCompare(right))}function buildProbeEventId(prefix,url,timestamp){
 return`${prefix}-${url}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g,"-").slice(0,120)}function buildProbeSnapshot(result,timestamp){return{url:result.url,alive:result.
 alive,statusCode:result.statusCode,title:result.title,contentType:result.contentType,server:result.server,redirectUrl:result.redirectUrl,technologies:normalizeTechnologyList(
@@ -197,35 +199,37 @@ event=>({asset_key:event.assetId,asset_type:"web",change_type:event.eventType,se
 oldValue,new_value:event.newValue,risk_score:event.riskScore,source:"http_prober",metadata:event.metadata})),evidences:surfaceEvidences,relations:aliveResults.map(
 result=>{const parsed=new URL(result.url);if(isIpLiteral(parsed.hostname)){return{from_type:"ip",from_key:parsed.hostname,to_type:"web",to_key:result.url,relation_type:"\
 exposes_web",source:"http_prober",confidence:.9}}return{from_type:"domain",from_key:parsed.hostname,to_type:"web",to_key:result.url,relation_type:"exposes_web",
-source:"http_prober",confidence:.9}})}}}}async function analyze(input){try{const stream=createMonitorResultStream(input);const rawTargets=Array.isArray(input.targets)?
-input.targets:[];const validStringTargets=rawTargets.filter(target=>typeof target==="string"&&target.trim().length>0);const inferredServiceTargets=validStringTargets.
-filter(target=>{if(target.startsWith("http://")||target.startsWith("https://")){return false}return normalizeServiceTarget(target)!==null});const serviceTargetSet=new Set(
-inferredServiceTargets);const genericTargets=validStringTargets.filter(target=>!serviceTargetSet.has(target));const structuredServiceTargets=collectServiceTargets(
-{...input,service_targets:[...Array.isArray(input.service_targets)?input.service_targets:[],...inferredServiceTargets]});if(genericTargets.length===0&&structuredServiceTargets.
-length===0){return{success:false,error:"Invalid input: provide at least one generic target or service endpoint target"}}const followRedirects=input.followRedirects!==
-false;const maxRedirects=input.maxRedirects||DEFAULT_MAX_REDIRECTS;const userAgent=input.userAgent||DEFAULT_USER_AGENT;const extractTitle2=input.extractTitle!==
-false;const extractHeaders=input.extractHeaders===true;const checkHttps=input.checkHttps!==false;const checkHttp=input.checkHttp!==false;const ports=input.ports||
-DEFAULT_PORTS;const previousSnapshots=input.previousSnapshots||{};const monitorExecution=input.__monitorExecution;const timestamp=new Date().toISOString();const probeUnknownPortsWithBoth=Array.
-isArray(input.ports)&&input.ports.length>0;const urls=genericTargets.flatMap(target=>buildCandidateUrls(target,ports,{checkHttp,checkHttps,probeUnknownPortsWithBoth}));
-const serviceUrls=structuredServiceTargets.flatMap(target=>buildCandidateUrlsFromServiceTarget(target,{checkHttp,checkHttps,probeUnknownPortsWithBoth:false}));const uniqueUrls=dedupeStrings(
-[...urls,...serviceUrls]);const owners=new Map;const addOwner=(target,candidates)=>{for(const candidate of candidates){if(!owners.has(candidate))owners.set(candidate,
-new Set);owners.get(candidate).add(target)}};for(const target of genericTargets)addOwner(target,buildCandidateUrls(target,ports,{checkHttp,checkHttps,probeUnknownPortsWithBoth}));
-const serviceOwners=stream.enabled?input.__monitorExecution.result_stream.targets.filter(target=>!/^https?:\/\//.test(target)&&normalizeServiceTarget(target)!==
-null):inferredServiceTargets;const serviceOwnersByEndpoint=new Map;for(const target of serviceOwners){const parsed=normalizeServiceTarget(target);if(!parsed)continue;
-const identity=`${parsed.host}:${parsed.port}`;const endpointOwners=serviceOwnersByEndpoint.get(identity)||[];endpointOwners.push(target);serviceOwnersByEndpoint.
-set(identity,endpointOwners)}for(const service of structuredServiceTargets){const candidates=buildCandidateUrlsFromServiceTarget(service,{checkHttp,checkHttps,probeUnknownPortsWithBoth:false});
-for(const target of serviceOwnersByEndpoint.get(`${service.host}:${service.port}`)||[]){addOwner(target,candidates)}}const remaining=new Map;for(const entries of owners.
-values())for(const owner of entries)remaining.set(owner,(remaining.get(owner)||0)+1);const declaredTargets=stream.enabled?input.__monitorExecution.result_stream.
-targets:[];for(const target of declaredTargets)if(!remaining.has(target)){await stream.record(target,"no-probe-candidates",{success:true,data:{results:[]}},{status:"\
-skipped",complete:true})}const totalProgressUnits=uniqueUrls.length+2;await reportMonitorProgress(monitorExecution,{current:0,total:totalProgressUnits,phase:"pr\
-epare",message:"Preparing HTTP probes"});let completedUrls=0;const tasks=uniqueUrls.map(url=>async()=>{stream.assertHealthy();try{const result=await probeUrl(url,
-{followRedirects,maxRedirects,userAgent,extractTitle:extractTitle2,extractHeaders});if(stream.enabled){const targetOwners=[...owners.get(url)||[]];if(targetOwners.
-length===0)throw new Error("HTTP probe has no injected target owner");const delta2=buildProbeDelta([result],previousSnapshots,timestamp);for(let index=0;index<targetOwners.
-length;index++){const owner=targetOwners[index];const left=remaining.get(owner)-1;remaining.set(owner,left);await stream.record(owner,url,index===0?delta2:{success:true,
-data:{}},{status:result.alive?"ok":"failed",error:result.error,complete:left===0})}}return result}finally{completedUrls+=1;await reportMonitorProgress(monitorExecution,
-{current:completedUrls,total:totalProgressUnits,currentTarget:url,phase:"probe",message:`Probing web endpoint ${url}`})}});const results=await runSequentially(tasks,
-!stream.enabled);await reportMonitorProgress(monitorExecution,{current:uniqueUrls.length+1,total:totalProgressUnits,phase:"compare",message:"Comparing HTTP snap\
-shots"});await reportMonitorProgress(monitorExecution,{current:totalProgressUnits,total:totalProgressUnits,phase:"build",message:"Building web probe results"});
-if(stream.enabled)return await stream.finish();const delta=buildProbeDelta(results,previousSnapshots,timestamp);return{success:true,data:{targets:input.targets,
-...delta.data}}}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+source:"http_prober",confidence:.9}})}}}}async function analyze(input){try{const concurrency=input.concurrency===void 0?DEFAULT_CONCURRENCY:input.concurrency;if(!Number.
+isInteger(concurrency)||concurrency<1||concurrency>MAX_CONCURRENCY){return{success:false,error:`concurrency must be an integer between 1 and ${MAX_CONCURRENCY}`}}
+const stream=createMonitorResultStream(input);const rawTargets=Array.isArray(input.targets)?input.targets:[];const validStringTargets=rawTargets.filter(target=>typeof target===
+"string"&&target.trim().length>0);const inferredServiceTargets=validStringTargets.filter(target=>{if(target.startsWith("http://")||target.startsWith("https://")){
+return false}return normalizeServiceTarget(target)!==null});const serviceTargetSet=new Set(inferredServiceTargets);const genericTargets=validStringTargets.filter(
+target=>!serviceTargetSet.has(target));const structuredServiceTargets=collectServiceTargets({...input,service_targets:[...Array.isArray(input.service_targets)?input.
+service_targets:[],...inferredServiceTargets]});if(genericTargets.length===0&&structuredServiceTargets.length===0){return{success:false,error:"Invalid input: pr\
+ovide at least one generic target or service endpoint target"}}const followRedirects=input.followRedirects!==false;const maxRedirects=input.maxRedirects||DEFAULT_MAX_REDIRECTS;
+const userAgent=input.userAgent||DEFAULT_USER_AGENT;const extractTitle2=input.extractTitle!==false;const extractHeaders=input.extractHeaders===true;const checkHttps=input.
+checkHttps!==false;const checkHttp=input.checkHttp!==false;const ports=input.ports||DEFAULT_PORTS;const previousSnapshots=input.previousSnapshots||{};const monitorExecution=input.
+__monitorExecution;const timestamp=new Date().toISOString();const probeUnknownPortsWithBoth=Array.isArray(input.ports)&&input.ports.length>0;const urls=genericTargets.
+flatMap(target=>buildCandidateUrls(target,ports,{checkHttp,checkHttps,probeUnknownPortsWithBoth}));const serviceUrls=structuredServiceTargets.flatMap(target=>buildCandidateUrlsFromServiceTarget(
+target,{checkHttp,checkHttps,probeUnknownPortsWithBoth:false}));const uniqueUrls=dedupeStrings([...urls,...serviceUrls]);const owners=new Map;const addOwner=(target,candidates)=>{
+for(const candidate of candidates){if(!owners.has(candidate))owners.set(candidate,new Set);owners.get(candidate).add(target)}};for(const target of genericTargets)
+addOwner(target,buildCandidateUrls(target,ports,{checkHttp,checkHttps,probeUnknownPortsWithBoth}));const serviceOwners=stream.enabled?input.__monitorExecution.result_stream.
+targets.filter(target=>!/^https?:\/\//.test(target)&&normalizeServiceTarget(target)!==null):inferredServiceTargets;const serviceOwnersByEndpoint=new Map;for(const target of serviceOwners){
+const parsed=normalizeServiceTarget(target);if(!parsed)continue;const identity=`${parsed.host}:${parsed.port}`;const endpointOwners=serviceOwnersByEndpoint.get(
+identity)||[];endpointOwners.push(target);serviceOwnersByEndpoint.set(identity,endpointOwners)}for(const service of structuredServiceTargets){const candidates=buildCandidateUrlsFromServiceTarget(
+service,{checkHttp,checkHttps,probeUnknownPortsWithBoth:false});for(const target of serviceOwnersByEndpoint.get(`${service.host}:${service.port}`)||[]){addOwner(
+target,candidates)}}const remaining=new Map;for(const entries of owners.values())for(const owner of entries)remaining.set(owner,(remaining.get(owner)||0)+1);const declaredTargets=stream.
+enabled?input.__monitorExecution.result_stream.targets:[];for(const target of declaredTargets)if(!remaining.has(target)){await stream.record(target,"no-probe-ca\
+ndidates",{success:true,data:{results:[]}},{status:"skipped",complete:true})}const totalProgressUnits=uniqueUrls.length+2;await reportMonitorProgress(monitorExecution,
+{current:0,total:totalProgressUnits,phase:"prepare",message:"Preparing HTTP probes"});let completedUrls=0;const tasks=uniqueUrls.map(url=>async()=>{stream.assertHealthy();
+try{const result=await probeUrl(url,{followRedirects,maxRedirects,userAgent,extractTitle:extractTitle2,extractHeaders});if(stream.enabled){const targetOwners=[...owners.
+get(url)||[]];if(targetOwners.length===0)throw new Error("HTTP probe has no injected target owner");const delta2=buildProbeDelta([result],previousSnapshots,timestamp);
+for(let index=0;index<targetOwners.length;index++){const owner=targetOwners[index];const left=remaining.get(owner)-1;remaining.set(owner,left);await stream.record(
+owner,url,index===0?delta2:{success:true,data:{}},{status:result.alive?"ok":"failed",error:result.error,complete:left===0})}}return result}finally{completedUrls+=
+1;await reportMonitorProgress(monitorExecution,{current:completedUrls,total:totalProgressUnits,currentTarget:url,phase:"probe",message:`Probing web endpoint ${url}`})}});
+const results=await runWithConcurrency(tasks,concurrency,!stream.enabled);await reportMonitorProgress(monitorExecution,{current:uniqueUrls.length+1,total:totalProgressUnits,
+phase:"compare",message:"Comparing HTTP snapshots"});await reportMonitorProgress(monitorExecution,{current:totalProgressUnits,total:totalProgressUnits,phase:"bu\
+ild",message:"Building web probe results"});if(stream.enabled)return await stream.finish();const delta=buildProbeDelta(results,previousSnapshots,timestamp);return{
+success:true,data:{targets:input.targets,...delta.data}}}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.
+analyze=analyze;export{analyze,get_input_schema,get_output_schema};
 globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;
