@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.9
+ * @version 2.2.12
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -79,6 +79,7 @@ interface ToolInput {
   dictionaryEntries?: RuleEntry[];
   safe_mode?: boolean;
   maxRules?: number;
+  concurrency?: number;
   userAgent?: string;
   stopOnFirstHit?: boolean;
   variables?: Record<string, any>;
@@ -136,7 +137,7 @@ const pluginGlobals = globalThis as PluginGlobals;
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "POST"]);
 
 const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 1000;
 
 export function get_input_schema() {
   return {
@@ -220,10 +221,17 @@ export function get_input_schema() {
       },
       maxRules: {
         type: "integer",
-        description: "Maximum number of applicable rules to execute",
+        description: "Maximum rules selected for each target after deduplication and enabled, safe-mode and fingerprint filtering. Each rule may issue multiple HTTP requests.",
         default: 20,
         minimum: 1,
         maximum: 200,
+      },
+      concurrency: {
+        type: "integer",
+        description: "Maximum concurrent target/rule verifications per execution. Requests also share the host global direct-fetch concurrency limit.",
+        default: DEFAULT_CONCURRENCY,
+        minimum: 1,
+        maximum: MAX_CONCURRENCY,
       },
       userAgent: {
         type: "string",
@@ -311,13 +319,14 @@ pluginGlobals.get_output_schema = get_output_schema;
 
 const RULE_FETCH_TIMEOUT_MS = 10000;
 
-async function runSequentially<T>(
+async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
+  concurrency: number,
 ): Promise<T[]> {
   const results = new Array<T>(tasks.length);
   let nextIndex = 0;
   const workers = Array.from(
-    { length: Math.min(16, tasks.length) },
+    { length: Math.min(concurrency, tasks.length) },
     async () => {
       while (nextIndex < tasks.length) {
         const currentIndex = nextIndex++;
@@ -906,8 +915,6 @@ async function executeRule(
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
   try {
-      const stream = createMonitorResultStream(input);
-      const writeTarget = createMonitorTargetWriter(input, stream, normalizeTarget);
     if (!input || typeof input !== "object") {
       return {
         success: false,
@@ -915,6 +922,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
       };
     }
 
+    const concurrency = input.concurrency === undefined ? DEFAULT_CONCURRENCY : input.concurrency;
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) {
+      return {
+        success: false,
+        error: `concurrency must be an integer between 1 and ${MAX_CONCURRENCY}`,
+      };
+    }
+    const stream = createMonitorResultStream(input);
+    const writeTarget = createMonitorTargetWriter(input, stream, normalizeTarget);
     const safeMode = getInputBoolean(input, "safe_mode", "safe_mode", true);
     const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
     const userAgent = getInputString(
@@ -994,7 +1010,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     let stopRequested = false;
     let executedRuleCount = 0;
     const failedTargets = new Set<string>();
-    await runSequentially(
+    await runWithConcurrency(
       scanTasks.map(({ target, rule }) => async () => {
         stream.assertHealthy();
         if (stopRequested) return;
@@ -1037,6 +1053,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
           phase: "probe", message: `Executing verification rules for ${target}`,
         });
       }),
+      concurrency,
     );
     for (const target of targets) await writeTarget(target, "target-complete", { success: true, data: {} }, {
       complete: true, status: failedTargets.has(target) ? "failed" : stopRequested ? "skipped" : "ok",

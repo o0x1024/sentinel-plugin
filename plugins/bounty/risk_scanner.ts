@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.9
+ * @version 2.2.12
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -90,26 +90,29 @@ record(owners[index],key,delta,options)}}}async function reportMonitorProgress(m
 taskId:monitorExecution.task_id,taskName:monitorExecution.task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.
 started_at,currentPlugin:monitorExecution.current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,
 totalSteps:monitorExecution.total_steps,importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}var pluginGlobals=globalThis;var SAFE_METHODS=new Set(
-["GET","HEAD","OPTIONS","POST"]);function get_input_schema(){return{type:"object",required:[],properties:{url:{type:"string",description:"Single target URL to verify with dictionary-driven risk\
- rules"},base_url:{type:"string",description:"Base URL alias for a single target"},targets:{type:"array",items:{type:"string"},description:"List of target URLs \
-or hostnames to verify"},technologies:{type:"array",description:"Observed technologies used to scope matching rules",items:{anyOf:[{type:"string"},{type:"object",
-properties:{name:{type:"string",description:"Technology name"}}}]}},fingerprints:{type:"array",items:{type:"string"},description:"Observed fingerprint names use\
-d for rule filtering"},dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionary-type":"poc_rule",description:"Structured dictionary ID or name \
-used to load verification rules"},dictionaryEntries:{type:"array",description:"Inline rule entries that override dictionary loading",items:{type:"object",required:[
-"word"],properties:{word:{type:"string",description:"Rule identifier"},category:{type:"string",description:"Rule category used for normalized finding type"},metadata:{
-description:"Rule metadata object or JSON string with requests, matchers and finding fields"}}}},variables:{type:"object",description:"Variables injected into r\
-ule templates and request paths"},safe_mode:{type:"boolean",description:"Skip rules explicitly marked as unsafe",default:true},maxRules:{type:"integer",description:"\
-Maximum number of applicable rules to execute",default:20,minimum:1,maximum:200},userAgent:{type:"string",description:"User-Agent header used for outbound reque\
-sts",default:"Sentinel-Risk-Scanner/2.0"},stopOnFirstHit:{type:"boolean",description:"Stop executing more rules after the first positive finding",default:false}}}}
-function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the risk verification run completed successfully"},data:{
-type:"object",properties:{findings:{type:"array",description:"Matched risk findings produced by the executed rules",items:{type:"object",properties:{title:{type:"\
-string"},severity:{type:"string"},url:{type:"string"},description:{type:"string"},impact:{type:"string"},remediation:{type:"string"},cwe:{type:"string"}}}},evidence:{
-type:"array",description:"Structured execution evidence captured during rule evaluation"},summary:{type:"object",description:"High-level execution summary",properties:{
-totalTargets:{type:"integer"},executedRules:{type:"integer"},matchedRules:{type:"integer"}}},surface_artifacts:{type:"object",description:"Normalized findings a\
-nd evidences prepared for upper-layer ingestion",properties:{findings:{type:"array",description:"Normalized vulnerability findings"},evidences:{type:"array",description:"\
-Normalized evidence records"}}}}},error:{type:"string",description:"Error message if the risk verification run fails"}}}}pluginGlobals.get_input_schema=get_input_schema;
-pluginGlobals.get_output_schema=get_output_schema;var RULE_FETCH_TIMEOUT_MS=1e4;async function runSequentially(tasks){const results=new Array(tasks.length);let nextIndex=0;
-const workers=Array.from({length:Math.min(16,tasks.length)},async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex++;results[currentIndex]=await tasks[currentIndex]()}});
+["GET","HEAD","OPTIONS","POST"]);var DEFAULT_CONCURRENCY=32;var MAX_CONCURRENCY=1e3;function get_input_schema(){return{type:"object",required:[],properties:{url:{
+type:"string",description:"Single target URL to verify with dictionary-driven risk rules"},base_url:{type:"string",description:"Base URL alias for a single targ\
+et"},targets:{type:"array",items:{type:"string"},description:"List of target URLs or hostnames to verify"},technologies:{type:"array",description:"Observed tech\
+nologies used to scope matching rules",items:{anyOf:[{type:"string"},{type:"object",properties:{name:{type:"string",description:"Technology name"}}}]}},fingerprints:{
+type:"array",items:{type:"string"},description:"Observed fingerprint names used for rule filtering"},dictionaryId:{type:"string","x-control":"dictionary-picker",
+"x-dictionary-type":"poc_rule",description:"Structured dictionary ID or name used to load verification rules"},dictionaryEntries:{type:"array",description:"Inli\
+ne rule entries that override dictionary loading",items:{type:"object",required:["word"],properties:{word:{type:"string",description:"Rule identifier"},category:{
+type:"string",description:"Rule category used for normalized finding type"},metadata:{description:"Rule metadata object or JSON string with requests, matchers a\
+nd finding fields"}}}},variables:{type:"object",description:"Variables injected into rule templates and request paths"},safe_mode:{type:"boolean",description:"S\
+kip rules explicitly marked as unsafe",default:true},maxRules:{type:"integer",description:"Maximum rules selected for each target after deduplication and enable\
+d, safe-mode and fingerprint filtering. Each rule may issue multiple HTTP requests.",default:20,minimum:1,maximum:200},concurrency:{type:"integer",description:"\
+Maximum concurrent target/rule verifications per execution. Requests also share the host global direct-fetch concurrency limit.",default:DEFAULT_CONCURRENCY,minimum:1,
+maximum:MAX_CONCURRENCY},userAgent:{type:"string",description:"User-Agent header used for outbound requests",default:"Sentinel-Risk-Scanner/2.0"},stopOnFirstHit:{
+type:"boolean",description:"Stop executing more rules after the first positive finding",default:false}}}}function get_output_schema(){return{type:"object",properties:{
+success:{type:"boolean",description:"Whether the risk verification run completed successfully"},data:{type:"object",properties:{findings:{type:"array",description:"\
+Matched risk findings produced by the executed rules",items:{type:"object",properties:{title:{type:"string"},severity:{type:"string"},url:{type:"string"},description:{
+type:"string"},impact:{type:"string"},remediation:{type:"string"},cwe:{type:"string"}}}},evidence:{type:"array",description:"Structured execution evidence captu\
+red during rule evaluation"},summary:{type:"object",description:"High-level execution summary",properties:{totalTargets:{type:"integer"},executedRules:{type:"in\
+teger"},matchedRules:{type:"integer"}}},surface_artifacts:{type:"object",description:"Normalized findings and evidences prepared for upper-layer ingestion",properties:{
+findings:{type:"array",description:"Normalized vulnerability findings"},evidences:{type:"array",description:"Normalized evidence records"}}}}},error:{type:"stri\
+ng",description:"Error message if the risk verification run fails"}}}}pluginGlobals.get_input_schema=get_input_schema;pluginGlobals.get_output_schema=get_output_schema;
+var RULE_FETCH_TIMEOUT_MS=1e4;async function runWithConcurrency(tasks,concurrency){const results=new Array(tasks.length);let nextIndex=0;const workers=Array.from(
+{length:Math.min(concurrency,tasks.length)},async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex++;results[currentIndex]=await tasks[currentIndex]()}});
 await Promise.all(workers);return results}function normalizeTarget(raw){if(!raw||typeof raw!=="string")return null;const trimmed=raw.trim().replace(/\/+$/,"");if(!trimmed)
 return null;return trimmed.startsWith("http://")||trimmed.startsWith("https://")?trimmed:`https://${trimmed}`}function getInputNumber(input,camelKey,snakeKey,fallback){
 const snakeValue=input?.[snakeKey];const camelValue=input?.[camelKey];const value=snakeValue??camelValue;const parsed=Number(value??fallback);return Number.isFinite(
@@ -177,34 +180,36 @@ metadata.matchers:[];const finalMatched=finalMatchers.length===0?true:lastRespon
 and");const evidence={rule_id:rule.word,target,steps:evidenceSteps,final_matchers:finalMatchers,extracted:executionContext.extracted};if(!finalMatched||!lastResponseContext){
 return{matched:false,evidence}}const finding={title:metadata.name||rule.word,severity:metadata.severity||"medium",url:lastResponseContext.url,description:metadata.
 description||`Risk verification rule ${rule.word} matched.`,impact:metadata.impact||"",remediation:metadata.remediation||"Restrict access and harden the affecte\
-d component.",cwe:metadata.cwe||""};return{matched:true,finding,evidence}}async function analyze(input){try{const stream=createMonitorResultStream(input);const writeTarget=createMonitorTargetWriter(
-input,stream,normalizeTarget);if(!input||typeof input!=="object"){return{success:false,error:"Invalid input: expected an object payload"}}const safeMode=getInputBoolean(
-input,"safe_mode","safe_mode",true);const maxRules=getInputNumber(input,"maxRules","max_rules",20);const userAgent=getInputString(input,"userAgent","user_agent",
-"Sentinel-Risk-Scanner/2.0");const stopOnFirstHit=getInputBoolean(input,"stopOnFirstHit","stop_on_first_hit",false);const normalizedInput={...input,safe_mode:safeMode,
-maxRules,userAgent,stopOnFirstHit,dictionaryId:getInputString(input,"dictionaryId","dictionary_id")||input.dictionaryId};const monitorExecution=input.__monitorExecution;
-const targets=Array.from(new Set([normalizeTarget(input.url),normalizeTarget(input.base_url),...asArray(input.targets).map(normalizeTarget)].filter(value=>Boolean(
-value))));if(targets.length===0){return{success:false,error:"At least one target URL is required"}}const observedFingerprints=getObservedFingerprints(normalizedInput);
-const allRules=dedupeRules(await loadRules(normalizedInput));if(allRules.length===0){return{success:false,error:"No risk verification rules loaded. Configure di\
-ctionaryEntries or a poc_rule dictionary with explicit requests and matchers."}}const rules=allRules.filter(rule=>{const metadata=parseMetadata(rule.metadata);if(metadata.
-enabled===false)return false;if(safeMode&&metadata.safe_mode===false)return false;return ruleMatchesFingerprintScope(rule,observedFingerprints)}).slice(0,maxRules);
-const totalProgressUnits=targets.length*Math.max(rules.length,1)+2;await reportMonitorProgress(monitorExecution,{current:0,total:totalProgressUnits,phase:"prepa\
-re",message:"Preparing risk verification"});const findings=[];const evidence=[];const vulnerabilityFindings=[];const scanTasks=[];for(const target of targets){for(const rule of rules){
-scanTasks.push({target,rule})}}let stopRequested=false;let executedRuleCount=0;const failedTargets=new Set;await runSequentially(scanTasks.map(({target,rule})=>async()=>{
-stream.assertHealthy();if(stopRequested)return;executedRuleCount+=1;const ruleKey=`rule:${rule.word}`;const result=await executeRule(target,rule,normalizedInput,
-async(step,index)=>{await writeTarget(target,`${ruleKey}:step:${index}`,{success:true,data:{results:[{target,rule_id:rule.word,step}]}},{complete:false})});const metadata=parseMetadata(
-rule.metadata);const finding=result.matched&&result.finding?result.finding:void 0;const surfaceFinding=finding?{title:finding.title,severity:finding.severity,target:finding.
-url,vulnerability_type:metadata.finding_type||rule.category||"risk_verification",description:finding.description,source:"risk_scanner"}:void 0;const surfaceEvidence=result.
-evidence?{asset_type:"web",asset_key:target,evidence_type:"risk_verification",title:`Risk verification: ${metadata.name||rule.word}`,content_json:result.evidence,
-source:"risk_scanner"}:void 0;const error=result.evidence?.error;if(error)failedTargets.add(target);await writeTarget(target,ruleKey,{success:true,data:{results:[
-{target,rule_id:rule.word,matched:result.matched,error}],findings:finding?[confirmedMonitorFinding(finding,metadata.finding_type||rule.category||"risk_verificat\
-ion",result.evidence)]:[],surface_artifacts:{evidences:surfaceEvidence?[surfaceEvidence]:[]},summary:{executedRules:1,matchedRules:finding?1:0}}},{complete:false,
-status:error?"failed":"ok",error});if(!stream.enabled){if(result.evidence)evidence.push(result.evidence);if(finding)findings.push(finding);if(surfaceFinding)vulnerabilityFindings.
-push(surfaceFinding)}if(finding&&stopOnFirstHit)stopRequested=true;await reportMonitorProgress(monitorExecution,{current:executedRuleCount,total:totalProgressUnits,
-currentTarget:target,phase:"probe",message:`Executing verification rules for ${target}`})}));for(const target of targets)await writeTarget(target,"target-comple\
-te",{success:true,data:{}},{complete:true,status:failedTargets.has(target)?"failed":stopRequested?"skipped":"ok"});await reportMonitorProgress(monitorExecution,
-{current:totalProgressUnits-1,total:totalProgressUnits,phase:"compare",message:"Summarizing risk verification results"});await reportMonitorProgress(monitorExecution,
-{current:totalProgressUnits,total:totalProgressUnits,phase:"build",message:"Building risk scan results"});return await stream.finish({success:true,data:{findings,
-evidence,summary:{totalTargets:targets.length,executedRules:executedRuleCount,matchedRules:findings.length},surface_artifacts:{findings:vulnerabilityFindings,evidences:evidence.
-map(item=>({asset_type:"web",asset_key:item.target,evidence_type:"risk_verification",title:`Risk verification: ${item.rule_id}`,content_json:item,source:"risk_s\
-canner"}))}}})}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
+d component.",cwe:metadata.cwe||""};return{matched:true,finding,evidence}}async function analyze(input){try{if(!input||typeof input!=="object"){return{success:false,
+error:"Invalid input: expected an object payload"}}const concurrency=input.concurrency===void 0?DEFAULT_CONCURRENCY:input.concurrency;if(!Number.isInteger(concurrency)||
+concurrency<1||concurrency>MAX_CONCURRENCY){return{success:false,error:`concurrency must be an integer between 1 and ${MAX_CONCURRENCY}`}}const stream=createMonitorResultStream(
+input);const writeTarget=createMonitorTargetWriter(input,stream,normalizeTarget);const safeMode=getInputBoolean(input,"safe_mode","safe_mode",true);const maxRules=getInputNumber(
+input,"maxRules","max_rules",20);const userAgent=getInputString(input,"userAgent","user_agent","Sentinel-Risk-Scanner/2.0");const stopOnFirstHit=getInputBoolean(
+input,"stopOnFirstHit","stop_on_first_hit",false);const normalizedInput={...input,safe_mode:safeMode,maxRules,userAgent,stopOnFirstHit,dictionaryId:getInputString(
+input,"dictionaryId","dictionary_id")||input.dictionaryId};const monitorExecution=input.__monitorExecution;const targets=Array.from(new Set([normalizeTarget(input.
+url),normalizeTarget(input.base_url),...asArray(input.targets).map(normalizeTarget)].filter(value=>Boolean(value))));if(targets.length===0){return{success:false,
+error:"At least one target URL is required"}}const observedFingerprints=getObservedFingerprints(normalizedInput);const allRules=dedupeRules(await loadRules(normalizedInput));
+if(allRules.length===0){return{success:false,error:"No risk verification rules loaded. Configure dictionaryEntries or a poc_rule dictionary with explicit reques\
+ts and matchers."}}const rules=allRules.filter(rule=>{const metadata=parseMetadata(rule.metadata);if(metadata.enabled===false)return false;if(safeMode&&metadata.
+safe_mode===false)return false;return ruleMatchesFingerprintScope(rule,observedFingerprints)}).slice(0,maxRules);const totalProgressUnits=targets.length*Math.max(
+rules.length,1)+2;await reportMonitorProgress(monitorExecution,{current:0,total:totalProgressUnits,phase:"prepare",message:"Preparing risk verification"});const findings=[];
+const evidence=[];const vulnerabilityFindings=[];const scanTasks=[];for(const target of targets){for(const rule of rules){scanTasks.push({target,rule})}}let stopRequested=false;
+let executedRuleCount=0;const failedTargets=new Set;await runWithConcurrency(scanTasks.map(({target,rule})=>async()=>{stream.assertHealthy();if(stopRequested)return;
+executedRuleCount+=1;const ruleKey=`rule:${rule.word}`;const result=await executeRule(target,rule,normalizedInput,async(step,index)=>{await writeTarget(target,`${ruleKey}\
+:step:${index}`,{success:true,data:{results:[{target,rule_id:rule.word,step}]}},{complete:false})});const metadata=parseMetadata(rule.metadata);const finding=result.
+matched&&result.finding?result.finding:void 0;const surfaceFinding=finding?{title:finding.title,severity:finding.severity,target:finding.url,vulnerability_type:metadata.
+finding_type||rule.category||"risk_verification",description:finding.description,source:"risk_scanner"}:void 0;const surfaceEvidence=result.evidence?{asset_type:"\
+web",asset_key:target,evidence_type:"risk_verification",title:`Risk verification: ${metadata.name||rule.word}`,content_json:result.evidence,source:"risk_scanner"}:
+void 0;const error=result.evidence?.error;if(error)failedTargets.add(target);await writeTarget(target,ruleKey,{success:true,data:{results:[{target,rule_id:rule.
+word,matched:result.matched,error}],findings:finding?[confirmedMonitorFinding(finding,metadata.finding_type||rule.category||"risk_verification",result.evidence)]:
+[],surface_artifacts:{evidences:surfaceEvidence?[surfaceEvidence]:[]},summary:{executedRules:1,matchedRules:finding?1:0}}},{complete:false,status:error?"failed":
+"ok",error});if(!stream.enabled){if(result.evidence)evidence.push(result.evidence);if(finding)findings.push(finding);if(surfaceFinding)vulnerabilityFindings.push(
+surfaceFinding)}if(finding&&stopOnFirstHit)stopRequested=true;await reportMonitorProgress(monitorExecution,{current:executedRuleCount,total:totalProgressUnits,currentTarget:target,
+phase:"probe",message:`Executing verification rules for ${target}`})}),concurrency);for(const target of targets)await writeTarget(target,"target-complete",{success:true,
+data:{}},{complete:true,status:failedTargets.has(target)?"failed":stopRequested?"skipped":"ok"});await reportMonitorProgress(monitorExecution,{current:totalProgressUnits-
+1,total:totalProgressUnits,phase:"compare",message:"Summarizing risk verification results"});await reportMonitorProgress(monitorExecution,{current:totalProgressUnits,
+total:totalProgressUnits,phase:"build",message:"Building risk scan results"});return await stream.finish({success:true,data:{findings,evidence,summary:{totalTargets:targets.
+length,executedRules:executedRuleCount,matchedRules:findings.length},surface_artifacts:{findings:vulnerabilityFindings,evidences:evidence.map(item=>({asset_type:"\
+web",asset_key:item.target,evidence_type:"risk_verification",title:`Risk verification: ${item.rule_id}`,content_json:item,source:"risk_scanner"}))}}})}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;export{analyze,get_input_schema,get_output_schema};
 globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;
