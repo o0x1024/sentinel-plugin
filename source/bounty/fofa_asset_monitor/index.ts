@@ -3,16 +3,17 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.9
+ * @version 1.2.10
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
  * @monitor_type web
  * @input_mode seed
  * @target_asset_types []
+ * @target_sources []
  * @seed_bindings [{"seed_type":"root_domain","input_key":"domains"},{"seed_type":"domain","input_key":"domains"},{"seed_type":"favicon_hash","input_key":"iconHashes"},{"seed_type":"brand_keyword","input_key":"brandKeywords"},{"seed_type":"org_name","input_key":"orgNames"},{"seed_type":"asn","input_key":"asnList"},{"seed_type":"cname_keyword","input_key":"cnameKeywords"},{"seed_type":"title_keyword","input_key":"titleKeywords"},{"seed_type":"body_keyword","input_key":"bodyKeywords"},{"seed_type":"header_keyword","input_key":"headerKeywords"}]
  * @default_severity medium
- * @tags fofa, website, monitor, reconnaissance, osint, surface, change-detection, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags fofa, website, monitor, reconnaissance, osint, surface, change-detection, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Query FOFA Search API with domain and enterprise website fingerprints such as icon hash, org, ASN, CNAME, title, body, and header clues, then emit website-only monitoring artifacts.
  * @target_asset_types []
  * @seed_bindings [{"seed_type":"root_domain","input_key":"domains"},{"seed_type":"domain","input_key":"domains"},{"seed_type":"favicon_hash","input_key":"iconHashes"},{"seed_type":"brand_keyword","input_key":"brandKeywords"},{"seed_type":"org_name","input_key":"orgNames"},{"seed_type":"asn","input_key":"asnList"},{"seed_type":"cname_keyword","input_key":"cnameKeywords"},{"seed_type":"title_keyword","input_key":"titleKeywords"},{"seed_type":"body_keyword","input_key":"bodyKeywords"},{"seed_type":"header_keyword","input_key":"headerKeywords"}]
@@ -1140,7 +1141,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     surface_artifacts: { changes: projected.data!.surface_artifacts.changes },
                 } : {
                     results: [{ id: result.id, target: result.target, success: false, error: result.error }],
-                }) : {} }, { complete: remaining.get(parent) === 0, status: result.success && result.complete !== false ? "ok" : "failed",
+                }) : {} }, { complete: remaining.get(parent) === 0, snapshot_complete: result.success && result.complete !== false, status: result.success && result.complete !== false ? "ok" : "failed",
                     error: result.complete === false ? "FOFA page limit reached; complete baseline retained" : result.error });
             }
             completedPlans += 1;

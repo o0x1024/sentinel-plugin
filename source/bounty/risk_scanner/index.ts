@@ -3,16 +3,17 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.13
+ * @version 2.2.14
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
  * @input_mode asset
  * @target_asset_types ["web"]
  * @category risk
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity medium
- * @tags risk, poc, verification, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @tags risk, poc, verification, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v2
  * @description Execute all applicable Risk Scanner Rules with bounded concurrency, lazy task scheduling, chained requests and durable evidence.
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';

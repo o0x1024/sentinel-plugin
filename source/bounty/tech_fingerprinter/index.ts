@@ -3,16 +3,17 @@
  *
  * @plugin tech_fingerprinter
  * @name Technology Fingerprinter
- * @version 2.6.1
+ * @version 2.6.2
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
  * @monitor_type web
  * @input_mode asset
  * @target_asset_types ["web"]
+ * @target_sources ["surface_asset"]
  * @seed_bindings []
  * @default_severity info
- * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @tags fingerprint, technology, dictionary, web, normalized, surface, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v2
  * @description Identify web technologies using dictionary-driven fingerprint rules with structured matchers.
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';
@@ -54,7 +55,7 @@ interface MonitorExecutionContext {
     completed_steps: number;
     total_steps: number;
     imported_assets?: number;
-    result_stream?: { protocol: "monitor-results-v1"; targets: string[]; max_work_items: number; max_pending_commits: number; max_bytes: number };
+    result_stream?: { protocol: "monitor-results-v2"; targets: string[]; max_work_items: number; max_pending_commits: number; max_bytes: number };
 }
 
 interface RuleEntry {
@@ -600,7 +601,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         fingerprints: take(fingerprints, item => item.asset_key),
                         evidences: take(evidences, item => item.asset_key), changes: changeArtifacts(changes),
                     },
-                } }, { status: result.status === 'failed' ? 'failed' : 'ok',
+                } }, { snapshot_complete: result.status !== 'failed', status: result.status === 'failed' ? 'failed' : 'ok',
                     ...(result.failure_category ? { failure_category: result.failure_category } : {}) });
             }
         }

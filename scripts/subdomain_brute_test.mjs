@@ -1,3 +1,4 @@
+import { requestData } from './monitor_request_test_support.mjs';
 // Node 24+; all native calls are fixtures, with no network or platform dictionary reads.
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,7 +26,7 @@ test('catalog, metadata header, seed bindings and typed schema agree', async () 
     const contracts = JSON.parse(await readFile(new URL('./monitor_plugin_contracts.json', import.meta.url), 'utf8'));
     const entry = catalog.plugins.find(plugin => plugin.id === 'subdomain_brute');
     const contract = contracts.plugins.find(plugin => plugin.id === 'subdomain_brute');
-    assert.equal(entry.version, '1.0.2');
+    assert.equal(entry.version, '1.0.3');
     for (const field of ['id', 'monitor_type', 'input_mode', 'target_asset_types', 'seed_bindings']) assert.deepEqual(entry[field], contract[field]);
     assert.deepEqual(entry.tags.filter(tag => tag.startsWith('capability:')), contract.capability_tags);
     const source = await readFile(new URL('../plugins/bounty/subdomain_brute.ts', import.meta.url), 'utf8');
@@ -68,8 +69,8 @@ test('forwards a complete multi-target batch and dictionary configuration in exa
     assert.deepEqual(output.data.changeEvents, output.data.change_events);
     assert.equal(output.data.stream_complete, true);
     assert.equal(output.data.surface_artifacts.domains.length, 0);
-    assert.equal(commits.flatMap(request => request.output.data.surface_artifacts?.domains || []).length, 2);
-    const typedChanges = commits.flatMap(request => request.output.data.surface_artifacts?.changes || []);
+    assert.equal(commits.flatMap(request => requestData(request).surface_artifacts?.domains || []).length, 2);
+    const typedChanges = commits.flatMap(request => requestData(request).surface_artifacts?.changes || []);
     assert.deepEqual(typedChanges.map(change => [change.asset_type, change.asset_key, change.change_type]), [
         ['domain', 'one.test', 'asset_discovered'], ['domain', 'two.test', 'asset_discovered'],
     ]);

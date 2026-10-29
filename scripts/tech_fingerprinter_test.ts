@@ -1,6 +1,7 @@
 // Deterministic input/failure isolation tests. No network permission is granted.
 import { deepEqual, equal, ok } from "node:assert/strict";
 import { analyze } from "../plugins/bounty/tech_fingerprinter.ts";
+import { requestData } from "./monitor_request_test_support.mjs";
 import { monitorExecution } from "./monitor_stream_fixture.ts";
 const rule = { word: "php", metadata: { name: "PHP", product: "PHP", asset_category: "programming_language", matchers: [{ part: "header", key: "x-powered-by", type: "contains", value: "PHP" }] } };
 function fixture() {
@@ -109,17 +110,17 @@ Deno.test("stream submits bounded deltas, retains failed baseline and releases a
         equal(output.success, true); equal(output.data!.stream_complete, true);
         equal(chunks.length, 4);
         deepEqual(chunks.map(chunk => chunk.sequence), [1, 2, 3, 4]);
-        equal(chunks.flatMap(chunk => chunk.output.data.results).length, 10);
+        equal(chunks.flatMap(chunk => requestData(chunk).results).length, 10);
         equal(chunks.flatMap(chunk => chunk.work).filter(item => item.status === "failed").length, 1);
-        equal(chunks.flatMap(chunk => chunk.output.data.results).filter(item => item.status === "identified").length, 9);
+        equal(chunks.flatMap(chunk => requestData(chunk).results).filter(item => item.status === "identified").length, 9);
         equal(output.data!.summary.diagnostics!.completed_targets, 10);
         equal(output.data!.results, undefined); equal(output.data!.surface_artifacts, undefined);
         equal(output.data!.snapshots, undefined);
         for (const chunk of chunks) {
-            ok(chunk.output.data.results.length <= 3);
-            ok(!Object.hasOwn(chunk.output.data.snapshots, targets[5]));
-            for (const evidence of chunk.output.data.surface_artifacts.evidences) {
-                ok(chunk.output.data.results.some((result: any) => result.url === evidence.asset_key));
+            ok(requestData(chunk).results.length <= 3);
+            ok(!Object.hasOwn(requestData(chunk).snapshots, targets[5]));
+            for (const evidence of requestData(chunk).surface_artifacts.evidences) {
+                ok(requestData(chunk).results.some((result: any) => result.url === evidence.asset_key));
             }
         }
     } finally { globalThis.fetch = originalFetch; globals.Sentinel = originalSentinel; }
@@ -155,7 +156,7 @@ Deno.test("slow low-concurrency scans commit progress before a full chunk accumu
         globalThis.fetch = async () => { now += 6000; return new Response("ok"); };
         const sizes: number[] = [];
         globals.Sentinel = { Monitor: { commitResults: (request: any) => {
-            sizes.push(request.output.data.results.length);
+            sizes.push(requestData(request).results.length);
             return { ok: true, sequence: request.sequence };
         } } };
         const input = streamInput(["https://example.test/1", "https://example.test/2"]);

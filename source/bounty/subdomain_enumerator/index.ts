@@ -3,16 +3,17 @@
  *
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.9
+ * @version 2.2.10
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
  * @monitor_type dns
  * @input_mode seed
  * @target_asset_types []
+ * @target_sources []
  * @seed_bindings [{"seed_type":"root_domain","input_key":"domains"},{"seed_type":"domain","input_key":"domains"}]
  * @default_severity info
- * @tags subdomain, reconnaissance, domain, enumeration, dns, osint, certificate-transparency, threat-intelligence, passive-dns, api, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags subdomain, reconnaissance, domain, enumeration, dns, osint, certificate-transparency, threat-intelligence, passive-dns, api, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Enumerate subdomains using multiple data sources (crt.sh, HackerTarget, RapidDNS, AlienVault, VirusTotal, URLScan, etc.)
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";
@@ -902,7 +903,7 @@ async function analyzeDomain(input: ToolInput, domain: string, stream: ReturnTyp
             },
         } : {
             results: [{ domain, status: "failed", error: output.error }],
-        } } as any, { status: successful ? "ok" : "failed", error: output.error });
+        } } as any, { snapshot_complete: successful, status: successful ? "ok" : "failed", error: output.error });
         return output;
 
     } catch (error: any) {

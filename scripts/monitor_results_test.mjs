@@ -1,3 +1,4 @@
+import { requestData } from './monitor_request_test_support.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createMonitorResultStream } from '../source/shared/monitor_results.ts';
@@ -8,7 +9,7 @@ test.afterEach(() => { globalThis.Sentinel = originalSentinel; Date.now = origin
 
 function input(targets, limits = {}) {
     return { __monitorExecution: { result_stream: {
-        protocol: 'monitor-results-v1', targets, max_work_items: 32,
+        protocol: 'monitor-results-v2', targets, max_work_items: 32,
         max_pending_commits: 2, max_bytes: 2 * 1024 * 1024, ...limits,
     } } };
 }
@@ -36,9 +37,9 @@ test('ordinary tools preserve output and require no monitor host', async () => {
 
 test('monitor context requires the exact protocol, explicit limits and commit API', () => {
     commitFixture();
-    assert.throws(() => createMonitorResultStream({ __monitorExecution: {} }), /monitor-results-v1/);
-    assert.throws(() => createMonitorResultStream({ __monitorExecution: null }), /monitor-results-v1/);
-    assert.throws(() => createMonitorResultStream(input([], { protocol: 'technology-v1' })), /monitor-results-v1/);
+    assert.throws(() => createMonitorResultStream({ __monitorExecution: {} }), /monitor-results-v2/);
+    assert.throws(() => createMonitorResultStream({ __monitorExecution: null }), /monitor-results-v2/);
+    assert.throws(() => createMonitorResultStream(input([], { protocol: 'technology-v1' })), /monitor-results-v2/);
     assert.throws(() => createMonitorResultStream(input([], { max_work_items: 33 })), /max_work_items/);
     assert.throws(() => createMonitorResultStream(input([], { max_bytes: 0 })), /max_bytes/);
     assert.throws(() => createMonitorResultStream(input([], { max_pending_commits: 3 })), /max_pending_commits/);
@@ -46,23 +47,25 @@ test('monitor context requires the exact protocol, explicit limits and commit AP
     assert.throws(() => createMonitorResultStream(input([])), /commitResults/);
 });
 
-test('deltas merge arrays, snapshot maps, artifacts and numeric summaries', async () => {
+test('batches retain independent outputs while their validated projection merges consistently', async () => {
     const requests = commitFixture();
     const stream = createMonitorResultStream(input(['one', 'two']));
     const first = output({ results: [{ url: 'one' }], findings: [{ id: 1 }], snapshots: { one: { version: 1 } },
         surface_artifacts: { webs: [{ canonical_url: 'one' }] }, summary: { total: 1, byStatus: { '200': 1 } } });
-    await stream.record('one', 'request', first);
+    await stream.record('one', 'request', first, { snapshot_complete: true });
     first.data.results.length = 0;
     await stream.record('two', 'request', output({ results: [{ url: 'two' }], findings: [{ id: 2 }],
         snapshots: { two: { version: 2 } }, surface_artifacts: { webs: [{ canonical_url: 'two' }] },
-        summary: { total: 1, byStatus: { '200': 1, '404': 1 } } }));
+        summary: { total: 1, byStatus: { '200': 1, '404': 1 } } }), { snapshot_complete: true });
     const final = await stream.finish(output({ results: ['must not replay'], snapshots: { stale: {} } }));
     assert.equal(requests.length, 1);
-    assert.deepEqual(requests[0].output.data.results, [{ url: 'one' }, { url: 'two' }]);
-    assert.deepEqual(requests[0].output.data.findings, [{ id: 1 }, { id: 2 }]);
-    assert.deepEqual(requests[0].output.data.snapshots, { one: { version: 1 }, two: { version: 2 } });
-    assert.deepEqual(requests[0].output.data.summary, { total: 2, byStatus: { '200': 2, '404': 1 } });
-    assert.equal(requests[0].output.data.surface_artifacts.webs.length, 2);
+    assert.equal(Object.hasOwn(requests[0], 'output'), false);
+    assert.deepEqual(requests[0].work.map(work => work.output.data.results), [[{ url:'one' }],[{ url:'two' }]]);
+    assert.deepEqual(requestData(requests[0]).results, [{ url: 'one' }, { url: 'two' }]);
+    assert.deepEqual(requestData(requests[0]).findings, [{ id: 1 }, { id: 2 }]);
+    assert.deepEqual(requestData(requests[0]).snapshots, { one: { version: 1 }, two: { version: 2 } });
+    assert.deepEqual(requestData(requests[0]).summary, { total: 2, byStatus: { '200': 2, '404': 1 } });
+    assert.equal(requestData(requests[0]).surface_artifacts.webs.length, 2);
     assert.equal(final.data.stream_complete, true);
     assert.equal(final.data.results, undefined);
     assert.equal(final.data.summary.diagnostics.committed_work_items, 2);
@@ -75,7 +78,7 @@ test('flushes at work count and retains no prior batch results', async () => {
     await stream.record('one', 'b', output({ results: ['b'] }), intermediate);
     await stream.record('one', 'c', output({ results: ['c'] }));
     await stream.finish();
-    assert.deepEqual(requests.map(item => [item.sequence, item.output.data.results]), [[1, ['a', 'b']], [2, ['c']]]);
+    assert.deepEqual(requests.map(item => [item.sequence, requestData(item).results]), [[1, ['a', 'b']], [2, ['c']]]);
     assert.deepEqual(requests.map(item => item.work.map(work => work.complete)), [[false, false], [true]]);
 });
 
@@ -164,7 +167,7 @@ test('finish saves valid partial results then preserves plugin failure', async (
     const stream = createMonitorResultStream(input(['one', 'two']));
     await stream.record('one', 'a', output({ results: ['saved'] }));
     await assert.rejects(stream.finish({ success: false, error: 'FOFA page failed' }), /FOFA page failed/);
-    assert.deepEqual(requests[0].output.data.results, ['saved']);
+    assert.deepEqual(requestData(requests[0]).results, ['saved']);
 });
 
 test('finish retains numeric plugin diagnostics and protects acknowledged counters', async () => {
@@ -195,4 +198,21 @@ test('finish rejects omitted targets, and a finished stream rejects later work',
     const finished = createMonitorResultStream(input([]));
     await finished.finish();
     await assert.rejects(finished.record('one', 'a', output()), /already finished/);
+});
+
+
+test('snapshots keep stable state keys independent of work IDs, and failed work cannot publish them', async () => {
+    const packets=commitFixture();
+    const stream=createMonitorResultStream(input(['query']));
+    await stream.record('query','page:7:inventory-complete',output({snapshots:{stableQueryId:{assets:[]}}}),{snapshot_complete:true});
+    await stream.finish();
+    assert.deepEqual(packets[0].work[0].output.data.snapshots,{stableQueryId:{assets:[]}});
+    const rejected=createMonitorResultStream(input(['query']));
+    await assert.rejects(rejected.record('query','failed',output({snapshots:{stableQueryId:{assets:[]}}}),{status:'failed',snapshot_complete:true}),/successful work/);
+});
+
+test('partial observations cannot silently replace a retained snapshot', async () => {
+    commitFixture();
+    const stream=createMonitorResultStream(input(['query']));
+    await assert.rejects(stream.record('query','page',output({snapshots:{query:{partial:true}}}),{complete:false}),/complete observation/);
 });

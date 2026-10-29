@@ -5,6 +5,7 @@ export interface MonitorPluginMetadata {
     monitor_type?: string | null;
     input_mode?: string | null;
     target_asset_types?: string[];
+    target_sources?: string[];
     seed_bindings?: Array<{ seed_type: string; input_key: string }>;
 }
 
@@ -20,8 +21,9 @@ export function validateMonitorMetadata(plugin: MonitorPluginMetadata): void {
     };
     const targets = plugin.target_asset_types ?? [];
     const bindings = plugin.seed_bindings ?? [];
+    const sources = plugin.target_sources ?? [];
     if (plugin.monitor_type == null) {
-        if (plugin.input_mode != null || targets.length || bindings.length) {
+        if (plugin.input_mode != null || targets.length || sources.length || bindings.length) {
             fail("monitor inputs require monitor_type");
         }
         return;
@@ -33,6 +35,8 @@ export function validateMonitorMetadata(plugin: MonitorPluginMetadata): void {
     if (targets.some((type) => !assetTypes.has(type)) || new Set(targets).size !== targets.length) {
         fail("target_asset_types contains an invalid or duplicate type");
     }
+    if (new Set(sources).size !== sources.length || sources.some(value => !["surface_asset","bounty_asset","scope"].includes(value))) fail("invalid or duplicate target_sources");
+    if (plugin.input_mode === "seed" ? sources.length > 0 : sources.length === 0) fail("target_sources must explicitly match input_mode");
     const seen = new Set<string>();
     for (const { seed_type: type, input_key: key } of bindings) {
         if (!key || key.length > 128 || key.trim() !== key || key.startsWith("__monitor") ||

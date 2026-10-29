@@ -3,16 +3,17 @@
  *
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.7
+ * @version 1.2.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type cert
  * @input_mode asset
  * @target_asset_types ["domain","web"]
  * @category monitor
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity medium
- * @tags certificate, ssl, tls, monitor, change-detection, expiry, capability:tls-inspect, capability:monitor-events, monitor:results-stream-v1
+ * @tags certificate, ssl, tls, monitor, change-detection, expiry, capability:tls-inspect, capability:monitor-events, monitor:results-stream-v2
  * @description Monitor SSL/TLS certificates for changes and expiry, generating ChangeEvents for workflow automation
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";
@@ -20,6 +21,7 @@ import { createMonitorTargetWriter } from "../../shared/monitor_target_writer.ts
 
 interface ToolInput {
     targets: string[];  // List of domains/URLs to monitor
+    target_objects?: Array<{type?: string;value?: string;port?: number;protocol?: string;service_name?: string;transport_protocol?: string;encrypted_transport?: boolean}>;
     checkExpiry?: boolean;
     expiryWarningDays?: number;  // Warn if expiring within N days
     concurrency?: number;
@@ -208,6 +210,7 @@ export function get_input_schema() {
                 items: { type: "string" },
                 description: "List of domains or URLs to monitor certificates"
             },
+            target_objects: { type: "array", description: "Host-owned typed target descriptors", items: { type: "object" } },
             checkExpiry: {
                 type: "boolean",
                 description: "Check certificate expiry dates",
@@ -464,10 +467,19 @@ function projectCertificateOutput(results: CertResult[], changeEvents: ChangeEve
 
 }
 
+function certificateTargetSupported(target: string, input: ToolInput): boolean {
+    const typed = input.target_objects?.find(item => item.value === target && item.type === "service");
+    if (!typed) return true;
+    if ((typed.transport_protocol || typed.protocol || '').toLowerCase() === 'udp') return false;
+    return typed.encrypted_transport === true
+        || /(?:https|ssl|tls|wss)/i.test(`${typed.protocol || ""} ${typed.service_name || ""}`)
+        || [443,8443,9443].includes(Number(typed.port));
+}
+
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
     try {
         const stream = createMonitorResultStream(input);
-        const writeTarget = createMonitorTargetWriter(input, stream, target => tlsTarget(target).key);
+        const writeTarget = createMonitorTargetWriter(input, stream, target => certificateTargetSupported(target, input) ? tlsTarget(target).key : null);
         if (!input.targets || !Array.isArray(input.targets)) {
             return {
                 success: false,
@@ -489,9 +501,15 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const previousSnapshots = input.previousSnapshots || {};
         const monitorExecution = input.__monitorExecution;
 
+        const candidates: string[] = [];
+        for (const target of validTargets) {
+            const tlsApplicable = certificateTargetSupported(target, input);
+            if (tlsApplicable) candidates.push(target);
+            else await stream.record(target,"not-tls-service",{success:true,data:{results:[]}},{status:"skipped",complete:true});
+        }
         const normalizedDomains = Array.from(
             new Set(
-                validTargets
+                candidates
                     .map((target) => tlsTarget(target).key)
                     .filter((domain) => domain.length > 0),
             ),
@@ -701,7 +719,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
             if (!stream.enabled) { results.push(result); changeEvents.push(...targetChangeEvents); }
             await writeTarget(endpoint, "tls-certificate", projectCertificateOutput([result], targetChangeEvents,
-                result.snapshot ? { [endpoint]: result.snapshot } : {}, {}) as any, { status: result.success ? "ok" : "failed", error: result.error });
+                result.snapshot ? { [endpoint]: result.snapshot } : {}, {}) as any, { snapshot_complete: result.success, status: result.success ? "ok" : "failed", error: result.error });
             completedDomains += 1
             await advanceProgress({
                 currentTarget: targetLabel,

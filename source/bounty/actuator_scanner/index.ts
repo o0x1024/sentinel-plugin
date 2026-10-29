@@ -3,16 +3,17 @@
  *
  * @plugin actuator_scanner
  * @name Actuator Path Scanner
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
  * @monitor_type risk
  * @input_mode asset
  * @target_asset_types ["web","api"]
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity high
- * @tags actuator, spring, exposure, misconfiguration, java, web, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags actuator, spring, exposure, misconfiguration, java, web, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Scan for exposed Spring Boot Actuator endpoints by backtracking through API path segments. Detects sensitive actuator endpoints like /env, /heapdump, /mappings that may leak configuration, secrets, or enable remote code execution.
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';

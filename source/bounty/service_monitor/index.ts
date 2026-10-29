@@ -3,16 +3,17 @@
  *
  * @plugin service_monitor
  * @name Service Monitor
- * @version 1.0.10
+ * @version 1.0.11
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type service
  * @input_mode asset
  * @target_asset_types ["service"]
  * @category monitor
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity medium
- * @tags service, monitor, change-detection, banner, version, asm, network, capability:network-scan, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @tags service, monitor, change-detection, banner, version, asm, network, capability:network-scan, capability:dictionary, capability:monitor-events, monitor:results-stream-v2
  * @description Monitor exposed services for availability, banner, product, and version changes with structured snapshots and change events
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";
@@ -880,7 +881,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const result = { ...nativeProbe.results[0], target: serviceKey(nativeProbe.results[0].host, nativeProbe.results[0].port) };
             if (result.host !== target.host || result.port !== target.port || result.target !== serviceKey(target.host, target.port)) throw new Error("Native service probe returned an unrelated endpoint");
             ruleCount = nativeProbe.ruleCount ?? rules.length;
-            await writeTarget(serviceKey(target.host, target.port), "native-service-endpoint", projectServiceMonitorOutput([result], rules, timestamp, probeEngine, ruleCount, previousSnapshots) as any, { status: result.success ? "ok" : "failed", error: result.error });
+            await writeTarget(serviceKey(target.host, target.port), "native-service-endpoint", projectServiceMonitorOutput([result], rules, timestamp, probeEngine, ruleCount, previousSnapshots) as any, { snapshot_complete: result.success, status: result.success ? "ok" : "failed", error: result.error });
             if (!stream.enabled) results[index] = result;
         }));
         return await stream.finish(stream.enabled ? { success: true } : projectServiceMonitorOutput(results, rules, timestamp, probeEngine, ruleCount, previousSnapshots));

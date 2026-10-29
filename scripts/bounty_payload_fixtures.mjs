@@ -126,7 +126,7 @@ export function createPayloadCase(id, count, metrics) {
                     surface_artifacts: { domains: [{ fqdn: found, root_domain: domain, source: id }] } }],
                 ['root-complete', true, { snapshots: { [domain]: { domain, subdomains: [found], last_checked: date } } }],
             ]) {
-                const item = { sequence: ++sequence, work: [{ target: domain, key, status: 'ok', complete }], output: { success: true, data } };
+                const item = { sequence: ++sequence, work: [{ target: domain, key, status: 'ok', complete, snapshot_complete: complete, output: { success: true, data } }] };
                 const ack = await commit(item);
                 if (ack.ok !== true || ack.sequence !== sequence) throw new Error('Native fixture save was not acknowledged');
             }

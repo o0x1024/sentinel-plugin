@@ -1,3 +1,4 @@
+import { requestData } from './monitor_request_test_support.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -26,14 +27,23 @@ function fixture(targets, { chunk = 2, commit } = {}) {
   const context = { task_id: 'owned', task_name: 'Owned fixture', program_id: 'owned',
     execution_mode: 'test', started_at: '2026-10-28T00:00:00Z', current_plugin: 'fixture',
     current_plugin_index: 1, completed_steps: 0, total_steps: 1,
-    result_stream: { protocol: 'monitor-results-v1', targets, max_work_items: chunk,
+    result_stream: { protocol: 'monitor-results-v2', targets, max_work_items: chunk,
       max_pending_commits: 1, max_bytes: 2 * 1024 * 1024 } };
   return { batches, requests, context,
     fetch(handler) { handleFetch = (url, init) => { requests.push({ url, init }); return handler(url, init); }; } };
 }
 const work = f => f.batches.flatMap(batch => batch.work);
-const data = f => f.batches.map(batch => batch.output.data);
+const data = f => f.batches.map(batch => requestData(batch));
 const html = body => new Response(body, { headers: { 'content-type': 'text/html' } });
+
+test('HTTP service ownership preserves TCP/UDP identity and sends no UDP probe', async () => {
+  const targets=['owned.test:443/udp','owned.test:443/tcp'];
+  const f=fixture(targets);f.fetch(async()=>html('<title>Owned</title>'));
+  const output=await plugins.http_prober.analyze({targets,target_objects:targets.map(value=>({type:'service',value,source:'surface_asset',protocol:value.endsWith('/udp')?'udp':'tcp',transport_protocol:value.endsWith('/udp')?'udp':'tcp',service_name:'https'})),__monitorExecution:f.context});
+  assert.equal(output.success,true,output.error);assert.equal(f.requests.length,1);
+  const records=work(f);assert.equal(records.find(work=>work.target.endsWith('/udp')).status,'skipped');
+  assert.equal(records.find(work=>work.target.endsWith('/tcp')).status,'ok');
+});
 function complete(f, targets) {
   assert.deepEqual(work(f).filter(item => item.complete).map(item => item.target).sort(), [...targets].sort());
   assert.deepEqual(f.batches.map(batch => batch.sequence), f.batches.map((_, index) => index + 1));
@@ -327,7 +337,7 @@ test('all web plugins reject a missing monitor protocol before any network work'
   for (const id of ids) {
     const output = await plugins[id].analyze({ __monitorExecution: {} });
     assert.equal(output.success, false, id);
-    assert.match(output.error, /monitor-results-v1/, id);
+    assert.match(output.error, /monitor-results-v2/, id);
   }
   assert.equal(f.requests.length, 0);
 });
@@ -344,7 +354,7 @@ test('large streamed HTTP, directory, rule and JavaScript scans acknowledge ever
       savedWork += request.work.length;
       commits++;
       assert.ok(request.work.length <= 32);
-      const delta = request.output.data;
+      const delta = requestData(request);
       savedProducts += kind === 'javascript' ? (delta.files || []).length
         : kind === 'directory' ? (delta.discovered || []).length
           : kind === 'risk' ? (delta.findings || []).length : (delta.results || []).length;
@@ -441,7 +451,7 @@ async function linearSubmission(id, count) {
   const f = fixture(targets, { chunk: 32 });
   let workItems = 0, bytes = 0, maxBytes = 0, requests = 0, batches = 0;
   globalThis.Sentinel.Monitor.commitResults = async request => {
-    const delta = request.output.data;
+    const delta = requestData(request);
     for (const forbidden of ['targets', 'urls', 'domains', 'ips', 'target_objects', 'service_targets', 'previousSnapshots', 'dictionaryEntries']) {
       assert.equal(Object.hasOwn(delta, forbidden), false, `${id}: delta contains ${forbidden} input inventory`);
     }

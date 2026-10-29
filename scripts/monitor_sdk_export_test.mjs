@@ -25,7 +25,7 @@ const limit = name => {
   return expression.replaceAll('_', '').split('*').map(value => Number(value.trim())).reduce((left, right) => left * right, 1);
 };
 function context(targets, overrides = {}) {
-  return { __monitorExecution: { result_stream: { protocol: 'monitor-results-v1', targets,
+  return { __monitorExecution: { result_stream: { protocol: 'monitor-results-v2', targets,
     max_work_items: 32, max_pending_commits: 2, max_bytes: 2 * 1024 * 1024, ...overrides } } };
 }
 function embedded(commit = async request => ({ ok: true, sequence: request.sequence })) {
@@ -74,8 +74,8 @@ test('Rust documented SDK limits equal the canonical runtime boundaries', () => 
 
 async function trace(factory, chunks) {
   const stream = factory(context(['one', 'two'], { max_work_items: 2, max_pending_commits: 1 }));
-  await stream.record('one', 'first', { success: true, data: { results: [{ text: '跨域🚀\ud800' }], snapshots: { one: { title: 'first' } } } }, { complete: false });
-  await stream.record('one', 'complete', { success: true, data: { results: [{ text: 'second' }], snapshots: { one: { title: 'new' } } } });
+  await stream.record('one', 'first', { success: true, data: { results: [{ text: '跨域🚀\ud800' }], snapshots: { one: { title: 'first' } } } }, { complete: false, snapshot_complete: true });
+  await stream.record('one', 'complete', { success: true, data: { results: [{ text: 'second' }], snapshots: { one: { title: 'new' } } } }, { snapshot_complete: true });
   await stream.record('two', 'failure', { success: true, data: { results: [{ error: 'owned failure' }] } }, { status: 'failed' });
   const output = await stream.finish({ success: true, data: { ordinaryOnly: true } });
   const result = plain(output);
@@ -157,7 +157,7 @@ test('renderer wrapper exposes readonly business methods and retains ordinary fu
 
 test('renderer returns explicit SDK failures for missing protocol, computed input echo and incomplete work', async () => {
   const missing = renderedBody(`throw new Error('business body must not start');`);
-  assert.match((await missing({ __monitorExecution: {} })).error, /requires the monitor-results-v1/);
+  assert.match((await missing({ __monitorExecution: {} })).error, /requires the monitor-results-v2/);
   const echo = renderedBody(`await stream.record('one','bad',{success:true,data:{[input.field]:input.targets}});return {success:true};`);
   assert.match((await echo({ targets: ['one'], field: 'targets', ...context(['one']) })).error, /must not repeat execution input field/);
   const incomplete = renderedBody(`await stream.record('one','partial',{success:true,data:{results:[1]}},{complete:false});return {success:true};`);
@@ -167,8 +167,7 @@ test('renderer returns explicit SDK failures for missing protocol, computed inpu
 const nativeBody = 'return await stream.delegateNative(() => Sentinel.Network.bruteForceSubdomains(input));';
 async function simulatedNative(input, commit) {
   if (!input.__monitorExecution) return { success: true, data: { targets: input.targets, results: [{ native: true }] } };
-  await commit({ sequence: 1, work: input.targets.map(target => ({ target, key: 'native', status: 'ok', complete: true })),
-    output: { success: true, data: { results: input.targets.map(target => ({ target, native: true })) } } });
+  await commit({ sequence: 1, work: input.targets.map(target => ({ target, key: 'native', status: 'ok', complete: true, output: { success: true, data: { results: [{ target, native: true }] } } })) });
   return { success: true, data: { stream_complete: true, ordinaryMustNotLeak: input.targets } };
 }
 
@@ -212,8 +211,7 @@ test('a partial native failure keeps its simulated ACK prefix and cannot become 
     return {success:true};`, async request => {
     commits.push(plain(request)); return { ok: true, sequence: request.sequence };
   }, async (input, commit) => {
-    await commit({ sequence: 1, work: [{ target: input.targets[0], key: 'native-first', status: 'ok', complete: true }],
-      output: { success: true, data: { results: [{ native: true }] } } });
+    await commit({ sequence: 1, work: [{ target: input.targets[0], key: 'native-first', status: 'ok', complete: true, output: { success: true, data: { results: [{ native: true }] } } }] });
     throw new Error('owned native failed after first ACK');
   });
   const output = await analyze({ targets: ['one', 'two'], ...context(['one', 'two']) });

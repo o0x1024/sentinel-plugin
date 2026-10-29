@@ -1,6 +1,6 @@
 /** Bounded, acknowledged monitor deltas; ordinary tool calls retain their output. */
-import { copyMonitorDelta, isJsonObject as object, jsonBytes, mergeMonitorDelta, monitorRequestBytes } from './monitor_delta.ts';
-import type { DeltaNode, JsonObject } from './monitor_delta.ts';
+import { copyMonitorDelta, isJsonObject as object, jsonBytes, monitorRequestBytes } from './monitor_delta.ts';
+import type { JsonObject } from './monitor_delta.ts';
 type WorkStatus = "ok" | "failed" | "skipped";
 
 export interface MonitorResultOptions {
@@ -9,6 +9,8 @@ export interface MonitorResultOptions {
     complete?: boolean;
     error?: string;
     failure_category?: string;
+    /** The snapshot's observation or inventory is complete, independently of its parent target. */
+    snapshot_complete?: boolean;
 }
 
 interface WorkItem {
@@ -18,12 +20,13 @@ interface WorkItem {
     complete: boolean;
     error?: string;
     failure_category?: string;
+    snapshot_complete?: boolean;
+    output: { success: true; data: JsonObject };
 }
 
 interface ResultRequest {
     sequence: number;
     work: WorkItem[];
-    output: { success: true; data: JsonObject };
 }
 
 const MAX_WORK_ITEMS = 32;
@@ -48,8 +51,8 @@ export function createMonitorResultStream(input: unknown) {
         };
     }
     if (!object(context) || !object(context.result_stream)
-        || context.result_stream.protocol !== "monitor-results-v1") {
-        throw new Error("Monitor execution requires the monitor-results-v1 result stream");
+        || context.result_stream.protocol !== "monitor-results-v2") {
+        throw new Error("Monitor execution requires the monitor-results-v2 result stream");
     }
     const monitor = (globalThis as any).Sentinel?.Monitor;
     if (typeof monitor?.commitResults !== "function") {
@@ -68,7 +71,6 @@ export function createMonitorResultStream(input: unknown) {
     // Only unacknowledged work keys live here. The host owns durable duplicate detection.
     const bufferedKeys = new Set<string>();
     let buffered: WorkItem[] = [];
-    let data: DeltaNode | undefined;
     let workContentsBytes = 0;
     let sequence = 0;
     let lastCommitAt = Date.now();
@@ -107,13 +109,12 @@ export function createMonitorResultStream(input: unknown) {
         assertHealthy();
         if (!buffered.length) return;
         await capacity();
-        const request: ResultRequest = { sequence: sequence + 1, work: buffered, output: { success: true, data: data!.value } };
-        const encodedBytes = monitorRequestBytes(request.sequence, workContentsBytes, data!);
+        const request: ResultRequest = { sequence: sequence + 1, work: buffered };
+        const encodedBytes = monitorRequestBytes(request.sequence, workContentsBytes);
         if (encodedBytes > byteLimit) throw new Error("Monitor result batch exceeds the JSON byte limit");
         sequence++;
         const keys = buffered.map(item => JSON.stringify([item.target, item.key]));
         buffered = [];
-        data = undefined;
         workContentsBytes = 0;
         lastCommitAt = Date.now();
         submittedBatches++;
@@ -153,23 +154,28 @@ export function createMonitorResultStream(input: unknown) {
             if (bufferedKeys.has(identity)) throw new Error("Monitor work repeats an unacknowledged target/key");
             const status = options.status ?? "ok";
             if (!["ok", "failed", "skipped"].includes(status)) throw new Error("Invalid monitor work status");
-            const item: WorkItem = { target, key, status, complete: options.complete !== false };
+            const delta = copyMonitorDelta(output);
+            if (status !== "ok" && object(delta.value.snapshots) && Object.keys(delta.value.snapshots).length) {
+                throw new Error("Only successful work may update snapshots");
+            }
+            if (object(delta.value.snapshots) && Object.keys(delta.value.snapshots).length && options.snapshot_complete !== true) {
+                throw new Error("Snapshot updates require an explicitly complete observation");
+            }
+            const item: WorkItem = { target, key, status, complete: options.complete !== false,
+                output: { success: true, data: delta.value } };
             if (options.error !== undefined) item.error = options.error;
             if (options.failure_category !== undefined) item.failure_category = options.failure_category;
-            const delta = copyMonitorDelta(output);
+            if (options.snapshot_complete !== undefined) item.snapshot_complete = options.snapshot_complete;
             const itemBytes = jsonBytes(item);
-            if (monitorRequestBytes(sequence + 1, itemBytes, delta) > byteLimit) {
+            if (monitorRequestBytes(sequence + 1, itemBytes) > byteLimit) {
                 throw new Error("A single monitor work result exceeds the JSON byte limit");
             }
-            let combined = mergeMonitorDelta(data, delta);
             let combinedWorkBytes = workContentsBytes + (buffered.length ? 1 : 0) + itemBytes;
-            if (buffered.length && monitorRequestBytes(sequence + 1, combinedWorkBytes, combined) > byteLimit) {
+            if (buffered.length && monitorRequestBytes(sequence + 1, combinedWorkBytes) > byteLimit) {
                 await flush();
-                combined = delta;
                 combinedWorkBytes = itemBytes;
             }
             buffered.push(item);
-            data = combined;
             workContentsBytes = combinedWorkBytes;
             bufferedKeys.add(identity);
             if (item.complete) completed.add(target);

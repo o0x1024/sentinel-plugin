@@ -14,7 +14,7 @@ Host progress and acknowledged result publication require `monitor-events`.
 All bounty monitors now also use the shared acknowledged-result stream,
 `Sentinel.Monitor.commitResults`, when executing a monitor task. This requires
 `monitor-events` even for a pure-computation plugin such as `cidr_mapper`.
-The published tag is `monitor:results-stream-v1`; every bounty entry is bundled
+The published tag is `monitor:results-stream-v2`; every bounty entry is bundled
 from `source/bounty/<id>/index.ts` with `source/shared/monitor_results.ts`.
 
 | Plugin | Capabilities (without `capability:` prefix) | Actual host calls and purpose |

@@ -111,9 +111,9 @@ export function mergeMonitorDelta(left: DeltaNode | undefined, right: DeltaNode)
     return left ? merge(left, right, "data") : right;
 }
 
-const EMPTY_REQUEST_BYTES = jsonBytes({ sequence: 0, work: [], output: { success: true, data: {} } });
+const EMPTY_REQUEST_BYTES = jsonBytes({ sequence: 0, work: [] });
 
-/** Cached data/work sizes replace the two empty containers and the sequence's zero. */
-export function monitorRequestBytes(sequence: number, workContentsBytes: number, data: DeltaNode): number {
-    return EMPTY_REQUEST_BYTES - 3 + jsonBytes(sequence) + workContentsBytes + data.bytes;
+/** Each work item's cached size already includes its independently owned output. */
+export function monitorRequestBytes(sequence: number, workContentsBytes: number): number {
+    return EMPTY_REQUEST_BYTES - 1 + jsonBytes(sequence) + workContentsBytes;
 }

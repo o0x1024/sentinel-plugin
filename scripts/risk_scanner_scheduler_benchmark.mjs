@@ -33,7 +33,11 @@ async function measure(variant, targetCount, ruleCount, bundlePath) {
     __monitorExecution: monitorExecution(targets, { pluginId: 'risk_scanner', maxWorkItems: 1 }) };
   // The previous published version needs its explicit limit raised for equal
   // coverage. The current producer receives no removed parameter.
-  if (variant === 'baseline') input.maxRules = ruleCount;
+  if (variant === 'baseline') {
+    input.maxRules = ruleCount;
+    // The pinned historical producer is measured with its own original protocol.
+    input.__monitorExecution.result_stream.protocol='monitor-results-v1';
+  }
   let release, notifySaturated;
   const gate = new Promise(resolve => { release = resolve; });
   const saturated = new Promise(resolve => { notifySaturated = resolve; });

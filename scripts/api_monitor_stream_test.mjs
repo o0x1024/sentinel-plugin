@@ -1,3 +1,4 @@
+import { requestData } from './monitor_request_test_support.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze } from '../source/bounty/api_monitor/index.ts';
@@ -22,12 +23,12 @@ function fixture(targets, { chunk = 32, commit } = {}) {
     context: { task_id: 'owned', task_name: 'Owned API fixture', program_id: 'owned',
       execution_mode: 'test', started_at: '2026-10-28T00:00:00Z', current_plugin: 'api_monitor',
       current_plugin_index: 1, completed_steps: 0, total_steps: 1,
-      result_stream: { protocol: 'monitor-results-v1', targets, max_work_items: chunk,
+      result_stream: { protocol: 'monitor-results-v2', targets, max_work_items: chunk,
         max_pending_commits: 1, max_bytes: 2 * 1024 * 1024 } },
     fetch(handler) { handleFetch = (url, init) => { requests.push({ url, init }); return handler(url, init); }; },
   };
 }
-const data = f => f.batches.map(batch => batch.output.data);
+const data = f => f.batches.map(batch => requestData(batch));
 const work = f => f.batches.flatMap(batch => batch.work);
 const previous = root => ({ [root]: { baseUrl: root,
   apiEndpoints: [{ path: '/api/historical', source: 'previous' }],
@@ -149,12 +150,12 @@ test('concurrent roots retain their own events, snapshots, and target receipts',
   const output = await analyze({ targets, previousSnapshots: { ...previous(targets[0]), ...previous(targets[1]) }, __monitorExecution: f.context });
   assert.equal(output.success, true, output.error);
   for (const batch of f.batches) {
-    if (!batch.output.data.changeEvents?.length) continue;
+    if (!requestData(batch).changeEvents?.length) continue;
     assert.equal(batch.work.length, 1);
-    assert.ok(batch.output.data.changeEvents.every(event => event.assetId === batch.work[0].target));
-    assert.deepEqual(Object.keys(batch.output.data.snapshots), [batch.work[0].target]);
-    assert.equal(batch.output.data.surface_artifacts.changes.length, batch.output.data.changeEvents.length);
-    assert.ok(batch.output.data.surface_artifacts.changes.every(change =>
+    assert.ok(requestData(batch).changeEvents.every(event => event.assetId === batch.work[0].target));
+    assert.deepEqual(Object.keys(requestData(batch).snapshots), [batch.work[0].target]);
+    assert.equal(requestData(batch).surface_artifacts.changes.length, requestData(batch).changeEvents.length);
+    assert.ok(requestData(batch).surface_artifacts.changes.every(change =>
       change.asset_key === batch.work[0].target && change.asset_type === 'web' && change.source === 'api_monitor'));
   }
   assert.deepEqual(work(f).filter(item => item.complete).map(item => item.target).sort(), [...targets].sort());
@@ -198,7 +199,7 @@ test('monitor execution rejects a missing protocol without HTTP requests', async
   const f = fixture([target]);
   const output = await analyze({ targets: [target], __monitorExecution: {} });
   assert.equal(output.success, false);
-  assert.match(output.error, /monitor-results-v1/);
+  assert.match(output.error, /monitor-results-v2/);
   assert.equal(f.requests.length, 0);
 });
 
@@ -207,7 +208,7 @@ async function apiSubmissionBytes(count) {
   const f = fixture(targets);
   let workItems = 0, bytes = 0, maxBytes = 0, requests = 0;
   globalThis.Sentinel.Monitor.commitResults = async request => {
-    const delta = request.output.data;
+    const delta = requestData(request);
     for (const forbidden of ['targets', 'urls', 'target_objects', 'service_targets', 'previousSnapshots', 'dictionaryEntries']) {
       assert.equal(Object.hasOwn(delta, forbidden), false, `API delta contains ${forbidden}`);
     }

@@ -3,16 +3,17 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.3.8
+ * @version 1.3.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
  * @input_mode asset
  * @target_asset_types ["domain","web"]
  * @category recon
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags favicon, icon-hash, fingerprint, web, asm, surface, dictionary, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @tags favicon, icon-hash, fingerprint, web, asm, surface, dictionary, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v2
  * @description Fetch favicons from website targets, discover or enrich web assets, and emit favicon fingerprints/evidence
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';

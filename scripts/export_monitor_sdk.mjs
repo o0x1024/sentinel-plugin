@@ -44,7 +44,7 @@ const sdk = result.outputFiles[0].text;
 if (sdk.split('\n').length > 2000) throw new Error('Embedded monitor SDK exceeds 2000 lines');
 const manifest = JSON.stringify({
   format: 'sentinel-monitor-sdk/v1', esbuild: esbuild.version, namespace: 'SENTINEL_MONITOR_RESULT_SDK',
-  protocol: 'monitor-results-v1', stream_tag: 'monitor:results-stream-v1',
+  protocol: 'monitor-results-v2', stream_tag: 'monitor:results-stream-v2',
   sources_sha256: sourcesSha256, sources,
   sdk_sha256: createHash('sha256').update(sdk).digest('hex'),
 }, null, 2) + '\n';

@@ -3,16 +3,17 @@
  *
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.10
+ * @version 1.2.11
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
  * @input_mode asset
  * @target_asset_types ["web"]
  * @category discovery
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags directory, bruteforce, discovery, fuzzing, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @tags directory, bruteforce, discovery, fuzzing, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v2
  * @description Discover hidden directories, files, and endpoints on web servers using wordlist-based brute forcing
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';

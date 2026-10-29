@@ -1,3 +1,4 @@
+import { requestData } from './monitor_request_test_support.mjs';
 // Deterministic payload-growth regressions. No network, production DB, or installed-plugin writes.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +16,7 @@ const sizes = [64,256,1024];
 const root = index => `root${String(index).padStart(4,'0')}.test`;
 const ip = index => `10.20.${Math.floor(index/256)}.${index%256}`;
 const context = (id, targets, maxWork = 32) => ({ task_id:'payload-growth',task_name:'Payload fixture',program_id:'owned',execution_mode:'test',started_at:'2026-10-29T00:00:00Z',current_plugin:id,current_plugin_index:1,completed_steps:0,total_steps:1,
-  result_stream:{protocol:'monitor-results-v1',targets,max_work_items:maxWork,max_pending_commits:2,max_bytes:2097152} });
+  result_stream:{protocol:'monitor-results-v2',targets,max_work_items:maxWork,max_pending_commits:2,max_bytes:2097152} });
 const ok = body => new Response(JSON.stringify(body), { status:200 });
 const rules = Array.from({length:64},(_,i) => ({word:`unmatched-rule-${i}`,metadata:{note:marker,matchers:[{part:'banner',type:'contains',value:'NEVER-MATCH-THIS'}]}}));
 
@@ -29,7 +30,7 @@ function capture(keep = false) {
       assert.ok(Buffer.byteLength(encoded)<4096,'progress is scalar metadata for the current work');
       stats.progressBytes+=Buffer.byteLength(encoded);return true;
     },commitResults:async request => {
-      const data = request.output.data;
+      const data = requestData(request);
       for (const key of forbidden) assert.ok(!Object.hasOwn(data,key),`delta must not echo ${key}`);
       const encoded = JSON.stringify(request);
       assert.ok(!encoded.includes(marker),'unrelated history/rules must stay outside saved deltas');
@@ -100,7 +101,7 @@ test('FOFA pages publish only current response assets; query-complete does not r
   const stats=capture(true);const params=input('fofa_asset_monitor',1,1);params.maxPages=3;
   fetchHandler=async raw=>{const page=Number(new URL(raw).searchParams.get('page'));return ok({error:false,size:2,results:[[`https://page${page}.root0000.test`,'192.0.2.1','443','https','owned',`page${page}.root0000.test`,'now']]});};
   const output=await plugins.fofa_asset_monitor.analyze(params);assert.equal(output.success,true);
-  assert.equal(stats.webs,2);const complete=stats.requests.find(request=>request.work[0].key.endsWith(':complete')).output.data;
+  assert.equal(stats.webs,2);const complete=requestData(stats.requests.find(request=>request.work[0].key.endsWith(':complete')));
   for (const key of ['queries','assets','subdomains','urls','ips']) assert.ok(!Object.hasOwn(complete,key));
   assert.ok(complete.results.every(row=>!Object.hasOwn(row,'assets')));
   assert.ok(!Object.hasOwn(complete.surface_artifacts,'webs'));assert.ok(!Object.hasOwn(complete.surface_artifacts,'domains'));
@@ -111,7 +112,7 @@ test('subdomain root-complete retains the full new baseline without replaying pr
   const stats=capture(true);const params=input('subdomain_enumerator',1,1);params.sources=['crtsh','alienvault'];
   fetchHandler=async raw=>String(raw).includes('crt.sh')?ok([{name_value:'api.root0000.test'}]):ok({passive_dns:[{hostname:'www.root0000.test'}]});
   const output=await plugins.subdomain_enumerator.analyze(params);assert.equal(output.success,true);
-  const complete=stats.requests.find(request=>request.work[0].key==='domain-complete').output.data;
+  const complete=requestData(stats.requests.find(request=>request.work[0].key==='domain-complete'));
   for (const key of ['subdomains','sourceResults','slowSources','skippedSources']) assert.ok(!Object.hasOwn(complete,key));
   for (const key of ['domains','relations']) assert.ok(!Object.hasOwn(complete.surface_artifacts,key));
   assert.deepEqual(complete.snapshots['root0000.test'].subdomains,['api.root0000.test','www.root0000.test']);
@@ -122,12 +123,12 @@ test('port host-complete compares one complete baseline without replaying alread
   const stats=capture(true);const params=input('port_monitor',1,1);params.ports=Array.from({length:512},(_,i)=>i+1);
   globalThis.Sentinel.Network.scanPorts=async request=>({success:true,results:request.targets.map(target=>({host:target.host,resolved_ips:[target.host],open_ports:request.ports}))});
   const output=await plugins.port_monitor.analyze(params);assert.equal(output.success,true);
-  assert.equal(stats.ports,512);const complete=stats.requests.find(request=>request.work[0].key==='host-complete').output.data;
+  assert.equal(stats.ports,512);const complete=requestData(stats.requests.find(request=>request.work[0].key==='host-complete'));
   for (const key of ['ports','domains','ips','relations']) assert.ok(!Object.hasOwn(complete.surface_artifacts,key));
   assert.ok(complete.results.every(result=>!Object.hasOwn(result,'knownOpenPorts')&&!Object.hasOwn(result,'snapshot')));
   assert.equal(complete.snapshots[ip(0)].openPorts.length,512);
-  assert.equal(stats.requests.reduce((sum, request)=>sum+(request.output.data.summary?.totalTargets || 0),0),1);
-  assert.equal(stats.requests.reduce((sum, request)=>sum+(request.output.data.summary?.totalOpenPorts || 0),0),512);
+  assert.equal(stats.requests.reduce((sum, request)=>sum+(requestData(request).summary?.totalTargets || 0),0),1);
+  assert.equal(stats.requests.reduce((sum, request)=>sum+(requestData(request).summary?.totalOpenPorts || 0),0),512);
 });
 
 test('FOFA many-page saved byte volume stays linear including its one complete baseline',async()=>{

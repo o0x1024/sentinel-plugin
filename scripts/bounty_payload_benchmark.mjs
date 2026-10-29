@@ -1,35 +1,25 @@
+import { requestData } from './monitor_request_test_support.mjs';
 /** Node 24 producer/serialization benchmark. All network and native APIs are fixtures. */
 import { readFile, writeFile } from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import { createPayloadCase } from './bounty_payload_fixtures.mjs';
 
 const root = new URL('../', import.meta.url);
-const cwd = fileURLToPath(root);
 const forbidden = ['targets', 'target_objects', 'service_targets', '__monitorExecution',
     'previousSnapshots', 'previous_snapshots', 'dictionaryEntries', 'dictionary'];
 const argv = process.argv.slice(2);
 function option(name, fallback) { const index = argv.indexOf(name); return index < 0 ? fallback : argv[index + 1]; }
 const sizes = option('--sizes', '64,256,1024').split(',').map(Number);
-const variant = option('--variant', 'both');
-const baselineRef = option('--baseline-ref', 'd92c508');
+const variant = option('--variant', 'current');
 const outputPath = option('--output', undefined);
 const selected = option('--plugins', '').split(',').filter(Boolean);
 const assertLinear = argv.includes('--assert-linear');
 if (sizes.some(size => !Number.isInteger(size) || size < 1 || size > 4096)) throw new Error('Sizes must be integers between 1 and 4096');
-if (!['baseline', 'current', 'both'].includes(variant)) throw new Error('Variant must be baseline, current, or both');
-if (!/^[a-zA-Z0-9_./-]+$/.test(baselineRef)) throw new Error('Invalid baseline Git ref');
-
-function fromGit(path) {
-    return execFileSync('rtk', ['proxy', 'git', 'show', `${baselineRef}:${path}`], { cwd, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 });
-}
-
+if (variant !== 'current' || argv.includes('--baseline-ref')) throw new Error('This benchmark measures current v2 producers only; historical measurements use their original checkout');
 const manifest = JSON.parse(await readFile(new URL('plugins.json', root), 'utf8'));
-const baselineManifest = JSON.parse(fromGit('plugins.json'));
 const plugins = manifest.plugins.filter(plugin => plugin.main_category === 'bounty' && (!selected.length || selected.includes(plugin.id)));
 if (selected.some(id => !plugins.some(plugin => plugin.id === id))) throw new Error('Unknown bounty plugin selection');
-const variants = variant === 'both' ? ['baseline', 'current'] : [variant];
+const variants = ['current'];
 const original = { Sentinel: globalThis.Sentinel, fetch: globalThis.fetch, Deno: globalThis.Deno };
 // Some real plugins capture fetch when their module loads. Keep one forwarding
 // function so every measurement uses its own fixture and counters.
@@ -57,7 +47,7 @@ function collector(stats) {
         stats.failed_work_items += request.work.filter(work => work.status === 'failed').length;
         stats.failed_completed_targets += request.work.filter(work => work.status === 'failed' && work.complete).length;
         stats.skipped_work_items += request.work.filter(work => work.status === 'skipped').length;
-        const data = request.output.data;
+        const data = requestData(request);
         for (const key of forbidden) if (Object.hasOwn(data, key)) {
             stats.forbidden_fields[key] = (stats.forbidden_fields[key] || 0) + 1;
             const value = data[key];
@@ -99,9 +89,8 @@ async function execute(module, id, count) {
 try {
     for (const plugin of plugins) {
         for (const label of variants) {
-            const code = label === 'baseline' ? fromGit(`plugins/bounty/${plugin.id}.ts`)
-                : await readFile(new URL(`plugins/bounty/${plugin.id}.ts`, root), 'utf8');
-            const version = (label === 'baseline' ? baselineManifest : manifest).plugins.find(item => item.id === plugin.id).version;
+            const code = await readFile(new URL(`plugins/bounty/${plugin.id}.ts`, root), 'utf8');
+            const version = manifest.plugins.find(item => item.id === plugin.id).version;
             if (code.match(/@version\s+(\S+)/)?.[1] !== version) throw new Error(`${plugin.id}: published version differs from ${label} manifest`);
             const hash = createHash('sha256').update(code).digest('hex');
             const module = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
@@ -134,7 +123,7 @@ try {
             if (assertLinear && !linear) throw new Error(`${plugin.id}: non-linear submitted payload growth ${byteRatio.toFixed(3)} for ${targetRatio}x inputs`);
         }
     }
-    const report = { baseline_ref: baselineRef, sizes, methodology: {
+    const report = { protocol: 'monitor-results-v2', sizes, methodology: {
         execution: 'Node 24 real published plugin producers and embedded shared helper; every HTTP, DNS, TLS, AST, dictionary and native operation is a deterministic fixture',
         native_subdomain_brute: 'Native engine work is emitted by a fixture; this does not measure Rust DNS/verification throughput',
         record_unit: 'One committed work item; records/s is not database row throughput',

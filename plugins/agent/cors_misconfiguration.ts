@@ -3,7 +3,7 @@
  *
  * @plugin cors_misconfiguration
  * @name CORS Misconfiguration Detector
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
@@ -11,629 +11,142 @@
  * @target_asset_types ["web"]
  * @category vuln
  * @default_severity medium
- * @tags cors, vulnerability, security, web, headers
+ * @tags cors, vulnerability, security, web, headers, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Detect CORS (Cross-Origin Resource Sharing) misconfigurations that could allow unauthorized cross-origin access
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
  */
-
-interface ToolInput {
-    url: string;
-    method?: string;
-    headers?: Record<string, string>;
-    userAgent?: string;
-    testOrigins?: string[];
-    checkCredentials?: boolean;
-    checkWildcard?: boolean;
-    checkNullOrigin?: boolean;
-    checkSubdomains?: boolean;
-}
-
-interface CorsTest {
-    origin: string;
-    testType: string;
-    vulnerable: boolean;
-    severity: "critical" | "high" | "medium" | "low" | "info";
-    responseHeaders: {
-        accessControlAllowOrigin?: string;
-        accessControlAllowCredentials?: string;
-        accessControlAllowMethods?: string;
-        accessControlAllowHeaders?: string;
-        accessControlExposeHeaders?: string;
-        accessControlMaxAge?: string;
-    };
-    evidence?: string;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        url: string;
-        tests: CorsTest[];
-        summary: {
-            totalTests: number;
-            vulnerableCount: number;
-            bySeverity: Record<string, number>;
-            byTestType: Record<string, number>;
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-// Test types and their descriptions
-const TEST_TYPES = {
-    reflected_origin: "Origin header is reflected back",
-    wildcard_origin: "Wildcard (*) origin allowed",
-    null_origin: "Null origin allowed",
-    subdomain_bypass: "Subdomain bypass possible",
-    prefix_bypass: "Prefix bypass possible",
-    suffix_bypass: "Suffix bypass possible",
-    special_chars: "Special characters bypass",
-    credentials_with_wildcard: "Credentials allowed with wildcard",
-    credentials_with_reflected: "Credentials allowed with reflected origin",
-};
-
-const DEFAULT_CONCURRENCY = 8;
-
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    if (tasks.length === 0) {
-        return [];
-    }
-
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= tasks.length) {
-                return;
-            }
-            results[index] = await tasks[index]();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
-}
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: {
-                type: "string",
-                description: "Target URL to test for CORS misconfigurations"
-            },
-            method: {
-                type: "string",
-                enum: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                description: "HTTP method to use",
-                default: "GET"
-            },
-            headers: {
-                type: "object",
-                description: "Additional headers to include",
-                additionalProperties: { type: "string" }
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            testOrigins: {
-                type: "array",
-                items: { type: "string" },
-                description: "Additional origins to test"
-            },
-            checkCredentials: {
-                type: "boolean",
-                description: "Check if credentials are allowed",
-                default: true
-            },
-            checkWildcard: {
-                type: "boolean",
-                description: "Check for wildcard origin",
-                default: true
-            },
-            checkNullOrigin: {
-                type: "boolean",
-                description: "Check for null origin",
-                default: true
-            },
-            checkSubdomains: {
-                type: "boolean",
-                description: "Check for subdomain bypass",
-                default: true
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    url: { type: "string", description: "Target URL" },
-                    tests: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                origin: { type: "string" },
-                                testType: { type: "string" },
-                                vulnerable: { type: "boolean" },
-                                severity: { type: "string" },
-                                evidence: { type: "string" }
-                            }
-                        },
-                        description: "CORS test results"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTests: { type: "integer" },
-                            vulnerableCount: { type: "integer" },
-                            bySeverity: { type: "object" }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Extract domain from URL
- */
-function extractDomain(url: string): string {
-    try {
-        const urlObj = new URL(url);
-        return urlObj.hostname;
-    } catch {
-        return url;
-    }
-}
-
-/**
- * Extract base domain (e.g., example.com from sub.example.com)
- */
-function extractBaseDomain(domain: string): string {
-    const parts = domain.split(".");
-    if (parts.length <= 2) {
-        return domain;
-    }
-    // Handle common TLDs
-    const commonTlds = ["co.uk", "com.au", "co.nz", "co.jp", "com.br", "com.cn"];
-    const lastTwo = parts.slice(-2).join(".");
-    if (commonTlds.includes(lastTwo)) {
-        return parts.slice(-3).join(".");
-    }
-    return parts.slice(-2).join(".");
-}
-
-/**
- * Generate test origins based on target URL
- */
-function generateTestOrigins(targetUrl: string): { origin: string; testType: string }[] {
-    const domain = extractDomain(targetUrl);
-    const baseDomain = extractBaseDomain(domain);
-    const protocol = targetUrl.startsWith("https") ? "https" : "http";
-    
-    const origins: { origin: string; testType: string }[] = [];
-    
-    // Reflected origin test - use attacker domain
-    origins.push({
-        origin: "https://evil.com",
-        testType: "reflected_origin",
-    });
-    
-    // Null origin
-    origins.push({
-        origin: "null",
-        testType: "null_origin",
-    });
-    
-    // Subdomain bypass attempts
-    origins.push({
-        origin: `${protocol}://attacker.${baseDomain}`,
-        testType: "subdomain_bypass",
-    });
-    origins.push({
-        origin: `${protocol}://evil.${domain}`,
-        testType: "subdomain_bypass",
-    });
-    
-    // Prefix bypass attempts
-    origins.push({
-        origin: `${protocol}://${domain}.evil.com`,
-        testType: "prefix_bypass",
-    });
-    origins.push({
-        origin: `${protocol}://evil${domain}`,
-        testType: "prefix_bypass",
-    });
-    
-    // Suffix bypass attempts
-    origins.push({
-        origin: `${protocol}://evil.com.${domain}`,
-        testType: "suffix_bypass",
-    });
-    origins.push({
-        origin: `${protocol}://${baseDomain}.evil.com`,
-        testType: "suffix_bypass",
-    });
-    
-    // Special character bypass attempts
-    origins.push({
-        origin: `${protocol}://${domain}%60.evil.com`,
-        testType: "special_chars",
-    });
-    origins.push({
-        origin: `${protocol}://${domain}_.evil.com`,
-        testType: "special_chars",
-    });
-    origins.push({
-        origin: `${protocol}://${domain}!.evil.com`,
-        testType: "special_chars",
-    });
-    origins.push({
-        origin: `${protocol}://${domain}@evil.com`,
-        testType: "special_chars",
-    });
-    
-    // Protocol variations
-    origins.push({
-        origin: `http://${domain}`,
-        testType: "reflected_origin",
-    });
-    
-    // Localhost variations
-    origins.push({
-        origin: "http://localhost",
-        testType: "reflected_origin",
-    });
-    origins.push({
-        origin: "http://127.0.0.1",
-        testType: "reflected_origin",
-    });
-    
-    return origins;
-}
-
-/**
- * Test CORS with a specific origin
- */
-async function testCors(
-    url: string,
-    origin: string,
-    testType: string,
-    options: {
-        method: string;
-        headers: Record<string, string>;
-    }
-): Promise<CorsTest> {
-    const result: CorsTest = {
-        origin,
-        testType,
-        vulnerable: false,
-        severity: "info",
-        responseHeaders: {},
-    };
-    
-    try {
-        // Make request with Origin header
-        const response = await fetch(url, {
-            method: options.method,
-            headers: {
-                ...options.headers,
-                "Origin": origin,
-            },
-            timeout: 10000,
-        });
-        
-        // Extract CORS headers
-        const acao = response.headers.get("access-control-allow-origin");
-        const acac = response.headers.get("access-control-allow-credentials");
-        const acam = response.headers.get("access-control-allow-methods");
-        const acah = response.headers.get("access-control-allow-headers");
-        const aceh = response.headers.get("access-control-expose-headers");
-        const acma = response.headers.get("access-control-max-age");
-        
-        result.responseHeaders = {
-            accessControlAllowOrigin: acao || undefined,
-            accessControlAllowCredentials: acac || undefined,
-            accessControlAllowMethods: acam || undefined,
-            accessControlAllowHeaders: acah || undefined,
-            accessControlExposeHeaders: aceh || undefined,
-            accessControlMaxAge: acma || undefined,
-        };
-        
-        // Check for vulnerabilities
-        if (!acao) {
-            // No CORS headers - not vulnerable but also not configured
-            return result;
-        }
-        
-        // Check for wildcard with credentials (critical)
-        if (acao === "*" && acac === "true") {
-            result.vulnerable = true;
-            result.severity = "critical";
-            result.evidence = "Wildcard origin (*) with credentials allowed - this is a critical misconfiguration";
-            return result;
-        }
-        
-        // Check for wildcard origin
-        if (acao === "*") {
-            result.vulnerable = true;
-            result.severity = "low";
-            result.evidence = "Wildcard origin (*) allowed - may expose data to any origin";
-            return result;
-        }
-        
-        // Check for null origin with credentials
-        if (origin === "null" && acao === "null" && acac === "true") {
-            result.vulnerable = true;
-            result.severity = "high";
-            result.evidence = "Null origin allowed with credentials - exploitable via sandboxed iframes";
-            return result;
-        }
-        
-        // Check for null origin
-        if (origin === "null" && acao === "null") {
-            result.vulnerable = true;
-            result.severity = "medium";
-            result.evidence = "Null origin allowed - exploitable via sandboxed iframes";
-            return result;
-        }
-        
-        // Check for reflected origin with credentials (critical)
-        if (acao === origin && acac === "true" && origin !== extractDomain(url)) {
-            result.vulnerable = true;
-            result.severity = "critical";
-            result.evidence = `Origin ${origin} is reflected with credentials allowed - full account takeover possible`;
-            return result;
-        }
-        
-        // Check for reflected origin
-        if (acao === origin && origin !== extractDomain(url)) {
-            // Check if it's a legitimate subdomain
-            const targetDomain = extractBaseDomain(extractDomain(url));
-            const originDomain = extractBaseDomain(extractDomain(origin));
-            
-            if (targetDomain !== originDomain) {
-                result.vulnerable = true;
-                result.severity = acac === "true" ? "high" : "medium";
-                result.evidence = `Origin ${origin} is reflected - cross-origin access possible`;
-                return result;
-            }
-        }
-        
-        return result;
-        
-    } catch (error: any) {
-        result.error = error.message || String(error);
-        return result;
-    }
-}
-
-/**
- * Test preflight (OPTIONS) request
- */
-async function testPreflight(
-    url: string,
-    origin: string,
-    options: {
-        headers: Record<string, string>;
-    }
-): Promise<CorsTest> {
-    const result: CorsTest = {
-        origin,
-        testType: "preflight",
-        vulnerable: false,
-        severity: "info",
-        responseHeaders: {},
-    };
-    
-    try {
-        const response = await fetch(url, {
-            method: "OPTIONS",
-            headers: {
-                ...options.headers,
-                "Origin": origin,
-                "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "X-Custom-Header",
-            },
-            timeout: 10000,
-        });
-        
-        const acao = response.headers.get("access-control-allow-origin");
-        const acac = response.headers.get("access-control-allow-credentials");
-        const acam = response.headers.get("access-control-allow-methods");
-        const acah = response.headers.get("access-control-allow-headers");
-        
-        result.responseHeaders = {
-            accessControlAllowOrigin: acao || undefined,
-            accessControlAllowCredentials: acac || undefined,
-            accessControlAllowMethods: acam || undefined,
-            accessControlAllowHeaders: acah || undefined,
-        };
-        
-        // Check for overly permissive methods
-        if (acam && /\*|DELETE|PUT|PATCH/i.test(acam)) {
-            if (acao === "*" || acao === origin) {
-                result.vulnerable = true;
-                result.severity = "medium";
-                result.evidence = `Dangerous methods allowed: ${acam}`;
-            }
-        }
-        
-        // Check for overly permissive headers
-        if (acah && /\*|authorization|cookie/i.test(acah)) {
-            if (acao === "*" || acao === origin) {
-                result.vulnerable = true;
-                result.severity = "medium";
-                result.evidence = `Sensitive headers allowed: ${acah}`;
-            }
-        }
-        
-        return result;
-        
-    } catch (error: any) {
-        result.error = error.message || String(error);
-        return result;
-    }
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        // Validate input
-        if (!input.url || typeof input.url !== "string") {
-            return {
-                success: false,
-                error: "Invalid input: url parameter is required"
-            };
-        }
-        
-        let url = input.url;
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            url = `https://${url}`;
-        }
-        
-        const method = input.method || "GET";
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-                const checkCredentials = input.checkCredentials !== false;
-        const checkWildcard = input.checkWildcard !== false;
-        const checkNullOrigin = input.checkNullOrigin !== false;
-        const checkSubdomains = input.checkSubdomains !== false;
-        
-        const headers: Record<string, string> = {
-            "User-Agent": userAgent,
-            "Accept": "*/*",
-            ...(input.headers || {}),
-        };
-        
-        // Generate test origins
-        let testOrigins = generateTestOrigins(url);
-        
-        // Filter based on options
-        if (!checkNullOrigin) {
-            testOrigins = testOrigins.filter(t => t.testType !== "null_origin");
-        }
-        if (!checkSubdomains) {
-            testOrigins = testOrigins.filter(t => t.testType !== "subdomain_bypass");
-        }
-        
-        // Add custom test origins
-        if (input.testOrigins && input.testOrigins.length > 0) {
-            for (const origin of input.testOrigins) {
-                testOrigins.push({
-                    origin,
-                    testType: "custom",
-                });
-            }
-        }
-        
-        // Run tests
-        const tests: CorsTest[] = [];
-        
-        // First, do a baseline request without Origin header
-        try {
-            const baselineResponse = await fetch(url, {
-                method,
-                headers,
-                timeout: 10000,
-            });
-            
-            const baselineAcao = baselineResponse.headers.get("access-control-allow-origin");
-            
-            // Check for wildcard in baseline
-            if (checkWildcard && baselineAcao === "*") {
-                tests.push({
-                    origin: "(no origin)",
-                    testType: "wildcard_origin",
-                    vulnerable: true,
-                    severity: "low",
-                    responseHeaders: {
-                        accessControlAllowOrigin: baselineAcao || undefined,
-                    },
-                    evidence: "Wildcard origin (*) returned without Origin header",
-                });
-            }
-        } catch {
-            // Ignore baseline errors
-        }
-        
-        // Test each origin
-        tests.push(...await runWithConcurrency(testOrigins.map(({ origin, testType }) => async () => {
-                return await testCors(url, origin, testType, {
-                    method,
-                    headers,
-                });
-            }), DEFAULT_CONCURRENCY));
-        
-        // Test preflight
-        const preflightResult = await testPreflight(url, "https://evil.com", {
-            headers,
-        });
-        tests.push(preflightResult);
-        
-        // Build summary
-        const vulnerableTests = tests.filter(t => t.vulnerable);
-        const bySeverity: Record<string, number> = {};
-        const byTestType: Record<string, number> = {};
-        
-        for (const test of vulnerableTests) {
-            bySeverity[test.severity] = (bySeverity[test.severity] || 0) + 1;
-            byTestType[test.testType] = (byTestType[test.testType] || 0) + 1;
-        }
-        
-        return {
-            success: true,
-            data: {
-                url,
-                tests,
-                summary: {
-                    totalTests: tests.length,
-                    vulnerableCount: vulnerableTests.length,
-                    bySeverity,
-                    byTestType,
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/cors_misconfiguration/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;var DEFAULT_CONCURRENCY=8;async function runWithConcurrency(tasks,concurrency){if(tasks.length===0){return[]}const limit=Math.max(1,Math.min(concurrency,tasks.length));
+const results=new Array(tasks.length);let nextIndex=0;const workers=Array.from({length:limit},async()=>{while(true){const index=nextIndex++;if(index>=tasks.length){
+return}results[index]=await tasks[index]()}});await Promise.all(workers);return results}function get_input_schema(){return{type:"object",required:["url"],properties:{
+url:{type:"string",description:"Target URL to test for CORS misconfigurations"},method:{type:"string",enum:["GET","POST","PUT","DELETE","OPTIONS"],description:"\
+HTTP method to use",default:"GET"},headers:{type:"object",description:"Additional headers to include",additionalProperties:{type:"string"}},userAgent:{type:"str\
+ing",description:"Custom User-Agent header"},testOrigins:{type:"array",items:{type:"string"},description:"Additional origins to test"},checkCredentials:{type:"b\
+oolean",description:"Check if credentials are allowed",default:true},checkWildcard:{type:"boolean",description:"Check for wildcard origin",default:true},checkNullOrigin:{
+type:"boolean",description:"Check for null origin",default:true},checkSubdomains:{type:"boolean",description:"Check for subdomain bypass",default:true}}}}pluginGlobals.
+get_input_schema=get_input_schema;function getBusinessOutputSchema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the operation\
+ succeeded"},data:{type:"object",properties:{url:{type:"string",description:"Target URL"},tests:{type:"array",items:{type:"object",properties:{origin:{type:"str\
+ing"},testType:{type:"string"},vulnerable:{type:"boolean"},severity:{type:"string"},evidence:{type:"string"}}},description:"CORS test results"},summary:{type:"o\
+bject",properties:{totalTests:{type:"integer"},vulnerableCount:{type:"integer"},bySeverity:{type:"object"}}}}},error:{type:"string",description:"Error message i\
+f failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function extractDomain(url){try{const urlObj=new URL(url);return urlObj.hostname}catch{return url}}
+function extractBaseDomain(domain){const parts=domain.split(".");if(parts.length<=2){return domain}const commonTlds=["co.uk","com.au","co.nz","co.jp","com.br","\
+com.cn"];const lastTwo=parts.slice(-2).join(".");if(commonTlds.includes(lastTwo)){return parts.slice(-3).join(".")}return parts.slice(-2).join(".")}function generateTestOrigins(targetUrl){
+const domain=extractDomain(targetUrl);const baseDomain=extractBaseDomain(domain);const protocol=targetUrl.startsWith("https")?"https":"http";const origins=[];origins.
+push({origin:"https://evil.com",testType:"reflected_origin"});origins.push({origin:"null",testType:"null_origin"});origins.push({origin:`${protocol}://attacker.${baseDomain}`,
+testType:"subdomain_bypass"});origins.push({origin:`${protocol}://evil.${domain}`,testType:"subdomain_bypass"});origins.push({origin:`${protocol}://${domain}.ev\
+il.com`,testType:"prefix_bypass"});origins.push({origin:`${protocol}://evil${domain}`,testType:"prefix_bypass"});origins.push({origin:`${protocol}://evil.com.${domain}`,
+testType:"suffix_bypass"});origins.push({origin:`${protocol}://${baseDomain}.evil.com`,testType:"suffix_bypass"});origins.push({origin:`${protocol}://${domain}%\
+60.evil.com`,testType:"special_chars"});origins.push({origin:`${protocol}://${domain}_.evil.com`,testType:"special_chars"});origins.push({origin:`${protocol}://${domain}\
+!.evil.com`,testType:"special_chars"});origins.push({origin:`${protocol}://${domain}@evil.com`,testType:"special_chars"});origins.push({origin:`http://${domain}`,
+testType:"reflected_origin"});origins.push({origin:"http://localhost",testType:"reflected_origin"});origins.push({origin:"http://127.0.0.1",testType:"reflected_\
+origin"});return origins}async function testCors(url,origin,testType,options){const result={origin,testType,vulnerable:false,severity:"info",responseHeaders:{}};
+try{const response=await observedFetch(url,{method:options.method,headers:{...options.headers,Origin:origin},timeout:1e4});const acao=response.headers.get("acce\
+ss-control-allow-origin");const acac=response.headers.get("access-control-allow-credentials");const acam=response.headers.get("access-control-allow-methods");const acah=response.
+headers.get("access-control-allow-headers");const aceh=response.headers.get("access-control-expose-headers");const acma=response.headers.get("access-control-max\
+-age");result.responseHeaders={accessControlAllowOrigin:acao||void 0,accessControlAllowCredentials:acac||void 0,accessControlAllowMethods:acam||void 0,accessControlAllowHeaders:acah||
+void 0,accessControlExposeHeaders:aceh||void 0,accessControlMaxAge:acma||void 0};if(!acao){return result}if(acao==="*"&&acac==="true"){result.vulnerable=true;result.
+severity="critical";result.evidence="Wildcard origin (*) with credentials allowed - this is a critical misconfiguration";return result}if(acao==="*"){result.vulnerable=
+true;result.severity="low";result.evidence="Wildcard origin (*) allowed - may expose data to any origin";return result}if(origin==="null"&&acao==="null"&&acac===
+"true"){result.vulnerable=true;result.severity="high";result.evidence="Null origin allowed with credentials - exploitable via sandboxed iframes";return result}if(origin===
+"null"&&acao==="null"){result.vulnerable=true;result.severity="medium";result.evidence="Null origin allowed - exploitable via sandboxed iframes";return result}if(acao===
+origin&&acac==="true"&&origin!==extractDomain(url)){result.vulnerable=true;result.severity="critical";result.evidence=`Origin ${origin} is reflected with creden\
+tials allowed - full account takeover possible`;return result}if(acao===origin&&origin!==extractDomain(url)){const targetDomain=extractBaseDomain(extractDomain(
+url));const originDomain=extractBaseDomain(extractDomain(origin));if(targetDomain!==originDomain){result.vulnerable=true;result.severity=acac==="true"?"high":"m\
+edium";result.evidence=`Origin ${origin} is reflected - cross-origin access possible`;return result}}return result}catch(error){result.error=error.message||String(
+error);return result}}async function testPreflight(url,origin,options){const result={origin,testType:"preflight",vulnerable:false,severity:"info",responseHeaders:{}};
+try{const response=await observedFetch(url,{method:"OPTIONS",headers:{...options.headers,Origin:origin,"Access-Control-Request-Method":"POST","Access-Control-Re\
+quest-Headers":"X-Custom-Header"},timeout:1e4});const acao=response.headers.get("access-control-allow-origin");const acac=response.headers.get("access-control-a\
+llow-credentials");const acam=response.headers.get("access-control-allow-methods");const acah=response.headers.get("access-control-allow-headers");result.responseHeaders=
+{accessControlAllowOrigin:acao||void 0,accessControlAllowCredentials:acac||void 0,accessControlAllowMethods:acam||void 0,accessControlAllowHeaders:acah||void 0};
+if(acam&&/\*|DELETE|PUT|PATCH/i.test(acam)){if(acao==="*"||acao===origin){result.vulnerable=true;result.severity="medium";result.evidence=`Dangerous methods all\
+owed: ${acam}`}}if(acah&&/\*|authorization|cookie/i.test(acah)){if(acao==="*"||acao===origin){result.vulnerable=true;result.severity="medium";result.evidence=`S\
+ensitive headers allowed: ${acah}`}}return result}catch(error){result.error=error.message||String(error);return result}}async function analyzeBusiness(input){try{
+if(!input.url||typeof input.url!=="string"){return{success:false,error:"Invalid input: url parameter is required"}}let url=input.url;if(!url.startsWith("http://")&&
+!url.startsWith("https://")){url=`https://${url}`}const method=input.method||"GET";const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT 10.0; Win64; x64) A\
+ppleWebKit/537.36";const checkCredentials=input.checkCredentials!==false;const checkWildcard=input.checkWildcard!==false;const checkNullOrigin=input.checkNullOrigin!==
+false;const checkSubdomains=input.checkSubdomains!==false;const headers={"User-Agent":userAgent,Accept:"*/*",...input.headers||{}};let testOrigins=generateTestOrigins(
+url);if(!checkNullOrigin){testOrigins=testOrigins.filter(t=>t.testType!=="null_origin")}if(!checkSubdomains){testOrigins=testOrigins.filter(t=>t.testType!=="sub\
+domain_bypass")}if(input.testOrigins&&input.testOrigins.length>0){for(const origin of input.testOrigins){testOrigins.push({origin,testType:"custom"})}}const tests=[];
+try{const baselineResponse=await observedFetch(url,{method,headers,timeout:1e4});const baselineAcao=baselineResponse.headers.get("access-control-allow-origin");
+if(checkWildcard&&baselineAcao==="*"){tests.push({origin:"(no origin)",testType:"wildcard_origin",vulnerable:true,severity:"low",responseHeaders:{accessControlAllowOrigin:baselineAcao||
+void 0},evidence:"Wildcard origin (*) returned without Origin header"})}}catch{}tests.push(...await runWithConcurrency(testOrigins.map(({origin,testType})=>async()=>{
+return await testCors(url,origin,testType,{method,headers})}),DEFAULT_CONCURRENCY));const preflightResult=await testPreflight(url,"https://evil.com",{headers});
+tests.push(preflightResult);const vulnerableTests=tests.filter(t=>t.vulnerable);const bySeverity={};const byTestType={};for(const test of vulnerableTests){bySeverity[test.
+severity]=(bySeverity[test.severity]||0)+1;byTestType[test.testType]=(byTestType[test.testType]||0)+1}return{success:true,data:{url,tests,summary:{totalTests:tests.
+length,vulnerableCount:vulnerableTests.length,bySeverity,byTestType}}}}catch(error){return{success:false,error:error instanceof Error?error.message:String(error)}}}
+pluginGlobals.analyze=analyze;function get_output_schema(){return monitorToolOutputSchema(getBusinessOutputSchema())}async function analyze(input){return await runMonitorTool(
+input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

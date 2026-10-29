@@ -3,16 +3,17 @@
  *
  * @plugin cidr_mapper
  * @name CIDR Mapper
- * @version 1.0.4
+ * @version 1.0.5
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
  * @input_mode asset
  * @target_asset_types ["ip","ip_range"]
  * @category recon
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags cidr, ip, network, asm, surface, capability:monitor-events, monitor:results-stream-v1
+ * @tags cidr, ip, network, asm, surface, capability:monitor-events, monitor:results-stream-v2
  * @description Expand IPv4 CIDR blocks and individual IP targets into typed IP surface artifacts for ASM and network asset mapping workflows
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";

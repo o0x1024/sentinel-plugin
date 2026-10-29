@@ -3,7 +3,7 @@
  *
  * @plugin open_redirect_detector
  * @name Open Redirect Detector
- * @version 1.3.6
+ * @version 1.3.7
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
@@ -11,654 +11,163 @@
  * @target_asset_types ["web"]
  * @category vuln
  * @default_severity medium
- * @tags redirect, vulnerability, security, web, phishing
+ * @tags redirect, vulnerability, security, web, phishing, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Detect open redirect vulnerabilities by testing URL parameters with various redirect payloads
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
  */
-
-interface ToolInput {
-    url: string;
-    method?: string;
-    params?: Record<string, string>;
-    headers?: Record<string, string>;
-    userAgent?: string;
-    followRedirects?: boolean;
-    targetDomain?: string;
-    testAllParams?: boolean;
-}
-
-interface RedirectTest {
-    parameter: string;
-    payload: string;
-    payloadType: string;
-    vulnerable: boolean;
-    severity: "high" | "medium" | "low";
-    redirectUrl?: string;
-    responseCode?: number;
-    evidence?: string;
-    error?: string;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        url: string;
-        method: string;
-        tests: RedirectTest[];
-        summary: {
-            totalTests: number;
-            vulnerableCount: number;
-            testedParameters: string[];
-            vulnerableParameters: string[];
-            bySeverity: Record<string, number>;
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-// Redirect payloads organized by type
-const REDIRECT_PAYLOADS: Record<string, { payload: string; description: string }[]> = {
-    basic: [
-        { payload: "https://evil.com", description: "Basic HTTPS redirect" },
-        { payload: "http://evil.com", description: "Basic HTTP redirect" },
-        { payload: "//evil.com", description: "Protocol-relative redirect" },
-        { payload: "///evil.com", description: "Triple slash redirect" },
-        { payload: "////evil.com", description: "Quadruple slash redirect" },
-    ],
-    
-    encoded: [
-        { payload: "https:%2F%2Fevil.com", description: "URL encoded slashes" },
-        { payload: "https:%252F%252Fevil.com", description: "Double URL encoded" },
-        { payload: "https%3A%2F%2Fevil.com", description: "Fully URL encoded" },
-        { payload: "https%3A//evil.com", description: "Partially encoded colon" },
-        { payload: "%2F%2Fevil.com", description: "Encoded protocol-relative" },
-        { payload: "%252F%252Fevil.com", description: "Double encoded protocol-relative" },
-    ],
-    
-    bypass: [
-        { payload: "https://evil.com/", description: "Trailing slash" },
-        { payload: "https://evil.com//", description: "Double trailing slash" },
-        { payload: "https://evil.com?", description: "Trailing question mark" },
-        { payload: "https://evil.com#", description: "Trailing hash" },
-        { payload: "https://evil.com%00", description: "Null byte" },
-        { payload: "https://evil.com%0d%0a", description: "CRLF injection" },
-        { payload: "https://evil.com%09", description: "Tab character" },
-        { payload: "https://evil.com%20", description: "Space character" },
-    ],
-    
-    domain_bypass: [
-        { payload: "https://evil.com@legitimate.com", description: "Basic auth bypass" },
-        { payload: "https://legitimate.com@evil.com", description: "Reversed basic auth" },
-        { payload: "https://evil.com#legitimate.com", description: "Fragment bypass" },
-        { payload: "https://evil.com?legitimate.com", description: "Query bypass" },
-        { payload: "https://evil.com\\legitimate.com", description: "Backslash bypass" },
-        { payload: "https://evil.com%23legitimate.com", description: "Encoded hash bypass" },
-        { payload: "https://evil.com%40legitimate.com", description: "Encoded @ bypass" },
-    ],
-    
-    whitelist_bypass: [
-        { payload: "https://legitimate.com.evil.com", description: "Subdomain of attacker" },
-        { payload: "https://legitimatecom.evil.com", description: "Missing dot subdomain" },
-        { payload: "https://evil.com/legitimate.com", description: "Path bypass" },
-        { payload: "https://evil.com?url=legitimate.com", description: "Query param bypass" },
-        { payload: "https://evil.com#legitimate.com", description: "Fragment bypass" },
-        { payload: "https://evil-legitimate.com", description: "Hyphen bypass" },
-        { payload: "https://legitimate.evil.com", description: "Subdomain bypass" },
-    ],
-    
-    protocol: [
-        { payload: "javascript:alert(1)", description: "JavaScript protocol" },
-        { payload: "javascript://evil.com/%0aalert(1)", description: "JavaScript with comment" },
-        { payload: "data:text/html,<script>alert(1)</script>", description: "Data URI" },
-        { payload: "vbscript:msgbox(1)", description: "VBScript protocol" },
-        { payload: "file:///etc/passwd", description: "File protocol" },
-    ],
-    
-    unicode: [
-        { payload: "https://ⓔⓥⓘⓛ.ⓒⓞⓜ", description: "Unicode domain" },
-        { payload: "https://evil。com", description: "Fullwidth dot" },
-        { payload: "https://evil%E3%80%82com", description: "Encoded fullwidth dot" },
-        { payload: "https://еvil.com", description: "Cyrillic 'e'" },
-        { payload: "https://evіl.com", description: "Cyrillic 'i'" },
-    ],
-    
-    special: [
-        { payload: "/\\evil.com", description: "Backslash prefix" },
-        { payload: "\\/evil.com", description: "Escaped slash" },
-        { payload: "/.evil.com", description: "Dot prefix" },
-        { payload: "/evil.com", description: "Single slash prefix" },
-        { payload: "evil.com", description: "No protocol" },
-        { payload: ".evil.com", description: "Dot prefix no slash" },
-        { payload: "..evil.com", description: "Double dot prefix" },
-    ],
-    
-    header_injection: [
-        { payload: "https://evil.com%0d%0aSet-Cookie:session=evil", description: "Header injection via redirect" },
-        { payload: "https://evil.com%0aX-Injected:header", description: "Custom header injection" },
-    ],
-};
-
-// Common redirect parameter names
-const REDIRECT_PARAM_NAMES = [
-    "url", "uri", "redirect", "redirect_uri", "redirect_url", "redirectUrl", "redirectUri",
-    "return", "return_url", "returnUrl", "return_uri", "returnUri", "returnTo",
-    "next", "next_url", "nextUrl", "next_uri", "nextUri",
-    "target", "target_url", "targetUrl", "target_uri", "targetUri",
-    "dest", "destination", "dest_url", "destUrl", "destination_url", "destinationUrl",
-    "redir", "redir_url", "redirUrl",
-    "continue", "continue_url", "continueUrl",
-    "forward", "forward_url", "forwardUrl",
-    "goto", "go", "go_url", "goUrl",
-    "link", "link_url", "linkUrl",
-    "out", "out_url", "outUrl",
-    "view", "view_url", "viewUrl",
-    "login", "login_url", "loginUrl",
-    "logout", "logout_url", "logoutUrl",
-    "callback", "callback_url", "callbackUrl",
-    "checkout", "checkout_url", "checkoutUrl",
-    "image", "image_url", "imageUrl",
-    "file", "file_url", "fileUrl",
-    "page", "page_url", "pageUrl",
-    "feed", "feed_url", "feedUrl",
-    "host", "site", "domain",
-    "ref", "referer", "referrer",
-    "source", "src",
-    "u", "r", "l", "q",
-];
-
-const DEFAULT_CONCURRENCY = 32;
-const MAX_CONCURRENCY = 20;
-
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    if (tasks.length === 0) {
-        return [];
-    }
-
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= tasks.length) {
-                return;
-            }
-            results[index] = await tasks[index]();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
-}
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: {
-                type: "string",
-                description: "Target URL with potential redirect parameters"
-            },
-            method: {
-                type: "string",
-                enum: ["GET", "POST"],
-                description: "HTTP method",
-                default: "GET"
-            },
-            params: {
-                type: "object",
-                description: "URL parameters to test (key-value pairs)",
-                additionalProperties: { type: "string" }
-            },
-            headers: {
-                type: "object",
-                description: "Custom headers to include",
-                additionalProperties: { type: "string" }
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            followRedirects: {
-                type: "boolean",
-                description: "Follow redirects to verify destination",
-                default: false
-            },
-            targetDomain: {
-                type: "string",
-                description: "Target domain to use in whitelist bypass payloads (extracted from URL if not provided)"
-            },
-            testAllParams: {
-                type: "boolean",
-                description: "Test all parameters, not just those with redirect-like names",
-                default: false
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    url: { type: "string", description: "Target URL" },
-                    method: { type: "string" },
-                    tests: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                parameter: { type: "string" },
-                                payload: { type: "string" },
-                                vulnerable: { type: "boolean" },
-                                severity: { type: "string" },
-                                redirectUrl: { type: "string" }
-                            }
-                        },
-                        description: "Open redirect test results"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTests: { type: "integer" },
-                            vulnerableCount: { type: "integer" },
-                            vulnerableParameters: { type: "array", items: { type: "string" } }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Parse URL and extract parameters
- */
-function parseUrl(url: string): { baseUrl: string; params: Record<string, string> } {
-    try {
-        const urlObj = new URL(url);
-        const params: Record<string, string> = {};
-        urlObj.searchParams.forEach((value, key) => {
-            params[key] = value;
-        });
-        return {
-            baseUrl: `${urlObj.origin}${urlObj.pathname}`,
-            params,
-        };
-    } catch {
-        return { baseUrl: url, params: {} };
-    }
-}
-
-/**
- * Build URL with parameters
- */
-function buildUrl(baseUrl: string, params: Record<string, string>): string {
-    const url = new URL(baseUrl);
-    for (const [key, value] of Object.entries(params)) {
-        url.searchParams.set(key, value);
-    }
-    return url.toString();
-}
-
-/**
- * Extract domain from URL
- */
-function extractDomain(url: string): string {
-    try {
-        const urlObj = new URL(url);
-        return urlObj.hostname;
-    } catch {
-        return "";
-    }
-}
-
-/**
- * Identify redirect-like parameters
- */
-function identifyRedirectParams(params: Record<string, string>, testAll: boolean): string[] {
-    if (testAll) {
-        return [...new Set(Object.keys(params))];
-    }
-    
-    const redirectParams: string[] = [];
-    
-    for (const key of Object.keys(params)) {
-        const lowerKey = key.toLowerCase();
-        
-        // Check if parameter name suggests redirect
-        if (REDIRECT_PARAM_NAMES.some(name => lowerKey === name.toLowerCase() || lowerKey.includes(name.toLowerCase()))) {
-            redirectParams.push(key);
-            continue;
-        }
-        
-        // Check if value looks like URL
-        const value = params[key];
-        if (value.startsWith("http://") || value.startsWith("https://") || value.startsWith("//") || value.startsWith("/")) {
-            redirectParams.push(key);
-        }
-    }
-    
-    return [...new Set(redirectParams)];
-}
-
-function dedupeTypedPayloads(payloads: { payload: string; type: string }[]): { payload: string; type: string }[] {
-    const seen = new Set<string>();
-    const deduped: { payload: string; type: string }[] = [];
-
-    for (const payloadEntry of payloads) {
-        const payload = String(payloadEntry.payload || "").trim();
-        if (!payload || seen.has(payload)) continue;
-        seen.add(payload);
-        deduped.push({ payload, type: payloadEntry.type });
-    }
-
-    return deduped;
-}
-
-/**
- * Generate payloads with target domain for whitelist bypass
- */
-function generatePayloads(targetDomain: string): { payload: string; type: string }[] {
-    const payloads: { payload: string; type: string }[] = [];
-    
-    // Add basic payloads
-    for (const p of REDIRECT_PAYLOADS.basic) {
-        payloads.push({ payload: p.payload, type: "basic" });
-    }
-    
-    // Add encoded payloads
-    for (const p of REDIRECT_PAYLOADS.encoded) {
-        payloads.push({ payload: p.payload, type: "encoded" });
-    }
-    
-    // Add bypass payloads
-    for (const p of REDIRECT_PAYLOADS.bypass) {
-        payloads.push({ payload: p.payload, type: "bypass" });
-    }
-    
-    // Add domain bypass payloads with target domain
-    for (const p of REDIRECT_PAYLOADS.domain_bypass) {
-        const payload = p.payload.replace(/legitimate\.com/g, targetDomain);
-        payloads.push({ payload, type: "domain_bypass" });
-    }
-    
-    // Add whitelist bypass payloads with target domain
-    for (const p of REDIRECT_PAYLOADS.whitelist_bypass) {
-        const payload = p.payload.replace(/legitimate\.com/g, targetDomain).replace(/legitimate/g, targetDomain.split(".")[0]);
-        payloads.push({ payload, type: "whitelist_bypass" });
-    }
-    
-    // Add protocol payloads (limited)
-    payloads.push({ payload: "javascript:alert(1)", type: "protocol" });
-    payloads.push({ payload: "//evil.com", type: "protocol" });
-    
-    // Add special payloads
-    for (const p of REDIRECT_PAYLOADS.special) {
-        payloads.push({ payload: p.payload, type: "special" });
-    }
-    
-    return dedupeTypedPayloads(payloads);
-}
-
-/**
- * Check if redirect is to external domain
- */
-function isExternalRedirect(originalDomain: string, redirectUrl: string): boolean {
-    try {
-        const redirectDomain = extractDomain(redirectUrl);
-        if (!redirectDomain) return false;
-        
-        // Check if redirect is to a different domain
-        return redirectDomain !== originalDomain && 
-               !redirectDomain.endsWith(`.${originalDomain}`) &&
-               redirectDomain !== "evil.com" && // Our test domain
-               !redirectDomain.endsWith(".evil.com");
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Determine severity based on payload type and redirect behavior
- */
-function determineSeverity(payloadType: string, redirectsToEvil: boolean): "high" | "medium" | "low" {
-    if (payloadType === "protocol" && redirectsToEvil) {
-        return "high"; // JavaScript execution
-    }
-    if (redirectsToEvil) {
-        if (payloadType === "basic" || payloadType === "encoded") {
-            return "high"; // Direct redirect to attacker domain
-        }
-        return "medium"; // Bypass technique worked
-    }
-    return "low";
-}
-
-/**
- * Test a single redirect payload
- */
-async function testPayload(
-    baseUrl: string,
-    params: Record<string, string>,
-    targetParam: string,
-    payload: string,
-    payloadType: string,
-    options: {
-        method: string;
-        headers: Record<string, string>;
-        followRedirects: boolean;
-        originalDomain: string;
-    }
-): Promise<RedirectTest> {
-    const testParams = { ...params, [targetParam]: payload };
-    const testUrl = buildUrl(baseUrl, testParams);
-    
-    const result: RedirectTest = {
-        parameter: targetParam,
-        payload,
-        payloadType,
-        vulnerable: false,
-        severity: "low",
-    };
-    
-    try {
-        const response = await fetch(testUrl, {
-            method: options.method,
-            headers: options.headers,
-            redirect: options.followRedirects ? "follow" : "manual",
-            timeout: 10000,
-        });
-        
-        result.responseCode = response.status;
-        
-        // Check for redirect response codes
-        if ([301, 302, 303, 307, 308].includes(response.status)) {
-            const location = response.headers.get("location");
-            if (location) {
-                result.redirectUrl = location;
-                
-                // Check if redirect goes to evil.com or external domain
-                const redirectDomain = extractDomain(location);
-                if (redirectDomain === "evil.com" || redirectDomain?.endsWith(".evil.com")) {
-                    result.vulnerable = true;
-                    result.severity = determineSeverity(payloadType, true);
-                    result.evidence = `Redirects to attacker-controlled domain: ${location}`;
-                } else if (isExternalRedirect(options.originalDomain, location)) {
-                    result.vulnerable = true;
-                    result.severity = "medium";
-                    result.evidence = `Redirects to external domain: ${location}`;
-                }
-            }
-        }
-        
-        // Check if followed redirect ended up at evil.com
-        if (options.followRedirects && response.redirected) {
-            const finalUrl = response.url;
-            const finalDomain = extractDomain(finalUrl);
-            if (finalDomain === "evil.com" || finalDomain?.endsWith(".evil.com")) {
-                result.vulnerable = true;
-                result.severity = determineSeverity(payloadType, true);
-                result.redirectUrl = finalUrl;
-                result.evidence = `Final redirect destination is attacker-controlled: ${finalUrl}`;
-            }
-        }
-        
-        // Check for JavaScript execution in response (for javascript: protocol)
-        if (payloadType === "protocol" && payload.startsWith("javascript:")) {
-            // If no redirect but response contains our payload, it might be reflected
-            const body = await response.text();
-            if (body.includes(payload) || body.includes("alert(1)")) {
-                result.vulnerable = true;
-                result.severity = "high";
-                result.evidence = "JavaScript payload reflected in response";
-            }
-        }
-        
-        return result;
-        
-    } catch (error: any) {
-        result.error = error.message || String(error);
-        return result;
-    }
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        // Validate input
-        if (!input.url || typeof input.url !== "string") {
-            return {
-                success: false,
-                error: "Invalid input: url parameter is required"
-            };
-        }
-        
-        const { baseUrl, params: urlParams } = parseUrl(input.url);
-        const params = { ...urlParams, ...(input.params || {}) };
-        
-        const method = input.method || "GET";
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-                const followRedirects = input.followRedirects === true;
-        const testAllParams = input.testAllParams === true;
-        const originalDomain = extractDomain(input.url);
-        const targetDomain = input.targetDomain || originalDomain;
-        
-        const headers: Record<string, string> = {
-            "User-Agent": userAgent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            ...(input.headers || {}),
-        };
-        
-        // Identify redirect-like parameters to test
-        const paramsToTest = identifyRedirectParams(params, testAllParams);
-        
-        if (paramsToTest.length === 0) {
-            return {
-                success: true,
-                data: {
-                    url: input.url,
-                    method,
-                    tests: [],
-                    summary: {
-                        totalTests: 0,
-                        vulnerableCount: 0,
-                        testedParameters: [],
-                        vulnerableParameters: [],
-                        bySeverity: {},
-                    },
-                },
-            };
-        }
-        
-        // Generate payloads
-        const payloads = generatePayloads(targetDomain);
-        
-        // Run tests
-        const compromisedParams = new Set<string>();
-        const payloadTasks: Array<() => Promise<RedirectTest | null>> = [];
-        for (const param of paramsToTest) {
-            for (const { payload, type } of payloads) {
-                payloadTasks.push(async () => {
-                    if (compromisedParams.has(param)) return null;
-
-                    const result = await testPayload(
-                        baseUrl,
-                        params,
-                        param,
-                        payload,
-                        type,
-                        { method, headers, followRedirects, originalDomain }
-                    );
-
-                    if (result.vulnerable) {
-                        compromisedParams.add(param);
-                    }
-
-                    return result;
-                });
-            }
-        }
-        const tests = (await runWithConcurrency(payloadTasks, DEFAULT_CONCURRENCY))
-            .filter((test): test is RedirectTest => Boolean(test));
-        
-        // Build summary
-        const vulnerableTests = tests.filter(t => t.vulnerable);
-        const vulnerableParameters = [...new Set(vulnerableTests.map(t => t.parameter))];
-        const bySeverity: Record<string, number> = {};
-        
-        for (const test of vulnerableTests) {
-            bySeverity[test.severity] = (bySeverity[test.severity] || 0) + 1;
-        }
-        
-        return {
-            success: true,
-            data: {
-                url: input.url,
-                method,
-                tests,
-                summary: {
-                    totalTests: tests.length,
-                    vulnerableCount: vulnerableTests.length,
-                    testedParameters: paramsToTest,
-                    vulnerableParameters,
-                    bySeverity,
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/open_redirect_detector/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;var REDIRECT_PAYLOADS={basic:[{payload:"https://evil.com",description:"Basic HTTPS redirect"},{payload:"http://evil.com",description:"\
+Basic HTTP redirect"},{payload:"//evil.com",description:"Protocol-relative redirect"},{payload:"///evil.com",description:"Triple slash redirect"},{payload:"////\
+evil.com",description:"Quadruple slash redirect"}],encoded:[{payload:"https:%2F%2Fevil.com",description:"URL encoded slashes"},{payload:"https:%252F%252Fevil.co\
+m",description:"Double URL encoded"},{payload:"https%3A%2F%2Fevil.com",description:"Fully URL encoded"},{payload:"https%3A//evil.com",description:"Partially enc\
+oded colon"},{payload:"%2F%2Fevil.com",description:"Encoded protocol-relative"},{payload:"%252F%252Fevil.com",description:"Double encoded protocol-relative"}],bypass:[
+{payload:"https://evil.com/",description:"Trailing slash"},{payload:"https://evil.com//",description:"Double trailing slash"},{payload:"https://evil.com?",description:"\
+Trailing question mark"},{payload:"https://evil.com#",description:"Trailing hash"},{payload:"https://evil.com%00",description:"Null byte"},{payload:"https://evi\
+l.com%0d%0a",description:"CRLF injection"},{payload:"https://evil.com%09",description:"Tab character"},{payload:"https://evil.com%20",description:"Space charact\
+er"}],domain_bypass:[{payload:"https://evil.com@legitimate.com",description:"Basic auth bypass"},{payload:"https://legitimate.com@evil.com",description:"Reverse\
+d basic auth"},{payload:"https://evil.com#legitimate.com",description:"Fragment bypass"},{payload:"https://evil.com?legitimate.com",description:"Query bypass"},
+{payload:"https://evil.com\\legitimate.com",description:"Backslash bypass"},{payload:"https://evil.com%23legitimate.com",description:"Encoded hash bypass"},{payload:"\
+https://evil.com%40legitimate.com",description:"Encoded @ bypass"}],whitelist_bypass:[{payload:"https://legitimate.com.evil.com",description:"Subdomain of attac\
+ker"},{payload:"https://legitimatecom.evil.com",description:"Missing dot subdomain"},{payload:"https://evil.com/legitimate.com",description:"Path bypass"},{payload:"\
+https://evil.com?url=legitimate.com",description:"Query param bypass"},{payload:"https://evil.com#legitimate.com",description:"Fragment bypass"},{payload:"https\
+://evil-legitimate.com",description:"Hyphen bypass"},{payload:"https://legitimate.evil.com",description:"Subdomain bypass"}],protocol:[{payload:"javascript:aler\
+t(1)",description:"JavaScript protocol"},{payload:"javascript://evil.com/%0aalert(1)",description:"JavaScript with comment"},{payload:"data:text/html,<script>al\
+ert(1)</script>",description:"Data URI"},{payload:"vbscript:msgbox(1)",description:"VBScript protocol"},{payload:"file:///etc/passwd",description:"File protocol"}],
+unicode:[{payload:"https://ⓔⓥⓘⓛ.ⓒⓞⓜ",description:"Unicode domain"},{payload:"https://evil。com",description:"Fullwidth dot"},{payload:"https://ev\
+il%E3%80%82com",description:"Encoded fullwidth dot"},{payload:"https://еvil.com",description:"Cyrillic 'e'"},{payload:"https://evіl.com",description:"Cyrillic\
+ 'i'"}],special:[{payload:"/\\evil.com",description:"Backslash prefix"},{payload:"\\/evil.com",description:"Escaped slash"},{payload:"/.evil.com",description:"D\
+ot prefix"},{payload:"/evil.com",description:"Single slash prefix"},{payload:"evil.com",description:"No protocol"},{payload:".evil.com",description:"Dot prefix \
+no slash"},{payload:"..evil.com",description:"Double dot prefix"}],header_injection:[{payload:"https://evil.com%0d%0aSet-Cookie:session=evil",description:"Heade\
+r injection via redirect"},{payload:"https://evil.com%0aX-Injected:header",description:"Custom header injection"}]};var REDIRECT_PARAM_NAMES=["url","uri","redir\
+ect","redirect_uri","redirect_url","redirectUrl","redirectUri","return","return_url","returnUrl","return_uri","returnUri","returnTo","next","next_url","nextUrl",
+"next_uri","nextUri","target","target_url","targetUrl","target_uri","targetUri","dest","destination","dest_url","destUrl","destination_url","destinationUrl","re\
+dir","redir_url","redirUrl","continue","continue_url","continueUrl","forward","forward_url","forwardUrl","goto","go","go_url","goUrl","link","link_url","linkUrl",
+"out","out_url","outUrl","view","view_url","viewUrl","login","login_url","loginUrl","logout","logout_url","logoutUrl","callback","callback_url","callbackUrl","c\
+heckout","checkout_url","checkoutUrl","image","image_url","imageUrl","file","file_url","fileUrl","page","page_url","pageUrl","feed","feed_url","feedUrl","host",
+"site","domain","ref","referer","referrer","source","src","u","r","l","q"];var DEFAULT_CONCURRENCY=32;async function runWithConcurrency(tasks,concurrency){if(tasks.length===0){return[]}const limit=Math.max(1,Math.min(concurrency,tasks.length));const results=new Array(
+tasks.length);let nextIndex=0;const workers=Array.from({length:limit},async()=>{while(true){const index=nextIndex++;if(index>=tasks.length){return}results[index]=
+await tasks[index]()}});await Promise.all(workers);return results}function get_input_schema(){return{type:"object",required:["url"],properties:{url:{type:"strin\
+g",description:"Target URL with potential redirect parameters"},method:{type:"string",enum:["GET","POST"],description:"HTTP method",default:"GET"},params:{type:"\
+object",description:"URL parameters to test (key-value pairs)",additionalProperties:{type:"string"}},headers:{type:"object",description:"Custom headers to inclu\
+de",additionalProperties:{type:"string"}},userAgent:{type:"string",description:"Custom User-Agent header"},followRedirects:{type:"boolean",description:"Follow r\
+edirects to verify destination",default:false},targetDomain:{type:"string",description:"Target domain to use in whitelist bypass payloads (extracted from URL if\
+ not provided)"},testAllParams:{type:"boolean",description:"Test all parameters, not just those with redirect-like names",default:false}}}}pluginGlobals.get_input_schema=
+get_input_schema;function getBusinessOutputSchema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{
+type:"object",properties:{url:{type:"string",description:"Target URL"},method:{type:"string"},tests:{type:"array",items:{type:"object",properties:{parameter:{type:"\
+string"},payload:{type:"string"},vulnerable:{type:"boolean"},severity:{type:"string"},redirectUrl:{type:"string"}}},description:"Open redirect test results"},summary:{
+type:"object",properties:{totalTests:{type:"integer"},vulnerableCount:{type:"integer"},vulnerableParameters:{type:"array",items:{type:"string"}}}}}},error:{type:"\
+string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function parseUrl(url){try{const urlObj=new URL(url);const params={};
+urlObj.searchParams.forEach((value,key)=>{params[key]=value});return{baseUrl:`${urlObj.origin}${urlObj.pathname}`,params}}catch{return{baseUrl:url,params:{}}}}function buildUrl(baseUrl,params){
+const url=new URL(baseUrl);for(const[key,value]of Object.entries(params)){url.searchParams.set(key,value)}return url.toString()}function extractDomain(url){try{
+const urlObj=new URL(url);return urlObj.hostname}catch{return""}}function identifyRedirectParams(params,testAll){if(testAll){return[...new Set(Object.keys(params))]}
+const redirectParams=[];for(const key of Object.keys(params)){const lowerKey=key.toLowerCase();if(REDIRECT_PARAM_NAMES.some(name=>lowerKey===name.toLowerCase()||
+lowerKey.includes(name.toLowerCase()))){redirectParams.push(key);continue}const value=params[key];if(value.startsWith("http://")||value.startsWith("https://")||
+value.startsWith("//")||value.startsWith("/")){redirectParams.push(key)}}return[...new Set(redirectParams)]}function dedupeTypedPayloads(payloads){const seen=new Set;
+const deduped=[];for(const payloadEntry of payloads){const payload=String(payloadEntry.payload||"").trim();if(!payload||seen.has(payload))continue;seen.add(payload);
+deduped.push({payload,type:payloadEntry.type})}return deduped}function generatePayloads(targetDomain){const payloads=[];for(const p of REDIRECT_PAYLOADS.basic){
+payloads.push({payload:p.payload,type:"basic"})}for(const p of REDIRECT_PAYLOADS.encoded){payloads.push({payload:p.payload,type:"encoded"})}for(const p of REDIRECT_PAYLOADS.
+bypass){payloads.push({payload:p.payload,type:"bypass"})}for(const p of REDIRECT_PAYLOADS.domain_bypass){const payload=p.payload.replace(/legitimate\.com/g,targetDomain);
+payloads.push({payload,type:"domain_bypass"})}for(const p of REDIRECT_PAYLOADS.whitelist_bypass){const payload=p.payload.replace(/legitimate\.com/g,targetDomain).
+replace(/legitimate/g,targetDomain.split(".")[0]);payloads.push({payload,type:"whitelist_bypass"})}payloads.push({payload:"javascript:alert(1)",type:"protocol"});
+payloads.push({payload:"//evil.com",type:"protocol"});for(const p of REDIRECT_PAYLOADS.special){payloads.push({payload:p.payload,type:"special"})}return dedupeTypedPayloads(
+payloads)}function isExternalRedirect(originalDomain,redirectUrl){try{const redirectDomain=extractDomain(redirectUrl);if(!redirectDomain)return false;return redirectDomain!==
+originalDomain&&!redirectDomain.endsWith(`.${originalDomain}`)&&redirectDomain!=="evil.com"&&!redirectDomain.endsWith(".evil.com")}catch{return false}}function determineSeverity(payloadType,redirectsToEvil){
+if(payloadType==="protocol"&&redirectsToEvil){return"high"}if(redirectsToEvil){if(payloadType==="basic"||payloadType==="encoded"){return"high"}return"medium"}return"\
+low"}async function testPayload(baseUrl,params,targetParam,payload,payloadType,options){const testParams={...params,[targetParam]:payload};const testUrl=buildUrl(
+baseUrl,testParams);const result={parameter:targetParam,payload,payloadType,vulnerable:false,severity:"low"};try{const response=await observedFetch(testUrl,{method:options.
+method,headers:options.headers,redirect:options.followRedirects?"follow":"manual",timeout:1e4});result.responseCode=response.status;if([301,302,303,307,308].includes(
+response.status)){const location=response.headers.get("location");if(location){result.redirectUrl=location;const redirectDomain=extractDomain(location);if(redirectDomain===
+"evil.com"||redirectDomain?.endsWith(".evil.com")){result.vulnerable=true;result.severity=determineSeverity(payloadType,true);result.evidence=`Redirects to atta\
+cker-controlled domain: ${location}`}else if(isExternalRedirect(options.originalDomain,location)){result.vulnerable=true;result.severity="medium";result.evidence=
+`Redirects to external domain: ${location}`}}}if(options.followRedirects&&response.redirected){const finalUrl=response.url;const finalDomain=extractDomain(finalUrl);
+if(finalDomain==="evil.com"||finalDomain?.endsWith(".evil.com")){result.vulnerable=true;result.severity=determineSeverity(payloadType,true);result.redirectUrl=finalUrl;
+result.evidence=`Final redirect destination is attacker-controlled: ${finalUrl}`}}if(payloadType==="protocol"&&payload.startsWith("javascript:")){const body=await response.
+text();if(body.includes(payload)||body.includes("alert(1)")){result.vulnerable=true;result.severity="high";result.evidence="JavaScript payload reflected in resp\
+onse"}}return result}catch(error){result.error=error.message||String(error);return result}}async function analyzeBusiness(input){try{if(!input.url||typeof input.
+url!=="string"){return{success:false,error:"Invalid input: url parameter is required"}}const{baseUrl,params:urlParams}=parseUrl(input.url);const params={...urlParams,
+...input.params||{}};const method=input.method||"GET";const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";const followRedirects=input.
+followRedirects===true;const testAllParams=input.testAllParams===true;const originalDomain=extractDomain(input.url);const targetDomain=input.targetDomain||originalDomain;
+const headers={"User-Agent":userAgent,Accept:"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",...input.headers||{}};const paramsToTest=identifyRedirectParams(
+params,testAllParams);if(paramsToTest.length===0){return{success:true,data:{url:input.url,method,tests:[],summary:{totalTests:0,vulnerableCount:0,testedParameters:[],
+vulnerableParameters:[],bySeverity:{}}}}}const payloads=generatePayloads(targetDomain);const compromisedParams=new Set;const payloadTasks=[];for(const param of paramsToTest){
+for(const{payload,type}of payloads){payloadTasks.push(async()=>{if(compromisedParams.has(param))return null;const result=await testPayload(baseUrl,params,param,
+payload,type,{method,headers,followRedirects,originalDomain});if(result.vulnerable){compromisedParams.add(param)}return result})}}const tests=(await runWithConcurrency(
+payloadTasks,DEFAULT_CONCURRENCY)).filter(test=>Boolean(test));const vulnerableTests=tests.filter(t=>t.vulnerable);const vulnerableParameters=[...new Set(vulnerableTests.
+map(t=>t.parameter))];const bySeverity={};for(const test of vulnerableTests){bySeverity[test.severity]=(bySeverity[test.severity]||0)+1}return{success:true,data:{
+url:input.url,method,tests,summary:{totalTests:tests.length,vulnerableCount:vulnerableTests.length,testedParameters:paramsToTest,vulnerableParameters,bySeverity}}}}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;function get_output_schema(){return monitorToolOutputSchema(
+getBusinessOutputSchema())}async function analyze(input){return await runMonitorTool(input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

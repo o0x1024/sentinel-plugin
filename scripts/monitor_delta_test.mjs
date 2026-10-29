@@ -1,3 +1,4 @@
+import { requestData } from './monitor_request_test_support.mjs';
 // Independent JSON/Buffer oracles for the incremental size tree. Node 24, no I/O.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -126,11 +127,11 @@ test('deterministic generated merges and request envelopes agree with an indepen
             reference = mergeReference(reference, canonical(incoming));
             assert.deepEqual(canonical(tree.value), canonical(reference), `value ${round}/${step}`);
             assert.equal(tree.bytes, byteOracle(reference), `data bytes ${round}/${step}`);
-            const work = Array.from({ length: next(5) }, (_, index) => workSample(next, index));
+            const work = Array.from({ length: next(5) }, (_, index) => ({ ...workSample(next, index), output: output(index === 0 ? reference : {}) }));
             const workContentsBytes = byteOracle(work) - 2;
             for (const sequence of [9, 10, 99, 100]) {
-                const request = { sequence, work, output: { success: true, data: reference } };
-                assert.equal(monitorRequestBytes(sequence, workContentsBytes, tree), byteOracle(request), `envelope ${round}/${step}/${sequence}`);
+                const request = { sequence, work };
+                assert.equal(monitorRequestBytes(sequence, workContentsBytes), byteOracle(request), `envelope ${round}/${step}/${sequence}`);
             }
             merges++;
         }
@@ -170,8 +171,7 @@ test('real stream crosses sequence 9 to 10 within a small byte budget with exact
         summary: { total: 1, fractional: 0.1 },
     }));
     const key = index => `work:${index}:😀`;
-    const requestFor = index => ({ sequence: 40, work: [{ target: 'one', key: key(index), status: 'ok', complete: index === 39 }],
-        output: output(items[index]) });
+    const requestFor = index => ({ sequence: 40, work: [{ target: 'one', key: key(index), status: 'ok', complete: index === 39, snapshot_complete: true, output: output(items[index]) }] });
     const byteLimit = Math.max(...items.map((_, index) => byteOracle(requestFor(index)))) + 8;
     let actualTotal = 0;
     let actualMaximum = 0;
@@ -188,7 +188,7 @@ test('real stream crosses sequence 9 to 10 within a small byte budget with exact
         const stream = createMonitorResultStream({ __monitorExecution: monitorExecution(['one'], { maxBytes: byteLimit }) });
         const expected = items.map(canonical);
         for (const [index, data] of items.entries()) {
-            await stream.record('one', key(index), output(data), { complete: index === 39 });
+            await stream.record('one', key(index), output(data), { complete: index === 39, snapshot_complete: true });
             data.results[0].text = 'CALLER_MUTATED';
             data.snapshots.one.revision = -999;
             data.summary.total = -100;
@@ -197,11 +197,11 @@ test('real stream crosses sequence 9 to 10 within a small byte budget with exact
         assert(snapshots.length >= 10);
         assert.equal(snapshots[8].sequence, 9);
         assert.equal(snapshots[9].sequence, 10);
-        const received = snapshots.flatMap(request => request.output.data.results);
+        const received = snapshots.flatMap(request => requestData(request).results);
         assert.deepEqual(received, expected.flatMap(data => data.results));
         for (const request of snapshots) {
             const index = Number(request.work.at(-1).key.match(/^work:(\d+):/)[1]);
-            assert.deepEqual(request.output.data.snapshots.one, expected[index].snapshots.one);
+            assert.deepEqual(requestData(request).snapshots.one, expected[index].snapshots.one);
         }
         const diagnostics = final.data.summary.diagnostics;
         assert.equal(diagnostics.submitted_json_bytes, actualTotal);
@@ -209,6 +209,6 @@ test('real stream crosses sequence 9 to 10 within a small byte budget with exact
         assert.equal(diagnostics.max_batch_json_bytes, actualMaximum);
         assert.equal(diagnostics.committed_work_items, items.length);
         assert.equal(diagnostics.completed_targets, 1);
-        assert(snapshots.every(request => request.output.data.summary.total === request.work.length));
+        assert(snapshots.every(request => requestData(request).summary.total === request.work.length));
     } finally { globalThis.Sentinel = original; }
 });

@@ -40,13 +40,15 @@ test('a single excessive UTF-8 result fails without a partial persistence operat
     assert.equal(writes, 0);
 });
 
-test('the pinned old HTTP producer demonstrates the whole-input amplification regression', async () => {
-    const report = await runReport(['--variant', 'baseline', '--plugins', 'http_prober', '--sizes', '64,256']);
-    const [small, large] = report.rows;
-    assert.equal(small.targets, 64);
-    assert.equal(large.targets, 256);
-    assert(large.submitted_bytes / small.submitted_bytes > 4.6, 'the former producer must reproduce super-linear bytes');
-    assert.equal(large.forbidden_input_items / small.forbidden_input_items, 16, '4x targets reproduced 16x input-list items');
+test('a v1 producer rejects a v2 host before performing HTTP work', async () => {
+    const code=execFileSync('rtk',['proxy','git','show','d92c508:plugins/bounty/http_prober.ts'],{cwd:root,encoding:'utf8'});
+    const {analyze}=await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+    const savedFetch=globalThis.fetch;let calls=0;
+    globalThis.fetch=async()=>{calls++;throw new Error('Unexpected network work');};
+    try {
+        const result=await analyze({targets:['owned.test'],__monitorExecution:monitorExecution(['owned.test'])});
+        assert.equal(result.success,false);assert.match(result.error,/monitor-results-v1/);assert.equal(calls,0);
+    } finally {globalThis.fetch=savedFetch;}
 });
 
 test('all twenty repaired producers keep 4x input growth within linear payload bounds', async () => {

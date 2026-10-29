@@ -3,16 +3,17 @@
  *
  * @plugin subdomain_takeover
  * @name Subdomain Takeover Detector
- * @version 1.1.8
+ * @version 1.1.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
  * @input_mode asset
  * @target_asset_types ["domain"]
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @category vuln
  * @default_severity high
- * @tags subdomain, takeover, dns, vulnerability, security, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags subdomain, takeover, dns, vulnerability, security, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Detect potential subdomain takeover vulnerabilities by checking DNS records and service fingerprints
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';

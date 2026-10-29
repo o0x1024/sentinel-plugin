@@ -1,6 +1,6 @@
 # Acknowledged bounty monitor results
 
-All 20 bounty plugins declare `monitor:results-stream-v1`. Their monitor runs
+All 27 declared monitors (20 bounty and 7 Agent plugins) declare `monitor:results-stream-v2`. Their monitor runs
 publish durable deltas through the existing `Sentinel.Monitor.commitResults`
 channel. They share one implementation in `source/shared/monitor_results.ts`;
 the native subdomain brute-force engine publishes through the same host channel.
@@ -11,7 +11,7 @@ The host injects `__monitorExecution.result_stream` with:
 
 ```json
 {
-  "protocol": "monitor-results-v1",
+  "protocol": "monitor-results-v2",
   "targets": ["host-owned original target"],
   "max_work_items": 32,
   "max_pending_commits": 2,
@@ -24,8 +24,8 @@ A monitor context requires this exact protocol and an available
 explicitly. Ordinary tool execution has no monitor context and returns the
 plugin's existing complete output.
 
-Each request contains a strictly increasing sequence, completed work, and a
-standard output delta:
+Each request contains only a strictly increasing sequence and independent work
+records. Every record owns its standard output delta:
 
 ```json
 {
@@ -34,9 +34,9 @@ standard output delta:
     "target": "host-owned original target",
     "key": "independent-work-item",
     "status": "ok",
-    "complete": false
-  }],
-  "output": { "success": true, "data": { "results": [] } }
+    "complete": false,
+    "output": { "success": true, "data": { "results": [] } }
+  }]
 }
 ```
 
@@ -71,10 +71,11 @@ Save failure is terminal and is never converted into a target network failure.
 submission errors. `finish` flushes remaining deltas, waits for every receipt,
 and requires all original targets to have ended.
 
-Arrays in output deltas are concatenated; snapshot dictionaries merge by key;
+The SDK retains independent work outputs. After individual validation the host aggregates
+outputs for the existing importer: arrays concatenate; snapshot dictionaries merge by key;
 surface artifact arrays merge by kind; numeric summary values are increments.
 Do not repeatedly supply a growing cumulative array or cumulative numeric
-summary. The helper copies buffered deltas so producers can release their
+summary. The helper copies each work delta so producers can release their
 local arrays after `record` resolves. Previously acknowledged work keys are
 not retained by the plugin helper; the host keeps durable duplicate authority.
 
@@ -129,11 +130,11 @@ complete baseline or imply that previously known assets disappeared.
 
 ## Build and verify
 
-Edit `source/bounty/<plugin>/index.ts` and its supporting modules. Published
-`plugins/bounty/<plugin>.ts` files are generated and contain no runtime imports.
-The build enumerates every bounty catalog entry, requires source/catalog
+Edit `source/<main_category>/<plugin>/index.ts` and its supporting modules. Published
+`plugins/<main_category>/<plugin>.ts` files are generated and contain no runtime imports.
+The build enumerates every catalog entry declaring monitor_type, requires source/catalog
 version agreement and the stream tag, pins esbuild 0.21.5, and limits each
-published file to 3000 lines.
+published file to 2000 lines.
 
 ```sh
 rtk npm run build:monitors
@@ -146,21 +147,42 @@ rtk proxy node --disable-warning=ExperimentalWarning --test scripts/bounty_paylo
 rtk proxy node --disable-warning=ExperimentalWarning scripts/bounty_payload_benchmark.mjs --sizes 64,256,1024 --assert-linear --output /private/tmp/sentinel-bounty-payload-benchmark.json
 ```
 
-The payload benchmark loads the old published plugins from the local
-`d92c508` Git ref and compares them with the current published bundles. It
-counts UTF-8 commit bytes, work records, maximum package size, and elapsed
-producer/serialization time at multiple input sizes. Its sink retains only
-counters, and the synthetic JSON report is limited to 1 MiB. Every network and
-native operation is a deterministic fixture. These measurements describe
-producer envelopes and submitted write volume; they do not measure real
-network, native DNS engine, QuickJS, or SQLite throughput.
+The payload benchmark defaults to current v2 producers and measures scaling across input sizes.
+It counts independently serialized UTF-8 request bytes, work records and peak packages;
+all network and native APIs are deterministic fixtures. Seven Agent monitors additionally
+compare ordinary outputs, HTTP requests and in-memory file writes against their pre-migration
+business behavior. These are controlled producer measurements, not public-network throughput.
 
 The Node 24 runner supplies read-only Deno file/test-registration APIs and
 blocks real fetch before installing deterministic test fixtures. It does not
 prove native runtime permissions, real-provider behavior, production database
-acceptance, or desktop operation. An explicit `--stream-fixtures-out` argument
-can export synthetic commit requests to `/private/tmp/` for host validator tests.
+acceptance, or desktop operation. `scripts/export_monitor_stream_fixtures.mjs --output /private/tmp/monitor-v2-fixtures.json`
+exports all 27 published producers with fixed authorizations for host validation.
 
 Enabling these plugins requires the new host and updated installed plugin
 code/metadata. Updating this repository alone does not replace an installed
 plugin or restart the desktop application.
+
+## Explicit capabilities and state ownership
+
+Declare target_sources from surface_asset, bounty_asset and scope for asset/hybrid modes.
+Seed mode uses declared seed_bindings and has no asset source. The host collects and scopes
+inputs from these declarations. Plugin IDs identify producers and state namespaces; they
+never select business behavior. HTTP/TLS applicability is decided by the producer from typed
+service transport and application facts.
+
+work.key is independent from the stable key in data.snapshots. Nonempty snapshots and
+api_inventory require that same work to be successful and snapshot_complete:true. This
+attests complete resource observation/inventory, independently of parent target complete.
+Failed or partial inventories cannot replace retained state or imply removals.
+
+Complete API inventories use data.api_inventory: [{baseUrl,success:true,snapshot:{baseUrl,
+lastChecked,apiEndpoints:[{path,source?}]},addedApiEndpoints?,removedApiEndpoints?}]. The host
+validates ownership, snapshot completion, timestamps and same-origin endpoints before writing
+existing api_snapshot observations. Lists and downstream collectors select this result type,
+including results from newly named plugins.
+
+The host journals original work[] and checkpoints only the durable ACK prefix. Settled v1
+history remains readable; unresolved old checkpoints block cutover. v1 execution is rejected.
+Authoring tests use the production collector and persistence path in isolated full-schema
+SQLite, and distinguish actual materialization from unexercised output families.

@@ -3,16 +3,17 @@
  *
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.4.5
+ * @version 1.4.6
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
  * @monitor_type api
  * @input_mode asset
  * @target_asset_types ["web"]
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity high
- * @tags api, endpoint, monitor, change-detection, rest, javascript, spa, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags api, endpoint, monitor, change-detection, rest, javascript, spa, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Monitor API endpoints and HTML routes by discovering JavaScript assets from pages and bundles, extracting API-like and route-like path literals, and comparing snapshot changes over time
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';
@@ -104,6 +105,7 @@ export function get_output_schema() {
             data: {
                 type: "object",
                 properties: {
+                    api_inventory: { type: "array", description: "Complete API inventories for host materialization", items: { type: "object" } },
                     results: {
                         type: "array",
                         items: {
@@ -678,11 +680,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 if (result.success) successfulChecks++;
                 else failedChecks++;
                 await stream.record(target, "complete", { success: true, data: {
-                    results: [result], changeEvents: result.success ? targetChanges : [],
+                    results: [result], api_inventory: result.success ? [result] : [],
+                    changeEvents: result.success ? targetChanges : [],
                     surface_artifacts: { changes: result.success ? webMonitorChanges(targetChanges, "api_monitor") : [] },
                     snapshots: result.success && result.snapshot ? { [baseUrl]: result.snapshot } : {},
                     summary: { totalTargets: 1, failedTargets: result.success ? 0 : 1 },
-                } }, { status: result.success ? "ok" : "failed", complete: true });
+                } }, { status: result.success ? "ok" : "failed", complete: true, snapshot_complete: result.success });
                 if (!stream.enabled) results.push(result);
                 completedTargets += 1;
                 await reportMonitorProgress(monitorExecution, {

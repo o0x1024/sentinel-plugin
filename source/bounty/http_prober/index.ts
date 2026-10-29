@@ -3,16 +3,17 @@
  *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.11
+ * @version 1.4.12
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
  * @input_mode asset
  * @target_asset_types ["domain","ip","service","web"]
  * @category recon
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags http, probe, alive, discovery, web, service, headers, evidence, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags http, probe, alive, discovery, web, service, headers, evidence, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Probe HTTP/HTTPS endpoints from URLs and service endpoints to confirm live websites, collect status code, title, headers, technologies, and structured web artifacts
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';
@@ -504,6 +505,7 @@ type NormalizedServiceTarget = {
     port: number;
     protocol?: string;
     serviceName?: string;
+    transport?: string;
 };
 
 function normalizeServiceTarget(raw: string | ServiceLikeTarget): NormalizedServiceTarget | null {
@@ -517,7 +519,7 @@ function normalizeServiceTarget(raw: string | ServiceLikeTarget): NormalizedServ
                 const protocol = parsed.protocol.replace(":", "").toLowerCase();
                 const port = Number(parsed.port || (protocol === "https" ? 443 : 80));
                 if (!parsed.hostname || !port) return null;
-                return { host: parsed.hostname, port, protocol };
+                return { host: parsed.hostname, port, protocol, transport: "tcp" };
             } catch {
                 return null;
             }
@@ -528,12 +530,12 @@ function normalizeServiceTarget(raw: string | ServiceLikeTarget): NormalizedServ
             const parsed = new URL(`tcp://${normalized}`);
             const port = Number(parsed.port || 0);
             if (!parsed.hostname || !port) return null;
-            return { host: parsed.hostname, port, protocol: "tcp" };
+            return { host: parsed.hostname, port, protocol: /\/udp$/i.test(trimmed) ? "udp" : "tcp", transport: /\/udp$/i.test(trimmed) ? "udp" : "tcp" };
         } catch {
             const [hostPart, portPart] = normalized.split(":");
             const port = Number(portPart || 0);
             if (!hostPart || !port) return null;
-            return { host: hostPart, port, protocol: "tcp" };
+            return { host: hostPart, port, protocol: /\/udp$/i.test(trimmed) ? "udp" : "tcp", transport: /\/udp$/i.test(trimmed) ? "udp" : "tcp" };
         }
     }
 
@@ -552,6 +554,7 @@ function normalizeServiceTarget(raw: string | ServiceLikeTarget): NormalizedServ
                 ...normalized,
                 protocol: raw.protocol || raw.transport_protocol || normalized.protocol,
                 serviceName: raw.service_name,
+                transport: raw.transport_protocol || normalized.transport,
             };
         }
     }
@@ -566,6 +569,7 @@ function normalizeServiceTarget(raw: string | ServiceLikeTarget): NormalizedServ
         port,
         protocol: protocol || undefined,
         serviceName: serviceName || undefined,
+        transport: raw.transport_protocol || (protocol === "udp" ? "udp" : "tcp"),
     };
 }
 
@@ -580,7 +584,7 @@ function collectServiceTargets(input: ToolInput): NormalizedServiceTarget[] {
         const normalized = normalizeServiceTarget(rawTarget);
         if (!normalized) continue;
 
-        const key = `${normalized.host}:${normalized.port}`;
+        const key = `${normalized.host}:${normalized.port}/${normalized.transport || "tcp"}`;
         const existing = deduped.get(key);
         if (!existing) {
             deduped.set(key, normalized);
@@ -605,6 +609,7 @@ function buildCandidateUrlsFromServiceTarget(
         probeUnknownPortsWithBoth: boolean;
     }
 ): string[] {
+    if ((target.transport || target.protocol || '').toLowerCase() === 'udp') return [];
     const protocols: string[] = [];
     const normalizedProtocol = (target.protocol || "").toLowerCase();
     const normalizedServiceName = (target.serviceName || "").toLowerCase();
@@ -1197,7 +1202,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         for (const target of serviceOwners) {
             const parsed = normalizeServiceTarget(target);
             if (!parsed) continue;
-            const identity = `${parsed.host}:${parsed.port}`;
+            const identity = `${parsed.host}:${parsed.port}/${parsed.transport || "tcp"}`;
             const endpointOwners = serviceOwnersByEndpoint.get(identity) || [];
             endpointOwners.push(target);
             serviceOwnersByEndpoint.set(identity, endpointOwners);
@@ -1206,7 +1211,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const candidates = buildCandidateUrlsFromServiceTarget(service, {
                 checkHttp, checkHttps, probeUnknownPortsWithBoth: false,
             });
-            for (const target of serviceOwnersByEndpoint.get(`${service.host}:${service.port}`) || []) {
+            for (const target of serviceOwnersByEndpoint.get(`${service.host}:${service.port}/${service.transport || "tcp"}`) || []) {
                 addOwner(target, candidates);
             }
         }
@@ -1240,7 +1245,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                         const left = remaining.get(owner)! - 1;
                         remaining.set(owner, left);
                         await stream.record(owner, url, index === 0 ? delta : { success: true, data: {} }, {
-                            status: result.alive ? "ok" : "failed", error: result.error, complete: left === 0,
+                            status: result.alive ? "ok" : "failed", error: result.error, complete: left === 0, snapshot_complete: result.alive,
                         });
                     }
                 }

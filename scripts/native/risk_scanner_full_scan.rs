@@ -19,7 +19,7 @@ fn context(target: &str) -> Value {
         "program_id":"owned", "execution_mode":"test",
         "started_at":"2026-10-29T00:00:00Z", "current_plugin":"risk_scanner",
         "current_plugin_index":1, "completed_steps":0, "total_steps":1,
-        "result_stream":{"protocol":"monitor-results-v1","targets":[target],
+        "result_stream":{"protocol":"monitor-results-v2","targets":[target],
             "max_work_items":32,"max_pending_commits":2,"max_bytes":2097152}
     })
 }

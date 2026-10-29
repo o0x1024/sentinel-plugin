@@ -16,15 +16,15 @@ const esbuild = await import(modulePath ? pathToFileURL(resolve(modulePath)).hre
 if (esbuild.version !== '0.21.5') throw new Error('Monitor bundles require esbuild 0.21.5');
 
 const catalog = JSON.parse(await readFile(resolve(root, 'plugins.json'), 'utf8'));
-const monitors = catalog.plugins.filter(plugin => plugin.main_category === 'bounty');
+const monitors = catalog.plugins.filter(plugin => Boolean(plugin.monitor_type));
 for (const plugin of monitors) {
   const { id } = plugin;
-  const entry = `source/bounty/${id}/index.ts`;
+  const entry = `source/${plugin.main_category}/${id}/index.ts`;
   const source = await readFile(resolve(root, entry), 'utf8');
   const metadata = source.slice(0, source.indexOf('*/') + 2);
   if (!metadata.includes(`@plugin ${id}`)) throw new Error(`${id}: missing source metadata`);
   if (!metadata.includes(`@version ${plugin.version}\n`)) throw new Error(`${id}: source/catalog version differs`);
-  if (!metadata.includes('monitor:results-stream-v1')) throw new Error(`${id}: source must declare monitor:results-stream-v1`);
+  if (!metadata.includes('monitor:results-stream-v2')) throw new Error(`${id}: source must declare monitor:results-stream-v2`);
   const result = await esbuild.build({
     absWorkingDir: root,
     entryPoints: [entry],
@@ -49,7 +49,7 @@ for (const plugin of monitors) {
   }
   const output = result.outputFiles[0].text;
   if (output.split('\n').length > 2000) throw new Error(`${id}: generated bundle exceeds 2000 lines`);
-  const destination = resolve(root, `plugins/bounty/${id}.ts`);
+  const destination = resolve(root, `plugins/${plugin.main_category}/${id}.ts`);
   if (check) {
     if (await readFile(destination, 'utf8') !== output) throw new Error(`${id}: generated bundle is stale`);
   } else {

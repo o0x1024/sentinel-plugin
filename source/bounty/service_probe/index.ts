@@ -3,16 +3,17 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.10
+ * @version 1.2.11
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type service
  * @input_mode asset
  * @target_asset_types ["service"]
  * @category recon
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags service, probe, fingerprint, banner, asm, network, dictionary, normalized, native, capability:network-scan, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
+ * @tags service, probe, fingerprint, banner, asm, network, dictionary, normalized, native, capability:network-scan, capability:dictionary, capability:monitor-events, monitor:results-stream-v2
  * @description Identify exposed services from host/port targets with the native Rust service identification engine, normalized fingerprint artifacts, and structured service evidence
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";
@@ -841,7 +842,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             const result = { ...nativeProbe.results[0], target: serviceKey(nativeProbe.results[0].host, nativeProbe.results[0].port), title: undefined };
             if (result.host !== target.host || result.port !== target.port || result.target !== serviceKey(target.host, target.port)) throw new Error("Native service probe returned an unrelated endpoint");
             ruleCount = nativeProbe.ruleCount ?? rules.length;
-            await writeTarget(serviceKey(target.host, target.port), "native-service-endpoint", projectServiceProbeOutput([result], rules, timestamp, probeEngine, ruleCount) as any, { status: result.success ? "ok" : "failed", error: result.error });
+            await writeTarget(serviceKey(target.host, target.port), "native-service-endpoint", projectServiceProbeOutput([result], rules, timestamp, probeEngine, ruleCount) as any, { snapshot_complete: result.success, status: result.success ? "ok" : "failed", error: result.error });
             if (!stream.enabled) results[index] = result;
         }));
         return await stream.finish(stream.enabled ? { success: true } : projectServiceProbeOutput(results, rules, timestamp, probeEngine, ruleCount));

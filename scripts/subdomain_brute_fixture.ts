@@ -41,12 +41,12 @@ export async function nativeSubdomainBruteFixture(request: Record<string, unknow
     };
     const context = request.__monitorExecution as { result_stream?: { protocol?: string; targets?: string[] } } | undefined;
     if (!context) return output;
-    if (context.result_stream?.protocol !== "monitor-results-v1") throw new Error("Native monitor fixture requires monitor-results-v1");
+    if (context.result_stream?.protocol !== "monitor-results-v2") throw new Error("Native monitor fixture requires monitor-results-v2");
     const commit = (globalThis as any).Sentinel?.Monitor?.commitResults;
     if (typeof commit !== "function") throw new Error("Native monitor fixture requires commitResults");
     let sequence = 0;
     const submit = async (target: string, key: string, complete: boolean, data: Record<string, unknown>) => {
-        const request = { sequence: ++sequence, work: [{ target, key, status: "ok", complete }], output: { success: true, data } };
+        const request = { sequence: ++sequence, work: [{ target, key, status: "ok", complete, snapshot_complete: complete, output: { success: true, data } }] };
         const ack = await commit(request);
         if (ack?.ok !== true || ack.sequence !== sequence) throw new Error("Native monitor fixture commit was not acknowledged");
     };

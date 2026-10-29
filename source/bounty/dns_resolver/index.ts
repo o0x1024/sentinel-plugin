@@ -3,16 +3,17 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.1.6
+ * @version 1.1.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
  * @input_mode asset
  * @target_asset_types ["domain","web"]
  * @category recon
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags dns, resolver, mapping, domain, asm, surface, capability:network-scan, capability:monitor-events, monitor:results-stream-v1
+ * @tags dns, resolver, mapping, domain, asm, surface, capability:network-scan, capability:monitor-events, monitor:results-stream-v2
  * @description Resolve DNS records for domains and produce typed surface graph artifacts for ASM and network asset mapping
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";
@@ -636,7 +637,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     message: `Resolving DNS records for ${target}`,
                 });
             }
-            await writeTarget(target, "dns-record-set", projectDnsOutput([target], [result!], previousSnapshots, timestamp) as any, { status: result!.success ? "ok" : "failed", error: result!.error });
+            await writeTarget(target, "dns-record-set", projectDnsOutput([target], [result!], previousSnapshots, timestamp) as any, { snapshot_complete: result!.success, status: result!.success ? "ok" : "failed", error: result!.error });
             if (!stream.enabled) results[index] = result!;
         });
 

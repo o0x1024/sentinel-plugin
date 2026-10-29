@@ -11,7 +11,7 @@ export function monitorExecution(targets: string[], options: {
         current_plugin: options.pluginId ?? "test_plugin", current_plugin_index: 1,
         completed_steps: 0, total_steps: 1,
         result_stream: {
-            protocol: "monitor-results-v1" as const,
+            protocol: "monitor-results-v2" as const,
             targets: [...targets], max_work_items: options.maxWorkItems ?? 32,
             max_pending_commits: options.maxPendingCommits ?? 2,
             max_bytes: options.maxBytes ?? 2 * 1024 * 1024,

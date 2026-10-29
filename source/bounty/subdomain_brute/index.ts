@@ -3,16 +3,17 @@
  *
  * @plugin subdomain_brute
  * @name Subdomain Brute Force
- * @version 1.0.2
+ * @version 1.0.3
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
  * @monitor_type dns
  * @input_mode seed
  * @target_asset_types []
+ * @target_sources []
  * @seed_bindings [{"seed_type":"root_domain","input_key":"targets"},{"seed_type":"domain","input_key":"targets"}]
  * @default_severity info
- * @tags subdomain, dns, bruteforce, dictionary, native, asm, surface, capability:network-scan, capability:monitor-events, monitor:results-stream-v1
+ * @tags subdomain, dns, bruteforce, dictionary, native, asm, surface, capability:network-scan, capability:monitor-events, monitor:results-stream-v2
  * @description Batch dictionary-based DNS discovery through the native Rust engine; defaults to UDP and reports transport failures explicitly
  */
 import { createMonitorResultStream } from "../../shared/monitor_results.ts";

@@ -3,16 +3,17 @@
  *
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.8
+ * @version 1.1.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type content
  * @input_mode asset
  * @target_asset_types ["web"]
  * @category monitor
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  * @seed_bindings []
  * @default_severity low
- * @tags content, monitor, change-detection, fingerprint, hash, capability:fetch, capability:monitor-events, monitor:results-stream-v1
+ * @tags content, monitor, change-detection, fingerprint, hash, capability:fetch, capability:monitor-events, monitor:results-stream-v2
  * @description Monitor web pages for content changes, generating ChangeEvents for workflow automation
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';
@@ -554,7 +555,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 surface_artifacts: { changes: webMonitorChanges(targetChanges, "content_monitor") },
                 snapshots: result.success && result.snapshot ? { [url]: result.snapshot } : {},
                 summary: { totalTargets: 1, successfulChecks: result.success ? 1 : 0, failedChecks: result.success ? 0 : 1 },
-            } }, { status: result.success ? "ok" : "failed", error: result.error, complete: true });
+            } }, { status: result.success ? "ok" : "failed", error: result.error, complete: true, snapshot_complete: result.success });
             completedTargets += 1;
             await reportMonitorProgress(monitorExecution, {
                 current: completedTargets,

@@ -3,7 +3,7 @@
  *
  * @plugin webpack_source_downloader
  * @name Webpack Source Downloader
- * @version 1.0.8
+ * @version 1.0.9
  * @author Sentinel Team
  * @main_category agent
  * @category utility
@@ -12,1055 +12,204 @@
  * @target_asset_types ["web"]
  * @seed_bindings []
  * @default_severity info
- * @tags webpack, sourcemap, source, frontend, download, capability:fetch, capability:filesystem-write, capability:monitor-events
+ * @tags webpack, sourcemap, source, frontend, download, capability:fetch, capability:filesystem-write, capability:monitor-events, monitor:results-stream-v2
  * @description Download original frontend source files exposed through webpack:// and webpack-internal:// source maps with optional workspace directory saving and content-free result manifests.
+ * @target_sources ["surface_asset","bounty_asset","scope"]
  */
-
-declare const Sentinel: {
-    Monitor?: {
-        reportProgress?(request: Record<string, unknown>): Promise<boolean> | boolean;
-    };
-};
-
-declare const Deno: {
-    mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
-    writeTextFile(path: string, data: string): Promise<void>;
-};
-
-interface ToolInput {
-    targets: string[];
-    userAgent?: string;
-    saveDirectory?: string;
-    maxJsFiles?: number;
-    maxSourceMaps?: number;
-    maxSourceFiles?: number;
-    maxSourceFileSize?: number;
-    includePatterns?: string[];
-    excludePatterns?: string[];
-    includeNonWebpackSources?: boolean;
-    probeSiblingSourceMaps?: boolean;
-    __monitorExecution?: MonitorExecutionContext;
-}
-
-interface MonitorExecutionContext {
-    task_id: string;
-    task_name: string;
-    program_id: string;
-    execution_mode: string;
-    started_at: string;
-    current_plugin: string;
-    current_plugin_index: number;
-    completed_steps: number;
-    total_steps: number;
-    imported_assets?: number;
-}
-
-interface SourceMapLike {
-    version?: number;
-    file?: string;
-    sourceRoot?: string;
-    sources?: string[];
-    sourcesContent?: Array<string | null>;
-    sections?: Array<{ map?: SourceMapLike }>;
-}
-
-interface FetchTextResult {
-    ok: boolean;
-    status: number | null;
-    url: string;
-    contentType: string;
-    text: string;
-    size: number;
-    error?: string;
-}
-
-interface DownloadableSourceFile {
-    target: string;
-    sourceMapUrl: string;
-    sourcePath: string;
-    downloadPath: string;
-    archivePath: string;
-    filename: string;
-    mimeType: string;
-    encoding: "utf-8";
-    content: string;
-    contentBase64: string;
-    savedPath?: string;
-    size: number;
-    sha256: string;
-}
-
-interface SourceFileSummary {
-    target: string;
-    sourceMapUrl: string;
-    sourcePath: string;
-    downloadPath: string;
-    archivePath: string;
-    filename: string;
-    mimeType: string;
-    encoding: "utf-8";
-    savedPath?: string;
-    saveStatus: "saved" | "not_saved";
-    size: number;
-    sha256: string;
-}
-
-interface SourceMapRecord {
-    url: string;
-    source: string;
-    status: "downloaded" | "parsed" | "failed" | "skipped";
-    sourceCount: number;
-    extractedFiles: number;
-    error?: string;
-}
-
-interface TargetResult {
-    target: string;
-    success: boolean;
-    fetchedJsFiles: number;
-    fetchedSourceMaps: number;
-    extractedFiles: number;
-    skippedSourcesWithoutContent: number;
-    skippedSourcesByFilter: number;
-    skippedSourcesTooLarge: number;
-    files: SourceFileSummary[];
-    sourceMaps: SourceMapRecord[];
-    errors: string[];
-}
-
-interface InternalTargetResult extends Omit<TargetResult, "files"> {
-    files: DownloadableSourceFile[];
-}
-
-interface ToolOutput {
-    success: boolean;
-    data?: {
-        results: TargetResult[];
-        files: SourceFileSummary[];
-        summary: {
-            totalTargets: number;
-            successfulTargets: number;
-            failedTargets: number;
-            fetchedJsFiles: number;
-            fetchedSourceMaps: number;
-            extractedFiles: number;
-            skippedSourcesWithoutContent: number;
-            skippedSourcesByFilter: number;
-            skippedSourcesTooLarge: number;
-        };
-        download_manifest: Array<{
-            archivePath: string;
-            savedPath?: string;
-            saveStatus: "saved" | "not_saved";
-            sourcePath: string;
-            sourceMapUrl: string;
-            size: number;
-            sha256: string;
-            mimeType: string;
-        }>;
-        saved_files: Array<{
-            archivePath: string;
-            savedPath: string;
-            saveStatus: "saved";
-            sourcePath: string;
-            sourceMapUrl: string;
-            size: number;
-            sha256: string;
-            mimeType: string;
-        }>;
-        saveDirectory?: string;
-        surface_artifacts: {
-            frontend_source_files: Array<{
-                archivePath: string;
-                savedPath?: string;
-                saveStatus: "saved" | "not_saved";
-                sourcePath: string;
-                sourceMapUrl: string;
-                size: number;
-                sha256: string;
-                mimeType: string;
-            }>;
-        };
-    };
-    error?: string;
-}
-
-const pluginGlobals = globalThis as typeof globalThis & {
-    get_input_schema?: typeof get_input_schema;
-    get_output_schema?: typeof get_output_schema;
-    analyze?: typeof analyze;
-};
-
-const DEFAULT_USER_AGENT = "Sentinel-Webpack-Source-Downloader/1.0";
-const DEFAULT_MAX_JS_FILES = 50;
-const DEFAULT_MAX_SOURCE_MAPS = 50;
-const DEFAULT_MAX_SOURCE_FILES = 500;
-const DEFAULT_MAX_SOURCE_FILE_SIZE = 750_000;
-const MAX_REMOTE_TEXT_BYTES = 20_000_000;
-const DEFAULT_EXCLUDE_PATTERNS = ["node_modules/", "(webpack)/"];
-
-async function reportMonitorProgress(
-    monitorExecution: MonitorExecutionContext | undefined,
-    update: Record<string, unknown>,
-): Promise<boolean> {
-    if (!monitorExecution) return false;
-    try {
-        return Boolean(await Sentinel.Monitor?.reportProgress?.({
-            monitorProgress: {
-                taskId: monitorExecution.task_id,
-                taskName: monitorExecution.task_name,
-                programId: monitorExecution.program_id,
-                executionMode: monitorExecution.execution_mode,
-                startedAt: monitorExecution.started_at,
-                currentPlugin: monitorExecution.current_plugin,
-                currentPluginIndex: monitorExecution.current_plugin_index,
-                completedSteps: monitorExecution.completed_steps,
-                totalSteps: monitorExecution.total_steps,
-                importedAssets: monitorExecution.imported_assets,
-            },
-            ...update,
-        }));
-    } catch {
-        return false;
-    }
-}
-
-function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.max(min, Math.min(Math.floor(parsed), max));
-}
-
-function isHttpUrl(value: string): boolean {
-    return /^https?:\/\//i.test(value.trim());
-}
-
-function resolveUrl(baseUrl: string, value: string): string {
-    const candidate = value.trim().replace(/\\\//g, "/");
-    if (!candidate || candidate.startsWith("webpack://") || candidate.startsWith("webpack-internal://")) {
-        return "";
-    }
-    try {
-        return new URL(candidate, baseUrl).toString();
-    } catch {
-        return "";
-    }
-}
-
-async function fetchText(url: string, userAgent: string): Promise<FetchTextResult> {
-    try {
-        const response = await fetch(url, {
-            method: "GET",
-            headers: {
-                "Accept": "text/html,application/javascript,text/javascript,application/json,*/*",
-                "User-Agent": userAgent,
-            },
-            timeout: 30000,
-            maxBodyBytes: 5 * 1024 * 1024,
-        });
-        const contentType = response.headers.get("content-type") || "";
-        const contentLength = Number(response.headers.get("content-length") || "0");
-        if (Number.isFinite(contentLength) && contentLength > MAX_REMOTE_TEXT_BYTES) {
-            return {
-                ok: false,
-                status: response.status,
-                url: response.url || url,
-                contentType,
-                text: "",
-                size: contentLength,
-                error: `remote body is too large: ${contentLength} bytes`,
-            };
-        }
-        const text = await response.text();
-        return {
-            ok: response.ok,
-            status: response.status,
-            url: response.url || url,
-            contentType,
-            text: text.length > MAX_REMOTE_TEXT_BYTES ? "" : text,
-            size: text.length,
-            error: response.ok
-                ? (text.length > MAX_REMOTE_TEXT_BYTES ? `remote body is too large: ${text.length} bytes` : undefined)
-                : `HTTP ${response.status}`,
-        };
-    } catch (error: any) {
-        return {
-            ok: false,
-            status: null,
-            url,
-            contentType: "",
-            text: "",
-            size: 0,
-            error: error?.message || String(error),
-        };
-    }
-}
-
-function isSourceMapUrl(url: string): boolean {
-    return /\.map(?:[?#].*)?$/i.test(url);
-}
-
-function isJavaScriptUrl(url: string): boolean {
-    return /\.(?:js|mjs|cjs)(?:[?#].*)?$/i.test(url);
-}
-
-function looksLikeSourceMap(text: string, contentType: string): boolean {
-    if (/json|source-map/i.test(contentType)) return /"sources"\s*:/.test(text);
-    return /^\s*\{/.test(text) && /"sources"\s*:/.test(text);
-}
-
-function looksLikeHtml(text: string, contentType: string): boolean {
-    return /html/i.test(contentType) || /<script[\s>]/i.test(text) || /<!doctype html/i.test(text);
-}
-
-function extractScriptUrls(html: string, baseUrl: string): string[] {
-    const urls: string[] = [];
-    const seen = new Set<string>();
-    const scriptRegex = /<script\b[^>]*\bsrc\s*=\s*(?:(["'])(.*?)\1|([^"'\s>]+))/gi;
-    let match: RegExpExecArray | null;
-    while ((match = scriptRegex.exec(html)) !== null) {
-        const resolved = resolveUrl(baseUrl, match[2] || match[3] || "");
-        if (resolved && !seen.has(resolved)) {
-            seen.add(resolved);
-            urls.push(resolved);
-        }
-    }
-    return urls;
-}
-
-function extractSourceMapUrls(jsText: string, jsUrl: string, probeSiblingSourceMaps: boolean): string[] {
-    const urls: string[] = [];
-    const seen = new Set<string>();
-    const sourceMapRegex = /\/\/[#@]\s*sourceMappingURL\s*=\s*(\S+)/g;
-    let match: RegExpExecArray | null;
-    while ((match = sourceMapRegex.exec(jsText)) !== null) {
-        const value = match[1].trim();
-        const resolved = value.startsWith("data:")
-            ? value
-            : resolveUrl(jsUrl, value);
-        if (resolved && !seen.has(resolved)) {
-            seen.add(resolved);
-            urls.push(resolved);
-        }
-    }
-    if (probeSiblingSourceMaps) {
-        const sibling = `${jsUrl.split("#")[0].split("?")[0]}.map`;
-        if (!seen.has(sibling)) {
-            seen.add(sibling);
-            urls.push(sibling);
-        }
-    }
-    return urls;
-}
-
-function parseDataSourceMapUrl(url: string): string | null {
-    const match = url.match(/^data:application\/json(?:;charset=[^;,]+)?(;base64)?,(.*)$/i);
-    if (!match) return null;
-    const payload = match[2] || "";
-    try {
-        if (match[1]) {
-            return atob(payload);
-        }
-        return decodeURIComponent(payload);
-    } catch {
-        return null;
-    }
-}
-
-function shouldIncludeSource(
-    sourcePath: string,
-    includeNonWebpackSources: boolean,
-    includePatterns: string[],
-    excludePatterns: string[],
-): boolean {
-    const normalized = sourcePath.trim();
-    const isWebpackSource = /^webpack(?:-internal)?:\/\//i.test(normalized);
-    if (!includeNonWebpackSources && !isWebpackSource) {
-        return false;
-    }
-    if (includePatterns.length > 0 && !includePatterns.some(pattern => normalized.includes(pattern))) {
-        return false;
-    }
-    if (excludePatterns.some(pattern => normalized.includes(pattern))) {
-        return false;
-    }
-    return true;
-}
-
-function buildEffectiveSourcePath(sourceRoot: string | undefined, sourcePath: string): string {
-    const normalizedSourcePath = String(sourcePath || "").trim();
-    const normalizedSourceRoot = String(sourceRoot || "").trim();
-    if (!normalizedSourceRoot || /^webpack(?:-internal)?:\/\//i.test(normalizedSourcePath) || /^https?:\/\//i.test(normalizedSourcePath)) {
-        return normalizedSourcePath;
-    }
-    return `${normalizedSourceRoot.replace(/\/+$/g, "")}/${normalizedSourcePath.replace(/^\/+/g, "")}`;
-}
-
-function normalizeDownloadPath(sourcePath: string, index: number): string {
-    let value = sourcePath
-        .replace(/^webpack(?:-internal)?:\/\//i, "")
-        .replace(/^\/+/, "")
-        .replace(/\\/g, "/")
-        .split("#")[0]
-        .split("?")[0]
-        .trim();
-
-    value = value
-        .split("/")
-        .filter(segment => segment && segment !== "." && segment !== "..")
-        .join("/");
-
-    if (!value) {
-        value = `source_${index}.txt`;
-    }
-    return value.replace(/[<>:"|*]/g, "_");
-}
-
-function uniquePath(path: string, seenPaths: Set<string>): string {
-    if (!seenPaths.has(path)) {
-        seenPaths.add(path);
-        return path;
-    }
-
-    const slashIndex = path.lastIndexOf("/");
-    const dir = slashIndex >= 0 ? `${path.slice(0, slashIndex + 1)}` : "";
-    const name = slashIndex >= 0 ? path.slice(slashIndex + 1) : path;
-    const dotIndex = name.lastIndexOf(".");
-    const stem = dotIndex > 0 ? name.slice(0, dotIndex) : name;
-    const ext = dotIndex > 0 ? name.slice(dotIndex) : "";
-    let counter = 2;
-    while (seenPaths.has(`${dir}${stem}__${counter}${ext}`)) {
-        counter += 1;
-    }
-    const result = `${dir}${stem}__${counter}${ext}`;
-    seenPaths.add(result);
-    return result;
-}
-
-function filenameFromPath(path: string): string {
-    return path.split("/").filter(Boolean).pop() || "source.txt";
-}
-
-function mimeTypeFromFilename(filename: string): string {
-    const lower = filename.toLowerCase();
-    if (lower.endsWith(".ts")) return "text/typescript";
-    if (lower.endsWith(".tsx")) return "text/tsx";
-    if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "application/javascript";
-    if (lower.endsWith(".jsx")) return "text/jsx";
-    if (lower.endsWith(".vue")) return "text/x-vue";
-    if (lower.endsWith(".css") || lower.endsWith(".scss") || lower.endsWith(".sass") || lower.endsWith(".less")) return "text/css";
-    if (lower.endsWith(".json")) return "application/json";
-    if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
-    if (lower.endsWith(".svg")) return "image/svg+xml";
-    return "text/plain";
-}
-
-function textToBase64(text: string): string {
-    const bytes = new TextEncoder().encode(text);
-    let binary = "";
-    const chunkSize = 0x8000;
-    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-        const chunk = bytes.subarray(offset, offset + chunkSize);
-        binary += String.fromCharCode(...chunk);
-    }
-    return btoa(binary);
-}
-
-async function sha256Hex(text: string): Promise<string> {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-    return Array.from(new Uint8Array(digest))
-        .map(byte => byte.toString(16).padStart(2, "0"))
-        .join("");
-}
-
-function archiveRootForTarget(target: string): string {
-    try {
-        const url = new URL(target);
-        return `${url.hostname}${url.pathname.replace(/[^a-zA-Z0-9._/-]+/g, "_")}`.replace(/\/+$/g, "") || url.hostname;
-    } catch {
-        return "target";
-    }
-}
-
-function normalizeSaveDirectory(value: unknown): string | undefined {
-    if (typeof value !== "string") return undefined;
-    const trimmed = value.trim();
-    if (!trimmed) return undefined;
-    if (trimmed.includes("\0")) {
-        throw new Error("saveDirectory must not contain NUL bytes");
-    }
-    return trimmed.replace(/[\\/]+$/g, "");
-}
-
-function safeRelativeFilePath(value: string): string {
-    const parts = value
-        .replace(/\\/g, "/")
-        .split("/")
-        .filter(part => part && part !== "." && part !== "..");
-    if (parts.length === 0) {
-        throw new Error(`Invalid archive path: ${value}`);
-    }
-    return parts.join("/");
-}
-
-function joinSavePath(baseDirectory: string, relativePath: string): string {
-    return `${baseDirectory}/${safeRelativeFilePath(relativePath)}`;
-}
-
-function parentDirectory(path: string): string {
-    const index = path.lastIndexOf("/");
-    return index > 0 ? path.slice(0, index) : ".";
-}
-
-async function saveExtractedFiles(saveDirectory: string | undefined, files: DownloadableSourceFile[]): Promise<void> {
-    if (!saveDirectory || files.length === 0) return;
-    await Deno.mkdir(saveDirectory, { recursive: true });
-    for (const file of files) {
-        const savedPath = joinSavePath(saveDirectory, file.archivePath);
-        await Deno.mkdir(parentDirectory(savedPath), { recursive: true });
-        await Deno.writeTextFile(savedPath, file.content);
-        file.savedPath = savedPath;
-    }
-}
-
-function summarizeSourceFile(file: DownloadableSourceFile): SourceFileSummary {
-    return {
-        target: file.target,
-        sourceMapUrl: file.sourceMapUrl,
-        sourcePath: file.sourcePath,
-        downloadPath: file.downloadPath,
-        archivePath: file.archivePath,
-        filename: file.filename,
-        mimeType: file.mimeType,
-        encoding: file.encoding,
-        savedPath: file.savedPath,
-        saveStatus: file.savedPath ? "saved" : "not_saved",
-        size: file.size,
-        sha256: file.sha256,
-    };
-}
-
-async function extractFilesFromSourceMap(
-    target: string,
-    sourceMapUrl: string,
-    mapText: string,
-    options: {
-        includeNonWebpackSources: boolean;
-        includePatterns: string[];
-        excludePatterns: string[];
-        maxSourceFileSize: number;
-        maxSourceFiles: number;
-        seenDownloadPaths: Set<string>;
-        archiveRoot: string;
-    },
-): Promise<{
-    files: DownloadableSourceFile[];
-    sourceCount: number;
-    skippedSourcesWithoutContent: number;
-    skippedSourcesByFilter: number;
-    skippedSourcesTooLarge: number;
-    error?: string;
-}> {
-    const files: DownloadableSourceFile[] = [];
-    let sourceCount = 0;
-    let skippedSourcesWithoutContent = 0;
-    let skippedSourcesByFilter = 0;
-    let skippedSourcesTooLarge = 0;
-
-    let parsed: SourceMapLike;
-    try {
-        parsed = JSON.parse(mapText) as SourceMapLike;
-    } catch (error: any) {
-        return {
-            files,
-            sourceCount,
-            skippedSourcesWithoutContent,
-            skippedSourcesByFilter,
-            skippedSourcesTooLarge,
-            error: error?.message || String(error),
-        };
-    }
-
-    const queue: SourceMapLike[] = [parsed];
-    for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
-        const map = queue[queueIndex];
-        const sources = Array.isArray(map.sources) ? map.sources : [];
-        const sourcesContent = Array.isArray(map.sourcesContent) ? map.sourcesContent : [];
-        sourceCount += sources.length;
-
-        for (let index = 0; index < sources.length; index += 1) {
-            const sourcePath = buildEffectiveSourcePath(map.sourceRoot, String(sources[index] || ""));
-            const content = sourcesContent[index];
-
-            if (!shouldIncludeSource(sourcePath, options.includeNonWebpackSources, options.includePatterns, options.excludePatterns)) {
-                skippedSourcesByFilter += 1;
-                continue;
-            }
-            if (typeof content !== "string") {
-                skippedSourcesWithoutContent += 1;
-                continue;
-            }
-            if (content.length > options.maxSourceFileSize) {
-                skippedSourcesTooLarge += 1;
-                continue;
-            }
-            if (files.length >= options.maxSourceFiles) {
-                skippedSourcesByFilter += 1;
-                continue;
-            }
-
-            const downloadPath = uniquePath(normalizeDownloadPath(sourcePath, index), options.seenDownloadPaths);
-            const filename = filenameFromPath(downloadPath);
-            const archivePath = `${options.archiveRoot}/${downloadPath}`;
-            const sha256 = await sha256Hex(content);
-
-            files.push({
-                target,
-                sourceMapUrl,
-                sourcePath,
-                downloadPath,
-                archivePath,
-                filename,
-                mimeType: mimeTypeFromFilename(filename),
-                encoding: "utf-8",
-                content,
-                contentBase64: textToBase64(content),
-                size: content.length,
-                sha256,
-            });
-        }
-
-        if (Array.isArray(map.sections)) {
-            for (const section of map.sections) {
-                if (section?.map && typeof section.map === "object") {
-                    queue.push(section.map);
-                }
-            }
-        }
-    }
-
-    return {
-        files,
-        sourceCount,
-        skippedSourcesWithoutContent,
-        skippedSourcesByFilter,
-        skippedSourcesTooLarge,
-    };
-}
-
-async function processSourceMapUrl(
-    target: string,
-    sourceMapUrl: string,
-    userAgent: string,
-    result: InternalTargetResult,
-    options: {
-        includeNonWebpackSources: boolean;
-        includePatterns: string[];
-        excludePatterns: string[];
-        maxSourceFileSize: number;
-        maxSourceFiles: number;
-        seenDownloadPaths: Set<string>;
-        archiveRoot: string;
-    },
-): Promise<void> {
-    let mapText = "";
-    if (sourceMapUrl.startsWith("data:")) {
-        const parsed = parseDataSourceMapUrl(sourceMapUrl);
-        if (!parsed) {
-            result.sourceMaps.push({
-                url: sourceMapUrl.slice(0, 128),
-                source: "inline",
-                status: "failed",
-                sourceCount: 0,
-                extractedFiles: 0,
-                error: "invalid data source map",
-            });
-            return;
-        }
-        mapText = parsed;
-    } else {
-        const fetched = await fetchText(sourceMapUrl, userAgent);
-        result.fetchedSourceMaps += 1;
-        if (!fetched.ok || !fetched.text) {
-            const error = fetched.error || "empty source map response";
-            result.errors.push(`${sourceMapUrl}: ${error}`);
-            result.sourceMaps.push({
-                url: sourceMapUrl,
-                source: target,
-                status: "failed",
-                sourceCount: 0,
-                extractedFiles: 0,
-                error,
-            });
-            return;
-        }
-        mapText = fetched.text;
-    }
-
-    const extracted = await extractFilesFromSourceMap(target, sourceMapUrl, mapText, {
-        ...options,
-        maxSourceFiles: Math.max(0, options.maxSourceFiles - result.files.length),
-    });
-    result.skippedSourcesWithoutContent += extracted.skippedSourcesWithoutContent;
-    result.skippedSourcesByFilter += extracted.skippedSourcesByFilter;
-    result.skippedSourcesTooLarge += extracted.skippedSourcesTooLarge;
-
-    if (extracted.error) {
-        result.errors.push(`${sourceMapUrl}: ${extracted.error}`);
-        result.sourceMaps.push({
-            url: sourceMapUrl,
-            source: target,
-            status: "failed",
-            sourceCount: extracted.sourceCount,
-            extractedFiles: 0,
-            error: extracted.error,
-        });
-        return;
-    }
-
-    result.files.push(...extracted.files);
-    result.extractedFiles += extracted.files.length;
-    result.sourceMaps.push({
-        url: sourceMapUrl.startsWith("data:") ? sourceMapUrl.slice(0, 128) : sourceMapUrl,
-        source: target,
-        status: "parsed",
-        sourceCount: extracted.sourceCount,
-        extractedFiles: extracted.files.length,
-    });
-}
-
-async function processTarget(
-    target: string,
-    userAgent: string,
-    options: {
-        maxJsFiles: number;
-        maxSourceMaps: number;
-        maxSourceFiles: number;
-        maxSourceFileSize: number;
-        includePatterns: string[];
-        excludePatterns: string[];
-        includeNonWebpackSources: boolean;
-        probeSiblingSourceMaps: boolean;
-    },
-): Promise<InternalTargetResult> {
-    const result: InternalTargetResult = {
-        target,
-        success: false,
-        fetchedJsFiles: 0,
-        fetchedSourceMaps: 0,
-        extractedFiles: 0,
-        skippedSourcesWithoutContent: 0,
-        skippedSourcesByFilter: 0,
-        skippedSourcesTooLarge: 0,
-        files: [],
-        sourceMaps: [],
-        errors: [],
-    };
-
-    if (!isHttpUrl(target)) {
-        result.errors.push("target must be an absolute http:// or https:// URL");
-        return result;
-    }
-
-    const entry = await fetchText(target, userAgent);
-    if (!entry.ok || !entry.text) {
-        result.errors.push(entry.error || "empty response");
-        return result;
-    }
-
-    const jsUrls: string[] = [];
-    const sourceMapUrls: string[] = [];
-    const seenJsUrls = new Set<string>();
-    const seenSourceMapUrls = new Set<string>();
-
-    if (isSourceMapUrl(entry.url) || looksLikeSourceMap(entry.text, entry.contentType)) {
-        seenSourceMapUrls.add(entry.url);
-        sourceMapUrls.push(entry.url);
-    } else if (isJavaScriptUrl(entry.url) || !looksLikeHtml(entry.text, entry.contentType)) {
-        seenJsUrls.add(entry.url);
-        jsUrls.push(entry.url);
-        for (const mapUrl of extractSourceMapUrls(entry.text, entry.url, options.probeSiblingSourceMaps)) {
-            if (!seenSourceMapUrls.has(mapUrl)) {
-                seenSourceMapUrls.add(mapUrl);
-                sourceMapUrls.push(mapUrl);
-            }
-        }
-    } else {
-        for (const jsUrl of extractScriptUrls(entry.text, entry.url)) {
-            if (!seenJsUrls.has(jsUrl) && jsUrls.length < options.maxJsFiles) {
-                seenJsUrls.add(jsUrl);
-                jsUrls.push(jsUrl);
-            }
-        }
-    }
-
-    for (const jsUrl of jsUrls.slice(0, options.maxJsFiles)) {
-        if (sourceMapUrls.length >= options.maxSourceMaps) {
-            break;
-        }
-        if (jsUrl === entry.url) {
-            result.fetchedJsFiles += 1;
-            continue;
-        }
-        const js = await fetchText(jsUrl, userAgent);
-        result.fetchedJsFiles += 1;
-        if (!js.ok || !js.text) {
-            result.errors.push(`${jsUrl}: ${js.error || "empty JS response"}`);
-            continue;
-        }
-        for (const mapUrl of extractSourceMapUrls(js.text, js.url, options.probeSiblingSourceMaps)) {
-            if (!seenSourceMapUrls.has(mapUrl) && sourceMapUrls.length < options.maxSourceMaps) {
-                seenSourceMapUrls.add(mapUrl);
-                sourceMapUrls.push(mapUrl);
-            }
-        }
-    }
-
-    const sourceMapOptions = {
-        includeNonWebpackSources: options.includeNonWebpackSources,
-        includePatterns: options.includePatterns,
-        excludePatterns: options.excludePatterns,
-        maxSourceFileSize: options.maxSourceFileSize,
-        maxSourceFiles: options.maxSourceFiles,
-        seenDownloadPaths: new Set<string>(),
-        archiveRoot: archiveRootForTarget(target),
-    };
-
-    for (const sourceMapUrl of sourceMapUrls.slice(0, options.maxSourceMaps)) {
-        if (result.files.length >= options.maxSourceFiles) {
-            break;
-        }
-        await processSourceMapUrl(target, sourceMapUrl, userAgent, result, sourceMapOptions);
-    }
-
-    result.success = result.extractedFiles > 0;
-    return result;
-}
-
-export function get_input_schema() {
-    return {
-        type: "object",
-        required: ["targets"],
-        properties: {
-            targets: {
-                type: "array",
-                items: { type: "string" },
-                description: "Absolute page, JavaScript bundle, or source map URLs to inspect",
-            },
-            userAgent: {
-                type: "string",
-                description: "User-Agent header for fetching pages, bundles, and source maps",
-                default: DEFAULT_USER_AGENT,
-            },
-            saveDirectory: {
-                type: "string",
-                description: "Optional directory where extracted source files are written. Pass the AI assistant working directory or a subdirectory inside it to make results available as workspace files.",
-            },
-            maxJsFiles: {
-                type: "integer",
-                description: "Maximum JavaScript bundle URLs fetched per target",
-                default: DEFAULT_MAX_JS_FILES,
-                minimum: 1,
-                maximum: 300,
-            },
-            maxSourceMaps: {
-                type: "integer",
-                description: "Maximum source map URLs fetched per target",
-                default: DEFAULT_MAX_SOURCE_MAPS,
-                minimum: 1,
-                maximum: 300,
-            },
-            maxSourceFiles: {
-                type: "integer",
-                description: "Maximum extracted source files per target",
-                default: DEFAULT_MAX_SOURCE_FILES,
-                minimum: 1,
-                maximum: 5000,
-            },
-            maxSourceFileSize: {
-                type: "integer",
-                description: "Maximum individual extracted source file size in bytes",
-                default: DEFAULT_MAX_SOURCE_FILE_SIZE,
-                minimum: 1024,
-                maximum: 5_000_000,
-            },
-            includePatterns: {
-                type: "array",
-                items: { type: "string" },
-                description: "Optional source path substrings that must match, for example src/ or .vue",
-            },
-            excludePatterns: {
-                type: "array",
-                items: { type: "string" },
-                description: "Optional source path substrings to exclude, for example node_modules",
-                default: DEFAULT_EXCLUDE_PATTERNS,
-            },
-            includeNonWebpackSources: {
-                type: "boolean",
-                description: "Also extract non-webpack source map entries",
-                default: false,
-            },
-            probeSiblingSourceMaps: {
-                type: "boolean",
-                description: "Also request bundle.js.map for each discovered bundle",
-                default: false,
-            },
-        },
-    };
-}
-
-pluginGlobals.get_input_schema = get_input_schema;
-
-export function get_output_schema() {
-    return {
-        type: "object",
-        properties: {
-            success: { type: "boolean" },
-            data: {
-                type: "object",
-                properties: {
-                    results: { type: "array" },
-                    files: {
-                        type: "array",
-                        description: "Extracted source file metadata. File contents are not included in tool output.",
-                    },
-                    summary: { type: "object" },
-                    download_manifest: {
-                        type: "array",
-                        description: "Lightweight file manifest for building an archive or download list",
-                    },
-                    saved_files: {
-                        type: "array",
-                        description: "Files written to saveDirectory with absolute or provided saved paths",
-                    },
-                    saveDirectory: { type: "string" },
-                    surface_artifacts: { type: "object" },
-                },
-            },
-            error: { type: "string" },
-        },
-    };
-}
-
-pluginGlobals.get_output_schema = get_output_schema;
-
-export async function analyze(input: ToolInput): Promise<ToolOutput> {
-    try {
-        if (!Array.isArray(input.targets) || input.targets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: targets must contain at least one absolute URL",
-            };
-        }
-
-        const targets = input.targets
-            .map(target => String(target || "").trim())
-            .filter(Boolean);
-        if (targets.length === 0) {
-            return {
-                success: false,
-                error: "Invalid input: targets must contain at least one non-empty URL",
-            };
-        }
-
-        const userAgent = input.userAgent || DEFAULT_USER_AGENT;
-        const saveDirectory = normalizeSaveDirectory(input.saveDirectory);
-        const options = {
-            maxJsFiles: clampInteger(input.maxJsFiles, DEFAULT_MAX_JS_FILES, 1, 300),
-            maxSourceMaps: clampInteger(input.maxSourceMaps, DEFAULT_MAX_SOURCE_MAPS, 1, 300),
-            maxSourceFiles: clampInteger(input.maxSourceFiles, DEFAULT_MAX_SOURCE_FILES, 1, 5000),
-            maxSourceFileSize: clampInteger(input.maxSourceFileSize, DEFAULT_MAX_SOURCE_FILE_SIZE, 1024, 5_000_000),
-            includePatterns: Array.isArray(input.includePatterns) ? input.includePatterns.map(String).filter(Boolean) : [],
-            excludePatterns: Array.isArray(input.excludePatterns)
-                ? input.excludePatterns.map(String).filter(Boolean)
-                : DEFAULT_EXCLUDE_PATTERNS,
-            includeNonWebpackSources: input.includeNonWebpackSources === true,
-            probeSiblingSourceMaps: input.probeSiblingSourceMaps === true,
-        };
-
-        await reportMonitorProgress(input.__monitorExecution, {
-            current: 0,
-            total: targets.length,
-            phase: "prepare",
-            message: "Preparing webpack source download",
-        });
-
-        const internalResults: InternalTargetResult[] = [];
-        for (let index = 0; index < targets.length; index += 1) {
-            const target = targets[index];
-            await reportMonitorProgress(input.__monitorExecution, {
-                current: index,
-                total: targets.length,
-                phase: "download",
-                currentTarget: target,
-                message: `Extracting webpack sources from ${target}`,
-            });
-            internalResults.push(await processTarget(target, userAgent, options));
-        }
-
-        const internalFiles = internalResults.flatMap(result => result.files);
-        await saveExtractedFiles(saveDirectory, internalFiles);
-        const files = internalFiles.map(summarizeSourceFile);
-        const results = internalResults.map(result => ({
-            ...result,
-            files: result.files.map(summarizeSourceFile),
-        }));
-
-        const successfulTargets = results.filter(result => result.success).length;
-        const summary = {
-            totalTargets: targets.length,
-            successfulTargets,
-            failedTargets: targets.length - successfulTargets,
-            fetchedJsFiles: results.reduce((sum, result) => sum + result.fetchedJsFiles, 0),
-            fetchedSourceMaps: results.reduce((sum, result) => sum + result.fetchedSourceMaps, 0),
-            extractedFiles: internalFiles.length,
-            skippedSourcesWithoutContent: results.reduce((sum, result) => sum + result.skippedSourcesWithoutContent, 0),
-            skippedSourcesByFilter: results.reduce((sum, result) => sum + result.skippedSourcesByFilter, 0),
-            skippedSourcesTooLarge: results.reduce((sum, result) => sum + result.skippedSourcesTooLarge, 0),
-        };
-
-        const downloadManifest = files.map(file => ({
-            archivePath: file.archivePath,
-            savedPath: file.savedPath,
-            saveStatus: file.saveStatus,
-            sourcePath: file.sourcePath,
-            sourceMapUrl: file.sourceMapUrl,
-            size: file.size,
-            sha256: file.sha256,
-            mimeType: file.mimeType,
-        }));
-        const savedFiles = downloadManifest.filter((file): file is typeof file & { savedPath: string; saveStatus: "saved" } => (
-            file.saveStatus === "saved" && typeof file.savedPath === "string" && file.savedPath.length > 0
-        ));
-
-        await reportMonitorProgress(input.__monitorExecution, {
-            current: targets.length,
-            total: targets.length,
-            phase: "complete",
-            message: `Extracted ${files.length} webpack source file(s)`,
-        });
-
-        return {
-            success: files.length > 0,
-            data: {
-                results,
-                files,
-                summary,
-                download_manifest: downloadManifest,
-                saved_files: savedFiles,
-                saveDirectory,
-                surface_artifacts: {
-                    frontend_source_files: downloadManifest,
-                },
-            },
-            error: files.length > 0 ? undefined : "No webpack source files with sourcesContent were extracted",
-        };
-    } catch (error: any) {
-        return {
-            success: false,
-            error: error?.message || String(error),
-        };
-    }
-}
-
-pluginGlobals.analyze = analyze;
+// Generated by scripts/build_monitor_plugins.mjs from source/agent/webpack_source_downloader/index.ts; edit the source modules.
+var MONITOR_DELTA_INPUT_FIELDS=["targets","target_objects","service_targets","__monitorExecution","previousSnapshots","previous_snapshots","dictionaryEntries","\
+dictionary"];function isJsonObject(value){return value!==null&&typeof value==="object"&&!Array.isArray(value)}function serializedBytes(text){let bytes=0;for(let index=0;index<
+text.length;index++){const code=text.charCodeAt(index);if(code<128)bytes++;else if(code<2048)bytes+=2;else if(code>=55296&&code<=56319){bytes+=4;index++}else bytes+=
+3}return bytes}function jsonBytes(value){return serializedBytes(JSON.stringify(value))}function objectNode(members){let bytes=2+Math.max(0,members.size-1);const entries=[];
+for(const[key,entry]of members){bytes+=entry.keyBytes+1+entry.node.bytes;entries.push([key,entry.node.value])}return{kind:"object",value:Object.fromEntries(entries),
+bytes,members}}function node(value){if(Array.isArray(value)){let bytes=2+Math.max(0,value.length-1);for(const item of value)bytes+=node(item).bytes;return{kind:"\
+array",value,bytes}}if(isJsonObject(value)){return objectNode(new Map(Object.entries(value).map(([key,value2])=>[key,{keyBytes:jsonBytes(key),node:node(value2)}])))}
+return{kind:"scalar",value,bytes:jsonBytes(value)}}function validateDeltaData(data){if(!isJsonObject(data)){throw new Error("Monitor result delta must contain s\
+uccess:true and an object data")}for(const key of MONITOR_DELTA_INPUT_FIELDS){if(Object.prototype.hasOwnProperty.call(data,key)){throw new Error(`Monitor result\
+ delta must not repeat execution input field data.${key}`)}}if(data.snapshots!==void 0&&!isJsonObject(data.snapshots)){throw new Error("Monitor snapshot delta m\
+ust be an object")}}function copyMonitorDelta(output){if(!isJsonObject(output)||output.success!==true){throw new Error("Monitor result delta must contain succes\
+s:true and an object data")}validateDeltaData(output.data);const data=JSON.parse(JSON.stringify(output.data));validateDeltaData(data);return node(data)}var EMPTY_REQUEST_BYTES=jsonBytes({sequence:0,work:[]});function monitorRequestBytes(sequence,workContentsBytes){return EMPTY_REQUEST_BYTES-1+jsonBytes(sequence)+
+workContentsBytes}var MAX_WORK_ITEMS=32;var MAX_JSON_BYTES=2*1024*1024;var COMMIT_INTERVAL_MS=5e3;function positiveLimit(value,maximum,label){if(!Number.isInteger(value)||Number(
+value)<1||Number(value)>maximum){throw new Error(`Monitor result stream ${label} must be an integer between 1 and ${maximum}`)}return Number(value)}function createMonitorResultStream(input){
+const context=isJsonObject(input)?input.__monitorExecution:void 0;if(context===void 0){return{enabled:false,assertHealthy(){},async record(_target,_key,_output,_options){},
+async finish(finalOutput){return finalOutput}}}if(!isJsonObject(context)||!isJsonObject(context.result_stream)||context.result_stream.protocol!=="monitor-result\
+s-v2"){throw new Error("Monitor execution requires the monitor-results-v2 result stream")}const monitor=globalThis.Sentinel?.Monitor;if(typeof monitor?.commitResults!==
+"function"){throw new Error("Monitor execution requires Sentinel.Monitor.commitResults")}const stream=context.result_stream;if(!Array.isArray(stream.targets)||stream.
+targets.some(target=>typeof target!=="string"||!target)){throw new Error("Monitor result stream requires the host-owned targets array")}const expected=new Set(stream.
+targets);const chunkSize=positiveLimit(stream.max_work_items,MAX_WORK_ITEMS,"max_work_items");const maxPending=positiveLimit(stream.max_pending_commits,2,"max_p\
+ending_commits");const byteLimit=positiveLimit(stream.max_bytes,MAX_JSON_BYTES,"max_bytes");const completed=new Set;const pending=new Set;const bufferedKeys=new Set;
+let buffered=[];let workContentsBytes=0;let sequence=0;let lastCommitAt=Date.now();let failed;let finished=false;let serialization=Promise.resolve();let committedItems=0;
+let submittedBatches=0;let maxPendingObserved=0;let backpressureMs=0;let submittedJsonBytes=0;let committedJsonBytes=0;let maxBatchJsonBytes=0;function assertHealthy(){
+if(failed)throw failed;if(finished)throw new Error("Monitor result stream is already finished")}function latch(error){failed||(failed=error instanceof Error?error:
+new Error(String(error)));return failed}async function capacity(){const start=Date.now();while(pending.size>=maxPending){await Promise.race(pending);if(failed)throw failed}
+backpressureMs+=Date.now()-start;if(failed)throw failed}async function flush(){assertHealthy();if(!buffered.length)return;await capacity();const request={sequence:sequence+
+1,work:buffered};const encodedBytes=monitorRequestBytes(request.sequence,workContentsBytes);if(encodedBytes>byteLimit)throw new Error("Monitor result batch exce\
+eds the JSON byte limit");sequence++;const keys=buffered.map(item=>JSON.stringify([item.target,item.key]));buffered=[];workContentsBytes=0;lastCommitAt=Date.now();
+submittedBatches++;submittedJsonBytes+=encodedBytes;maxBatchJsonBytes=Math.max(maxBatchJsonBytes,encodedBytes);let commit;commit=Promise.resolve().then(async()=>{
+const ack=await monitor.commitResults(request);if(ack?.ok!==true||ack.sequence!==request.sequence){throw new Error(`Monitor result commit ${request.sequence} wa\
+s not acknowledged`)}committedItems+=request.work.length;committedJsonBytes+=encodedBytes}).catch(error=>{latch(error)}).finally(()=>{for(const key of keys)bufferedKeys.
+delete(key);pending.delete(commit)});pending.add(commit);maxPendingObserved=Math.max(maxPendingObserved,pending.size);await capacity()}function exclusive(action){
+const operation=serialization.then(action).catch(error=>{throw latch(error)});serialization=operation.then(()=>{},()=>{});return operation}async function record(target,key,output,options={}){
+return exclusive(async()=>{assertHealthy();if(typeof target!=="string"||!expected.has(target))throw new Error("Monitor work target is not owned by this executio\
+n");if(typeof key!=="string"||!key||key.length>2048)throw new Error("Monitor work key must contain 1 to 2048 characters");if(completed.has(target))throw new Error(
+"Monitor work cannot follow a completed target");const identity=JSON.stringify([target,key]);if(bufferedKeys.has(identity))throw new Error("Monitor work repeats\
+ an unacknowledged target/key");const status=options.status??"ok";if(!["ok","failed","skipped"].includes(status))throw new Error("Invalid monitor work status");
+const delta=copyMonitorDelta(output);if(status!=="ok"&&isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length){throw new Error("Only suc\
+cessful work may update snapshots")}if(isJsonObject(delta.value.snapshots)&&Object.keys(delta.value.snapshots).length&&options.snapshot_complete!==true){throw new Error(
+"Snapshot updates require an explicitly complete observation")}const item={target,key,status,complete:options.complete!==false,output:{success:true,data:delta.value}};
+if(options.error!==void 0)item.error=options.error;if(options.failure_category!==void 0)item.failure_category=options.failure_category;if(options.snapshot_complete!==
+void 0)item.snapshot_complete=options.snapshot_complete;const itemBytes=jsonBytes(item);if(monitorRequestBytes(sequence+1,itemBytes)>byteLimit){throw new Error(
+"A single monitor work result exceeds the JSON byte limit")}let combinedWorkBytes=workContentsBytes+(buffered.length?1:0)+itemBytes;if(buffered.length&&monitorRequestBytes(
+sequence+1,combinedWorkBytes)>byteLimit){await flush();combinedWorkBytes=itemBytes}buffered.push(item);workContentsBytes=combinedWorkBytes;bufferedKeys.add(identity);
+if(item.complete)completed.add(target);if(buffered.length>=chunkSize||Date.now()-lastCommitAt>=COMMIT_INTERVAL_MS)await flush()})}async function finish(finalOutput){
+return exclusive(async()=>{assertHealthy();await flush();await Promise.all(pending);if(failed)throw failed;const finalRecord=isJsonObject(finalOutput)?finalOutput:
+void 0;if(finalRecord?.success===false){throw new Error(typeof finalRecord.error==="string"&&finalRecord.error?finalRecord.error:"Monitor plugin reported an uns\
+uccessful execution")}if(completed.size!==expected.size){throw new Error(`Monitor result stream ended before all targets completed (${completed.size}/${expected.
+size})`)}const finalDiagnostics=finalRecord&&isJsonObject(finalRecord.data)&&isJsonObject(finalRecord.data.summary)&&isJsonObject(finalRecord.data.summary.diagnostics)?
+finalRecord.data.summary.diagnostics:{};const pluginMetrics=Object.fromEntries(Object.entries(finalDiagnostics).filter(([,value])=>typeof value==="number"&&Number.
+isFinite(value)&&value>=0));finished=true;return{success:true,data:{stream_complete:true,summary:{diagnostics:{...pluginMetrics,submitted_json_bytes:submittedJsonBytes,
+committed_json_bytes:committedJsonBytes,max_batch_json_bytes:maxBatchJsonBytes,committed_work_items:committedItems,completed_targets:completed.size,submitted_batches:submittedBatches,
+max_pending_commits:maxPendingObserved,backpressure_ms_sum:backpressureMs}}}}})}return{enabled:true,assertHealthy,record,finish}}var aliases=["targets","urls","url","domains","domain","ips","ip"];var activeScope;function observedFetch(input,init){const scope=activeScope;if(!scope)return globalThis.
+fetch(input,init);const key=`http:${++scope.sequence}`;const operation=(async()=>{scope.stream.assertHealthy();let response;try{response=await globalThis.fetch(
+input,init)}catch(error){await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"http_observation",success:false}]}},{status:"failed",complete:false,
+error:String(error).slice(0,2048),failure_category:"network_other"});throw error}await scope.stream.record(scope.target,key,{success:true,data:{results:[{kind:"\
+http_observation",success:true,statusCode:response.status,method:String(init?.method||"GET")}]}},{complete:false});return response})();scope.pending.add(operation);
+void operation.finally(()=>scope.pending.delete(operation)).catch(()=>{});return operation}async function runMonitorTool(input,schema,business){const stream=createMonitorResultStream(
+input);if(activeScope)throw new Error("A monitored business scope is already active");if(!stream.enabled)return await business(input);try{const properties=schema?.
+properties||{};const supported=aliases.filter(key=>Object.prototype.hasOwnProperty.call(properties,key));if(!supported.length)throw new Error("Monitor business \
+schema must declare a standard target input");const targets=input.__monitorExecution.result_stream.targets;for(const target of targets){stream.assertHealthy();const ordinary={
+...input};delete ordinary.__monitorExecution;for(const key of aliases){if(!supported.includes(key))delete ordinary[key];else ordinary[key]=["url","domain","ip"].
+includes(key)?target:[target]}let result;const scope={target,stream,sequence:0,pending:new Set};activeScope=scope;try{result=await business(ordinary)}catch(error){
+result={success:false,error:error instanceof Error?error.message:String(error)}}finally{while(scope.pending.size)await Promise.allSettled([...scope.pending]);activeScope=
+void 0}stream.assertHealthy();if(!result||typeof result.success!=="boolean")throw new Error("Monitor business must return a ToolOutput");const success=result.success===
+true;const data={results:[{target,output:result}]};await stream.record(target,"complete",{success:true,data},{status:success?"ok":"failed",complete:true,snapshot_complete:success,
+...success?{}:{error:String(result.error||"Business observation failed")}})}return await stream.finish()}catch(error){const failure={success:false,error:error instanceof
+Error?error.message:String(error)};try{return await stream.finish(failure)}catch(saveError){return{success:false,error:saveError instanceof Error?saveError.message:
+String(saveError)}}}}function monitorToolOutputSchema(business){const terminalData={type:"object",required:["stream_complete","summary"],properties:{stream_complete:{
+const:true},summary:{type:"object"}}};const terminal={type:"object",required:["success","data"],properties:{success:{const:true},data:terminalData}};const failure={
+type:"object",required:["success","error"],properties:{success:{const:false},error:{type:"string",minLength:1}}};return{type:"object",required:["success"],properties:{
+success:{type:"boolean",description:"Execution outcome"},data:{type:"object",description:"Business output or acknowledged monitor completion",properties:{stream_complete:{
+type:"boolean"},summary:{type:"object"}}},error:{type:"string",description:"Execution failure"}},anyOf:[business,terminal,failure]}}var pluginGlobals=globalThis;var DEFAULT_USER_AGENT="Sentinel-Webpack-Source-Downloader/1.0";var DEFAULT_MAX_JS_FILES=50;var DEFAULT_MAX_SOURCE_MAPS=50;var DEFAULT_MAX_SOURCE_FILES=500;
+var DEFAULT_MAX_SOURCE_FILE_SIZE=75e4;var MAX_REMOTE_TEXT_BYTES=2e7;var DEFAULT_EXCLUDE_PATTERNS=["node_modules/","(webpack)/"];async function reportMonitorProgress(monitorExecution,update){
+if(!monitorExecution)return false;try{return Boolean(await Sentinel.Monitor?.reportProgress?.({monitorProgress:{taskId:monitorExecution.task_id,taskName:monitorExecution.
+task_name,programId:monitorExecution.program_id,executionMode:monitorExecution.execution_mode,startedAt:monitorExecution.started_at,currentPlugin:monitorExecution.
+current_plugin,currentPluginIndex:monitorExecution.current_plugin_index,completedSteps:monitorExecution.completed_steps,totalSteps:monitorExecution.total_steps,
+importedAssets:monitorExecution.imported_assets},...update}))}catch{return false}}function clampInteger(value,fallback,min,max){const parsed=Number(value);if(!Number.
+isFinite(parsed))return fallback;return Math.max(min,Math.min(Math.floor(parsed),max))}function isHttpUrl(value){return/^https?:\/\//i.test(value.trim())}function resolveUrl(baseUrl,value){
+const candidate=value.trim().replace(/\\\//g,"/");if(!candidate||candidate.startsWith("webpack://")||candidate.startsWith("webpack-internal://")){return""}try{return new URL(
+candidate,baseUrl).toString()}catch{return""}}async function fetchText(url,userAgent){try{const response=await observedFetch(url,{method:"GET",headers:{Accept:"\
+text/html,application/javascript,text/javascript,application/json,*/*","User-Agent":userAgent},timeout:3e4,maxBodyBytes:5*1024*1024});const contentType=response.
+headers.get("content-type")||"";const contentLength=Number(response.headers.get("content-length")||"0");if(Number.isFinite(contentLength)&&contentLength>MAX_REMOTE_TEXT_BYTES){
+return{ok:false,status:response.status,url:response.url||url,contentType,text:"",size:contentLength,error:`remote body is too large: ${contentLength} bytes`}}const text=await response.
+text();return{ok:response.ok,status:response.status,url:response.url||url,contentType,text:text.length>MAX_REMOTE_TEXT_BYTES?"":text,size:text.length,error:response.
+ok?text.length>MAX_REMOTE_TEXT_BYTES?`remote body is too large: ${text.length} bytes`:void 0:`HTTP ${response.status}`}}catch(error){return{ok:false,status:null,
+url,contentType:"",text:"",size:0,error:error?.message||String(error)}}}function isSourceMapUrl(url){return/\.map(?:[?#].*)?$/i.test(url)}function isJavaScriptUrl(url){
+return/\.(?:js|mjs|cjs)(?:[?#].*)?$/i.test(url)}function looksLikeSourceMap(text,contentType){if(/json|source-map/i.test(contentType))return/"sources"\s*:/.test(
+text);return/^\s*\{/.test(text)&&/"sources"\s*:/.test(text)}function looksLikeHtml(text,contentType){return/html/i.test(contentType)||/<script[\s>]/i.test(text)||
+/<!doctype html/i.test(text)}function extractScriptUrls(html,baseUrl){const urls=[];const seen=new Set;const scriptRegex=/<script\b[^>]*\bsrc\s*=\s*(?:(["'])(.*?)\1|([^"'\s>]+))/gi;
+let match;while((match=scriptRegex.exec(html))!==null){const resolved=resolveUrl(baseUrl,match[2]||match[3]||"");if(resolved&&!seen.has(resolved)){seen.add(resolved);
+urls.push(resolved)}}return urls}function extractSourceMapUrls(jsText,jsUrl,probeSiblingSourceMaps){const urls=[];const seen=new Set;const sourceMapRegex=/\/\/[#@]\s*sourceMappingURL\s*=\s*(\S+)/g;
+let match;while((match=sourceMapRegex.exec(jsText))!==null){const value=match[1].trim();const resolved=value.startsWith("data:")?value:resolveUrl(jsUrl,value);if(resolved&&
+!seen.has(resolved)){seen.add(resolved);urls.push(resolved)}}if(probeSiblingSourceMaps){const sibling=`${jsUrl.split("#")[0].split("?")[0]}.map`;if(!seen.has(sibling)){
+seen.add(sibling);urls.push(sibling)}}return urls}function parseDataSourceMapUrl(url){const match=url.match(/^data:application\/json(?:;charset=[^;,]+)?(;base64)?,(.*)$/i);
+if(!match)return null;const payload=match[2]||"";try{if(match[1]){return atob(payload)}return decodeURIComponent(payload)}catch{return null}}function shouldIncludeSource(sourcePath,includeNonWebpackSources,includePatterns,excludePatterns){
+const normalized=sourcePath.trim();const isWebpackSource=/^webpack(?:-internal)?:\/\//i.test(normalized);if(!includeNonWebpackSources&&!isWebpackSource){return false}
+if(includePatterns.length>0&&!includePatterns.some(pattern=>normalized.includes(pattern))){return false}if(excludePatterns.some(pattern=>normalized.includes(pattern))){
+return false}return true}function buildEffectiveSourcePath(sourceRoot,sourcePath){const normalizedSourcePath=String(sourcePath||"").trim();const normalizedSourceRoot=String(
+sourceRoot||"").trim();if(!normalizedSourceRoot||/^webpack(?:-internal)?:\/\//i.test(normalizedSourcePath)||/^https?:\/\//i.test(normalizedSourcePath)){return normalizedSourcePath}
+return`${normalizedSourceRoot.replace(/\/+$/g,"")}/${normalizedSourcePath.replace(/^\/+/g,"")}`}function normalizeDownloadPath(sourcePath,index){let value=sourcePath.
+replace(/^webpack(?:-internal)?:\/\//i,"").replace(/^\/+/,"").replace(/\\/g,"/").split("#")[0].split("?")[0].trim();value=value.split("/").filter(segment=>segment&&
+segment!=="."&&segment!=="..").join("/");if(!value){value=`source_${index}.txt`}return value.replace(/[<>:"|*]/g,"_")}function uniquePath(path,seenPaths){if(!seenPaths.
+has(path)){seenPaths.add(path);return path}const slashIndex=path.lastIndexOf("/");const dir=slashIndex>=0?`${path.slice(0,slashIndex+1)}`:"";const name=slashIndex>=
+0?path.slice(slashIndex+1):path;const dotIndex=name.lastIndexOf(".");const stem=dotIndex>0?name.slice(0,dotIndex):name;const ext=dotIndex>0?name.slice(dotIndex):
+"";let counter=2;while(seenPaths.has(`${dir}${stem}__${counter}${ext}`)){counter+=1}const result=`${dir}${stem}__${counter}${ext}`;seenPaths.add(result);return result}
+function filenameFromPath(path){return path.split("/").filter(Boolean).pop()||"source.txt"}function mimeTypeFromFilename(filename){const lower=filename.toLowerCase();
+if(lower.endsWith(".ts"))return"text/typescript";if(lower.endsWith(".tsx"))return"text/tsx";if(lower.endsWith(".js")||lower.endsWith(".mjs")||lower.endsWith(".c\
+js"))return"application/javascript";if(lower.endsWith(".jsx"))return"text/jsx";if(lower.endsWith(".vue"))return"text/x-vue";if(lower.endsWith(".css")||lower.endsWith(
+".scss")||lower.endsWith(".sass")||lower.endsWith(".less"))return"text/css";if(lower.endsWith(".json"))return"application/json";if(lower.endsWith(".html")||lower.
+endsWith(".htm"))return"text/html";if(lower.endsWith(".svg"))return"image/svg+xml";return"text/plain"}function textToBase64(text){const bytes=new TextEncoder().
+encode(text);let binary="";const chunkSize=32768;for(let offset=0;offset<bytes.length;offset+=chunkSize){const chunk=bytes.subarray(offset,offset+chunkSize);binary+=
+String.fromCharCode(...chunk)}return btoa(binary)}async function sha256Hex(text){const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(text));
+return Array.from(new Uint8Array(digest)).map(byte=>byte.toString(16).padStart(2,"0")).join("")}function archiveRootForTarget(target){try{const url=new URL(target);
+return`${url.hostname}${url.pathname.replace(/[^a-zA-Z0-9._/-]+/g,"_")}`.replace(/\/+$/g,"")||url.hostname}catch{return"target"}}function normalizeSaveDirectory(value){
+if(typeof value!=="string")return void 0;const trimmed=value.trim();if(!trimmed)return void 0;if(trimmed.includes("\0")){throw new Error("saveDirectory must not\
+ contain NUL bytes")}return trimmed.replace(/[\\/]+$/g,"")}function safeRelativeFilePath(value){const parts=value.replace(/\\/g,"/").split("/").filter(part=>part&&
+part!=="."&&part!=="..");if(parts.length===0){throw new Error(`Invalid archive path: ${value}`)}return parts.join("/")}function joinSavePath(baseDirectory,relativePath){
+return`${baseDirectory}/${safeRelativeFilePath(relativePath)}`}function parentDirectory(path){const index=path.lastIndexOf("/");return index>0?path.slice(0,index):
+"."}async function saveExtractedFiles(saveDirectory,files){if(!saveDirectory||files.length===0)return;await Deno.mkdir(saveDirectory,{recursive:true});for(const file of files){
+const savedPath=joinSavePath(saveDirectory,file.archivePath);await Deno.mkdir(parentDirectory(savedPath),{recursive:true});await Deno.writeTextFile(savedPath,file.
+content);file.savedPath=savedPath}}function summarizeSourceFile(file){return{target:file.target,sourceMapUrl:file.sourceMapUrl,sourcePath:file.sourcePath,downloadPath:file.
+downloadPath,archivePath:file.archivePath,filename:file.filename,mimeType:file.mimeType,encoding:file.encoding,savedPath:file.savedPath,saveStatus:file.savedPath?
+"saved":"not_saved",size:file.size,sha256:file.sha256}}async function extractFilesFromSourceMap(target,sourceMapUrl,mapText,options){const files=[];let sourceCount=0;
+let skippedSourcesWithoutContent=0;let skippedSourcesByFilter=0;let skippedSourcesTooLarge=0;let parsed;try{parsed=JSON.parse(mapText)}catch(error){return{files,
+sourceCount,skippedSourcesWithoutContent,skippedSourcesByFilter,skippedSourcesTooLarge,error:error?.message||String(error)}}const queue=[parsed];for(let queueIndex=0;queueIndex<
+queue.length;queueIndex+=1){const map=queue[queueIndex];const sources=Array.isArray(map.sources)?map.sources:[];const sourcesContent=Array.isArray(map.sourcesContent)?
+map.sourcesContent:[];sourceCount+=sources.length;for(let index=0;index<sources.length;index+=1){const sourcePath=buildEffectiveSourcePath(map.sourceRoot,String(
+sources[index]||""));const content=sourcesContent[index];if(!shouldIncludeSource(sourcePath,options.includeNonWebpackSources,options.includePatterns,options.excludePatterns)){
+skippedSourcesByFilter+=1;continue}if(typeof content!=="string"){skippedSourcesWithoutContent+=1;continue}if(content.length>options.maxSourceFileSize){skippedSourcesTooLarge+=
+1;continue}if(files.length>=options.maxSourceFiles){skippedSourcesByFilter+=1;continue}const downloadPath=uniquePath(normalizeDownloadPath(sourcePath,index),options.
+seenDownloadPaths);const filename=filenameFromPath(downloadPath);const archivePath=`${options.archiveRoot}/${downloadPath}`;const sha256=await sha256Hex(content);
+files.push({target,sourceMapUrl,sourcePath,downloadPath,archivePath,filename,mimeType:mimeTypeFromFilename(filename),encoding:"utf-8",content,contentBase64:textToBase64(
+content),size:content.length,sha256})}if(Array.isArray(map.sections)){for(const section of map.sections){if(section?.map&&typeof section.map==="object"){queue.push(
+section.map)}}}}return{files,sourceCount,skippedSourcesWithoutContent,skippedSourcesByFilter,skippedSourcesTooLarge}}async function processSourceMapUrl(target,sourceMapUrl,userAgent,result,options){
+let mapText="";if(sourceMapUrl.startsWith("data:")){const parsed=parseDataSourceMapUrl(sourceMapUrl);if(!parsed){result.sourceMaps.push({url:sourceMapUrl.slice(
+0,128),source:"inline",status:"failed",sourceCount:0,extractedFiles:0,error:"invalid data source map"});return}mapText=parsed}else{const fetched=await fetchText(
+sourceMapUrl,userAgent);result.fetchedSourceMaps+=1;if(!fetched.ok||!fetched.text){const error=fetched.error||"empty source map response";result.errors.push(`${sourceMapUrl}\
+: ${error}`);result.sourceMaps.push({url:sourceMapUrl,source:target,status:"failed",sourceCount:0,extractedFiles:0,error});return}mapText=fetched.text}const extracted=await extractFilesFromSourceMap(
+target,sourceMapUrl,mapText,{...options,maxSourceFiles:Math.max(0,options.maxSourceFiles-result.files.length)});result.skippedSourcesWithoutContent+=extracted.skippedSourcesWithoutContent;
+result.skippedSourcesByFilter+=extracted.skippedSourcesByFilter;result.skippedSourcesTooLarge+=extracted.skippedSourcesTooLarge;if(extracted.error){result.errors.
+push(`${sourceMapUrl}: ${extracted.error}`);result.sourceMaps.push({url:sourceMapUrl,source:target,status:"failed",sourceCount:extracted.sourceCount,extractedFiles:0,
+error:extracted.error});return}result.files.push(...extracted.files);result.extractedFiles+=extracted.files.length;result.sourceMaps.push({url:sourceMapUrl.startsWith(
+"data:")?sourceMapUrl.slice(0,128):sourceMapUrl,source:target,status:"parsed",sourceCount:extracted.sourceCount,extractedFiles:extracted.files.length})}async function processTarget(target,userAgent,options){
+const result={target,success:false,fetchedJsFiles:0,fetchedSourceMaps:0,extractedFiles:0,skippedSourcesWithoutContent:0,skippedSourcesByFilter:0,skippedSourcesTooLarge:0,
+files:[],sourceMaps:[],errors:[]};if(!isHttpUrl(target)){result.errors.push("target must be an absolute http:// or https:// URL");return result}const entry=await fetchText(
+target,userAgent);if(!entry.ok||!entry.text){result.errors.push(entry.error||"empty response");return result}const jsUrls=[];const sourceMapUrls=[];const seenJsUrls=new Set;
+const seenSourceMapUrls=new Set;if(isSourceMapUrl(entry.url)||looksLikeSourceMap(entry.text,entry.contentType)){seenSourceMapUrls.add(entry.url);sourceMapUrls.push(
+entry.url)}else if(isJavaScriptUrl(entry.url)||!looksLikeHtml(entry.text,entry.contentType)){seenJsUrls.add(entry.url);jsUrls.push(entry.url);for(const mapUrl of extractSourceMapUrls(
+entry.text,entry.url,options.probeSiblingSourceMaps)){if(!seenSourceMapUrls.has(mapUrl)){seenSourceMapUrls.add(mapUrl);sourceMapUrls.push(mapUrl)}}}else{for(const jsUrl of extractScriptUrls(
+entry.text,entry.url)){if(!seenJsUrls.has(jsUrl)&&jsUrls.length<options.maxJsFiles){seenJsUrls.add(jsUrl);jsUrls.push(jsUrl)}}}for(const jsUrl of jsUrls.slice(0,
+options.maxJsFiles)){if(sourceMapUrls.length>=options.maxSourceMaps){break}if(jsUrl===entry.url){result.fetchedJsFiles+=1;continue}const js=await fetchText(jsUrl,
+userAgent);result.fetchedJsFiles+=1;if(!js.ok||!js.text){result.errors.push(`${jsUrl}: ${js.error||"empty JS response"}`);continue}for(const mapUrl of extractSourceMapUrls(
+js.text,js.url,options.probeSiblingSourceMaps)){if(!seenSourceMapUrls.has(mapUrl)&&sourceMapUrls.length<options.maxSourceMaps){seenSourceMapUrls.add(mapUrl);sourceMapUrls.
+push(mapUrl)}}}const sourceMapOptions={includeNonWebpackSources:options.includeNonWebpackSources,includePatterns:options.includePatterns,excludePatterns:options.
+excludePatterns,maxSourceFileSize:options.maxSourceFileSize,maxSourceFiles:options.maxSourceFiles,seenDownloadPaths:new Set,archiveRoot:archiveRootForTarget(target)};
+for(const sourceMapUrl of sourceMapUrls.slice(0,options.maxSourceMaps)){if(result.files.length>=options.maxSourceFiles){break}await processSourceMapUrl(target,sourceMapUrl,
+userAgent,result,sourceMapOptions)}result.success=result.extractedFiles>0;return result}function get_input_schema(){return{type:"object",required:["targets"],properties:{
+targets:{type:"array",items:{type:"string"},description:"Absolute page, JavaScript bundle, or source map URLs to inspect"},userAgent:{type:"string",description:"\
+User-Agent header for fetching pages, bundles, and source maps",default:DEFAULT_USER_AGENT},saveDirectory:{type:"string",description:"Optional directory where e\
+xtracted source files are written. Pass the AI assistant working directory or a subdirectory inside it to make results available as workspace files."},maxJsFiles:{
+type:"integer",description:"Maximum JavaScript bundle URLs fetched per target",default:DEFAULT_MAX_JS_FILES,minimum:1,maximum:300},maxSourceMaps:{type:"integer",
+description:"Maximum source map URLs fetched per target",default:DEFAULT_MAX_SOURCE_MAPS,minimum:1,maximum:300},maxSourceFiles:{type:"integer",description:"Maxi\
+mum extracted source files per target",default:DEFAULT_MAX_SOURCE_FILES,minimum:1,maximum:5e3},maxSourceFileSize:{type:"integer",description:"Maximum individual\
+ extracted source file size in bytes",default:DEFAULT_MAX_SOURCE_FILE_SIZE,minimum:1024,maximum:5e6},includePatterns:{type:"array",items:{type:"string"},description:"\
+Optional source path substrings that must match, for example src/ or .vue"},excludePatterns:{type:"array",items:{type:"string"},description:"Optional source pat\
+h substrings to exclude, for example node_modules",default:DEFAULT_EXCLUDE_PATTERNS},includeNonWebpackSources:{type:"boolean",description:"Also extract non-webp\
+ack source map entries",default:false},probeSiblingSourceMaps:{type:"boolean",description:"Also request bundle.js.map for each discovered bundle",default:false}}}}
+pluginGlobals.get_input_schema=get_input_schema;function getBusinessOutputSchema(){return{type:"object",properties:{success:{type:"boolean"},data:{type:"object",
+properties:{results:{type:"array"},files:{type:"array",description:"Extracted source file metadata. File contents are not included in tool output."},summary:{type:"\
+object"},download_manifest:{type:"array",description:"Lightweight file manifest for building an archive or download list"},saved_files:{type:"array",description:"\
+Files written to saveDirectory with absolute or provided saved paths"},saveDirectory:{type:"string"},surface_artifacts:{type:"object"}}},error:{type:"string"}}}}
+pluginGlobals.get_output_schema=get_output_schema;async function analyzeBusiness(input){try{if(!Array.isArray(input.targets)||input.targets.length===0){return{success:false,
+error:"Invalid input: targets must contain at least one absolute URL"}}const targets=input.targets.map(target=>String(target||"").trim()).filter(Boolean);if(targets.
+length===0){return{success:false,error:"Invalid input: targets must contain at least one non-empty URL"}}const userAgent=input.userAgent||DEFAULT_USER_AGENT;const saveDirectory=normalizeSaveDirectory(
+input.saveDirectory);const options={maxJsFiles:clampInteger(input.maxJsFiles,DEFAULT_MAX_JS_FILES,1,300),maxSourceMaps:clampInteger(input.maxSourceMaps,DEFAULT_MAX_SOURCE_MAPS,
+1,300),maxSourceFiles:clampInteger(input.maxSourceFiles,DEFAULT_MAX_SOURCE_FILES,1,5e3),maxSourceFileSize:clampInteger(input.maxSourceFileSize,DEFAULT_MAX_SOURCE_FILE_SIZE,
+1024,5e6),includePatterns:Array.isArray(input.includePatterns)?input.includePatterns.map(String).filter(Boolean):[],excludePatterns:Array.isArray(input.excludePatterns)?
+input.excludePatterns.map(String).filter(Boolean):DEFAULT_EXCLUDE_PATTERNS,includeNonWebpackSources:input.includeNonWebpackSources===true,probeSiblingSourceMaps:input.
+probeSiblingSourceMaps===true};await reportMonitorProgress(input.__monitorExecution,{current:0,total:targets.length,phase:"prepare",message:"Preparing webpack s\
+ource download"});const internalResults=[];for(let index=0;index<targets.length;index+=1){const target=targets[index];await reportMonitorProgress(input.__monitorExecution,
+{current:index,total:targets.length,phase:"download",currentTarget:target,message:`Extracting webpack sources from ${target}`});internalResults.push(await processTarget(
+target,userAgent,options))}const internalFiles=internalResults.flatMap(result=>result.files);await saveExtractedFiles(saveDirectory,internalFiles);const files=internalFiles.
+map(summarizeSourceFile);const results=internalResults.map(result=>({...result,files:result.files.map(summarizeSourceFile)}));const successfulTargets=results.filter(
+result=>result.success).length;const summary={totalTargets:targets.length,successfulTargets,failedTargets:targets.length-successfulTargets,fetchedJsFiles:results.
+reduce((sum,result)=>sum+result.fetchedJsFiles,0),fetchedSourceMaps:results.reduce((sum,result)=>sum+result.fetchedSourceMaps,0),extractedFiles:internalFiles.length,
+skippedSourcesWithoutContent:results.reduce((sum,result)=>sum+result.skippedSourcesWithoutContent,0),skippedSourcesByFilter:results.reduce((sum,result)=>sum+result.
+skippedSourcesByFilter,0),skippedSourcesTooLarge:results.reduce((sum,result)=>sum+result.skippedSourcesTooLarge,0)};const downloadManifest=files.map(file=>({archivePath:file.
+archivePath,savedPath:file.savedPath,saveStatus:file.saveStatus,sourcePath:file.sourcePath,sourceMapUrl:file.sourceMapUrl,size:file.size,sha256:file.sha256,mimeType:file.
+mimeType}));const savedFiles=downloadManifest.filter(file=>file.saveStatus==="saved"&&typeof file.savedPath==="string"&&file.savedPath.length>0);await reportMonitorProgress(
+input.__monitorExecution,{current:targets.length,total:targets.length,phase:"complete",message:`Extracted ${files.length} webpack source file(s)`});return{success:files.
+length>0,data:{results,files,summary,download_manifest:downloadManifest,saved_files:savedFiles,saveDirectory,surface_artifacts:{frontend_source_files:downloadManifest}},
+error:files.length>0?void 0:"No webpack source files with sourcesContent were extracted"}}catch(error){return{success:false,error:error?.message||String(error)}}}
+pluginGlobals.analyze=analyze;function get_output_schema(){return monitorToolOutputSchema(getBusinessOutputSchema())}async function analyze(input){return await runMonitorTool(
+input,get_input_schema(),analyzeBusiness)}export{analyze,get_input_schema,get_output_schema};
+globalThis.get_input_schema=get_input_schema; globalThis.get_output_schema=get_output_schema; globalThis.analyze=analyze;
