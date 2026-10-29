@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.14
+ * @version 2.2.15
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -197,7 +197,7 @@ export function get_input_schema() {
       },
       dictionaryEntries: {
         type: "array",
-        description: "Inline rule entries that override dictionary loading",
+        description: "Nonempty inline rules override dictionary loading; an empty array does not mask an explicitly selected dictionaryId",
         items: {
           type: "object",
           required: ["word"],
@@ -607,7 +607,8 @@ async function loadStructuredDictionary(
 }
 
 async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-  if (Array.isArray(input.dictionaryEntries)) {
+  if (Array.isArray(input.dictionaryEntries)
+    && (input.dictionaryEntries.length > 0 || !input.dictionaryId)) {
     return input.dictionaryEntries.map((entry) => ({
       ...entry,
       metadata: parseMetadata(entry.metadata),

@@ -1,0 +1,23 @@
+{
+  "cancelled_connections_remaining": 0,
+  "cancelled_run_completed_targets": 0,
+  "completed_rule_tasks": 10005,
+  "elapsed_ms": 5422,
+  "held_requests_before_cancel": 4,
+  "host_global_concurrency": 4,
+  "loaded_rules": 10005,
+  "next_runtime_healthy": true,
+  "plugin_concurrency": 32,
+  "real_http_requests": 100,
+  "runtime": "real PluginManager / QuickJS / in-memory SQLite / owned loopback HTTP",
+  "plugin_version": "2.2.15",
+  "bundle_sha256": "90e2f279c738b5bd70e4be4a85596f335fc3fe3a38fc3fcb3733d0904263b672",
+  "regression_input": {
+    "dictionaryId": "owned-rules",
+    "dictionaryEntries": []
+  },
+  "node_tests_passed": 231,
+  "monitor_contracts_checked": 27,
+  "production_project_data_modified": false,
+  "external_provider_calls": 0
+}

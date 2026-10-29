@@ -300,7 +300,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "2.2.14",
+      "version": "2.2.15",
       "stream_tag": "monitor:results-stream-v2",
       "target_sources": [
         "surface_asset",

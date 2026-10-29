@@ -1,5 +1,5 @@
 {
-  "version": "2.5.13",
+  "version": "2.5.14",
   "updated_at": "2026-10-29",
   "plugins": [
     {
@@ -372,7 +372,7 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.2.14",
+      "version": "2.2.15",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",

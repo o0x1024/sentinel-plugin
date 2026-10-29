@@ -87,7 +87,7 @@ async fn dictionary_full_coverage_global_limit_and_cancel() {
         })
     };
     let server = support::Server::start(false).await;
-    let input = json!({"targets":[server.base],"dictionaryId":"owned-rules","concurrency":32,
+    let input = json!({"targets":[server.base],"dictionaryId":"owned-rules","dictionaryEntries":[],"concurrency":32,
         "__monitorExecution":context(&server.base)});
     let (_, output) = manager.execute_execution_plugin_with_result_sink(
         "risk_scanner", &input, "monitor_test", Some("owned-risk-full".into()),

@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.14
+ * @version 2.2.15
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -94,68 +94,69 @@ type:"string",description:"Single target URL to verify with dictionary-driven ri
 et"},targets:{type:"array",items:{type:"string"},description:"List of target URLs or hostnames to verify"},technologies:{type:"array",description:"Observed tech\
 nologies used to scope matching rules",items:{anyOf:[{type:"string"},{type:"object",properties:{name:{type:"string",description:"Technology name"}}}]}},fingerprints:{
 type:"array",items:{type:"string"},description:"Observed fingerprint names used for rule filtering"},dictionaryId:{type:"string","x-control":"dictionary-picker",
-"x-dictionary-type":"poc_rule",description:"Structured dictionary ID or name used to load verification rules"},dictionaryEntries:{type:"array",description:"Inli\
-ne rule entries that override dictionary loading",items:{type:"object",required:["word"],properties:{word:{type:"string",description:"Rule identifier"},category:{
-type:"string",description:"Rule category used for normalized finding type"},metadata:{description:"Rule metadata object or JSON string with requests, matchers a\
-nd finding fields"}}}},variables:{type:"object",description:"Variables injected into rule templates and request paths"},safe_mode:{type:"boolean",description:"S\
-kip rules explicitly marked as unsafe",default:true},concurrency:{type:"integer",description:"Maximum concurrent target/rule verifications per execution. Reques\
-ts also share the host global direct-fetch concurrency limit.",default:DEFAULT_CONCURRENCY,minimum:1,maximum:MAX_CONCURRENCY},userAgent:{type:"string",description:"\
-User-Agent header used for outbound requests",default:"Sentinel-Risk-Scanner/2.0"},stopOnFirstHit:{type:"boolean",description:"Stop executing more rules after t\
-he first positive finding",default:false}}}}function get_output_schema(){return{type:"object",properties:{success:{type:"boolean",description:"Whether the risk \
-verification run completed successfully"},data:{type:"object",properties:{findings:{type:"array",description:"Matched risk findings produced by the executed rul\
-es",items:{type:"object",properties:{title:{type:"string"},severity:{type:"string"},url:{type:"string"},description:{type:"string"},impact:{type:"string"},remediation:{
-type:"string"},cwe:{type:"string"}}}},evidence:{type:"array",description:"Structured execution evidence captured during rule evaluation"},summary:{type:"object",
-description:"High-level execution summary",properties:{totalTargets:{type:"integer"},executedRules:{type:"integer"},matchedRules:{type:"integer"},diagnostics:{type:"\
-object",description:"Loaded and applicable rule counts, planned and completed target/rule tasks",properties:{loaded_rules:{type:"integer"},applicable_rules:{type:"\
-integer"},planned_rule_tasks:{type:"integer"},completed_rule_tasks:{type:"integer"}}}}},surface_artifacts:{type:"object",description:"Normalized findings and ev\
-idences prepared for upper-layer ingestion",properties:{findings:{type:"array",description:"Normalized vulnerability findings"},evidences:{type:"array",description:"\
-Normalized evidence records"}}}}},error:{type:"string",description:"Error message if the risk verification run fails"}}}}pluginGlobals.get_input_schema=get_input_schema;
-pluginGlobals.get_output_schema=get_output_schema;var RULE_FETCH_TIMEOUT_MS=1e4;var PROGRESS_INTERVAL_MS=250;function normalizeTarget(raw){if(!raw||typeof raw!==
-"string")return null;const trimmed=raw.trim().replace(/\/+$/,"");if(!trimmed)return null;return trimmed.startsWith("http://")||trimmed.startsWith("https://")?trimmed:
-`https://${trimmed}`}function getInputBoolean(input,camelKey,snakeKey,fallback){const snakeValue=input?.[snakeKey];const camelValue=input?.[camelKey];return typeof snakeValue===
-"boolean"?snakeValue:typeof camelValue==="boolean"?camelValue:fallback}function getInputString(input,camelKey,snakeKey,fallback=""){const snakeValue=input?.[snakeKey];
-const camelValue=input?.[camelKey];const value=snakeValue??camelValue;return typeof value==="string"&&value.trim().length>0?value:fallback}function parseMetadata(value){
-if(!value)return{};if(typeof value==="string"){try{return JSON.parse(value)}catch{return{}}}return typeof value==="object"?value:{}}function asArray(value){return Array.
-isArray(value)?value:value==null?[]:[value]}function parseTitle(html){const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);return match?.[1]?.trim()||""}function joinUrl(baseUrl,path){
-return`${baseUrl}/${String(path||"").replace(/^\/+/,"")}`}function deepGet(source,path){if(!path)return source;return path.split(".").reduce((acc,key)=>{if(acc==
-null)return void 0;if(key.endsWith("]")){const match=key.match(/^([^[\]]+)\[(\d+)\]$/);if(!match)return acc?.[key];const[,arrayKey,indexText]=match;return acc?.[arrayKey]?.[Number(
-indexText)]}return acc?.[key]},source)}function renderTemplate(value,context){if(typeof value!=="string")return value;return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g,
-(_,expr)=>{const resolved=deepGet(context,String(expr).trim());if(resolved==null)return"";return typeof resolved==="string"?resolved:JSON.stringify(resolved)})}
-function tryParseJson(body){try{return JSON.parse(body)}catch{return void 0}}function matcherHit(ctx,matcher){const part=String(matcher?.part||"body").toLowerCase();
-const type=String(matcher?.type||"contains").toLowerCase();const expected=matcher?.value;if(part==="status"){if(type==="in"&&Array.isArray(expected)){return expected.
-includes(ctx.status)}return ctx.status===expected}const source=part==="header"?String(ctx.headers[String(matcher?.key||"").toLowerCase()]||""):part==="title"?ctx.
-title:part==="json"?deepGet(ctx.json||{},String(matcher?.path||matcher?.key||"")):ctx.body;if(type==="exists"){return source!==void 0&&source!==null&&String(source).
-length>0}if(type==="equals")return String(source)===String(expected??"");if(type==="in"&&Array.isArray(expected)){return expected.map(String).includes(String(source))}
-if(type==="regex"){try{return new RegExp(String(expected||""),"i").test(String(source||""))}catch{return false}}return String(source||"").toLowerCase().includes(
-String(expected||"").toLowerCase())}function matchAll(ctx,matchers,operator){if(!Array.isArray(matchers)||matchers.length===0)return false;return String(operator||
-"and").toLowerCase()==="or"?matchers.some(matcher=>matcherHit(ctx,matcher)):matchers.every(matcher=>matcherHit(ctx,matcher))}function evaluateCondition(condition,context){
-if(condition?.matchers){return matchAll(context,asArray(condition.matchers),condition.operator||"and")}const field=String(condition?.field||"");const op=String(
-condition?.op||"equals").toLowerCase();const actual=deepGet(context,field);const expected=condition?.value;if(op==="exists"){return actual!==void 0&&actual!==null&&
-String(actual).length>0}if(op==="contains"){return String(actual||"").toLowerCase().includes(String(expected||"").toLowerCase())}if(op==="in"&&Array.isArray(expected)){
-return expected.map(String).includes(String(actual))}if(op==="regex"){try{return new RegExp(String(expected||""),"i").test(String(actual||""))}catch{return false}}
-return String(actual)===String(expected)}function evaluatePreconditions(preconditions,context){if(!Array.isArray(preconditions)||preconditions.length===0)return true;
-return preconditions.every(condition=>evaluateCondition(condition,context))}function getObservedFingerprints(input){return[...asArray(input.fingerprints),...asArray(
-input.technologies).map(item=>typeof item==="string"?item:item?.name||"")].filter(Boolean).map(item=>String(item).toLowerCase())}function ruleMatchesFingerprintScope(rule,observedFingerprints){
-const metadata=parseMetadata(rule.metadata);if(metadata.enabled===false)return false;const scope=metadata.match_scope||{};const expectedFingerprints=asArray(scope.
-fingerprints).map(item=>String(item).toLowerCase());if(expectedFingerprints.length>0&&!expectedFingerprints.some(item=>observedFingerprints.includes(item))){return false}
-return true}function ruleApplies(rule,input,targetContext){if(!ruleMatchesFingerprintScope(rule,getObservedFingerprints(input))){return false}return evaluatePreconditions(
-asArray(parseMetadata(rule.metadata).preconditions),targetContext)}function dedupeRules(rules){const seen=new Set;const deduped=[];for(const rule of rules){const metadata=parseMetadata(
-rule.metadata);const ruleId=String(rule.word||metadata.name||"").trim().toLowerCase();if(!ruleId||seen.has(ruleId))continue;seen.add(ruleId);deduped.push({...rule,
-metadata})}return deduped}async function loadStructuredDictionary(idOrName){if(typeof Sentinel?.Dictionary?.getEntries!=="function"){throw new Error("Risk Scann\
-er requires Sentinel.Dictionary.getEntries")}const entries=await Sentinel.Dictionary.getEntries(idOrName,null);if(!Array.isArray(entries))throw new Error("Risk \
-Scanner dictionary entries must be an array");return entries.filter(item=>item&&typeof item.word==="string").map(item=>({word:item.word,category:item.category||
-null,metadata:parseMetadata(item.metadata)}))}async function loadRules(input){if(Array.isArray(input.dictionaryEntries)){return input.dictionaryEntries.map(entry=>({
-...entry,metadata:parseMetadata(entry.metadata)}))}const dictionaryId=input.dictionaryId||await Sentinel?.Dictionary?.getDefaultId?.("poc_rule");if(typeof dictionaryId!==
-"string"||!dictionaryId.trim()){throw new Error("Configure a Risk Scanner Rules dictionary or provide dictionaryEntries")}return loadStructuredDictionary(dictionaryId)}
-function normalizeRequests(metadata){const requests=Array.isArray(metadata.requests)?metadata.requests:metadata.request?[metadata.request]:[];return requests.map(
-(request,index)=>({id:request?.id||`step_${index+1}`,method:String(request?.method||"GET").toUpperCase(),path:request?.path||"/",headers:request?.headers||{},body:request?.
-body,matchers:Array.isArray(request?.matchers)?request.matchers:void 0,extractors:Array.isArray(request?.extractors)?request.extractors:[]}))}function buildRequestContext(baseContext,executionContext){
-return{...baseContext,...executionContext,steps:executionContext.steps||{},extracted:executionContext.extracted||{}}}function applyExtractors(extractors,responseContext){
-const extracted={};for(const extractor of extractors){const name=String(extractor?.name||"").trim();if(!name)continue;const sourcePart=String(extractor?.part||"\
-body").toLowerCase();const source=sourcePart==="header"?String(responseContext.headers[String(extractor?.key||"").toLowerCase()]||""):sourcePart==="title"?responseContext.
-title:sourcePart==="json"?deepGet(responseContext.json||{},String(extractor?.path||extractor?.key||"")):responseContext.body;if(extractor?.type==="regex"){try{const match=String(
-source||"").match(new RegExp(String(extractor?.pattern||extractor?.value||""),"i"));if(match?.[1])extracted[name]=match[1]}catch{continue}continue}if(extractor?.
-type==="json_path"){extracted[name]=deepGet(responseContext.json||{},String(extractor?.path||""));continue}extracted[name]=source}return extracted}async function executeRule(target,rule,input,onStep){
+"x-dictionary-type":"poc_rule",description:"Structured dictionary ID or name used to load verification rules"},dictionaryEntries:{type:"array",description:"None\
+mpty inline rules override dictionary loading; an empty array does not mask an explicitly selected dictionaryId",items:{type:"object",required:["word"],properties:{
+word:{type:"string",description:"Rule identifier"},category:{type:"string",description:"Rule category used for normalized finding type"},metadata:{description:"\
+Rule metadata object or JSON string with requests, matchers and finding fields"}}}},variables:{type:"object",description:"Variables injected into rule templates\
+ and request paths"},safe_mode:{type:"boolean",description:"Skip rules explicitly marked as unsafe",default:true},concurrency:{type:"integer",description:"Maxim\
+um concurrent target/rule verifications per execution. Requests also share the host global direct-fetch concurrency limit.",default:DEFAULT_CONCURRENCY,minimum:1,
+maximum:MAX_CONCURRENCY},userAgent:{type:"string",description:"User-Agent header used for outbound requests",default:"Sentinel-Risk-Scanner/2.0"},stopOnFirstHit:{
+type:"boolean",description:"Stop executing more rules after the first positive finding",default:false}}}}function get_output_schema(){return{type:"object",properties:{
+success:{type:"boolean",description:"Whether the risk verification run completed successfully"},data:{type:"object",properties:{findings:{type:"array",description:"\
+Matched risk findings produced by the executed rules",items:{type:"object",properties:{title:{type:"string"},severity:{type:"string"},url:{type:"string"},description:{
+type:"string"},impact:{type:"string"},remediation:{type:"string"},cwe:{type:"string"}}}},evidence:{type:"array",description:"Structured execution evidence captu\
+red during rule evaluation"},summary:{type:"object",description:"High-level execution summary",properties:{totalTargets:{type:"integer"},executedRules:{type:"in\
+teger"},matchedRules:{type:"integer"},diagnostics:{type:"object",description:"Loaded and applicable rule counts, planned and completed target/rule tasks",properties:{
+loaded_rules:{type:"integer"},applicable_rules:{type:"integer"},planned_rule_tasks:{type:"integer"},completed_rule_tasks:{type:"integer"}}}}},surface_artifacts:{
+type:"object",description:"Normalized findings and evidences prepared for upper-layer ingestion",properties:{findings:{type:"array",description:"Normalized vuln\
+erability findings"},evidences:{type:"array",description:"Normalized evidence records"}}}}},error:{type:"string",description:"Error message if the risk verifica\
+tion run fails"}}}}pluginGlobals.get_input_schema=get_input_schema;pluginGlobals.get_output_schema=get_output_schema;var RULE_FETCH_TIMEOUT_MS=1e4;var PROGRESS_INTERVAL_MS=250;
+function normalizeTarget(raw){if(!raw||typeof raw!=="string")return null;const trimmed=raw.trim().replace(/\/+$/,"");if(!trimmed)return null;return trimmed.startsWith(
+"http://")||trimmed.startsWith("https://")?trimmed:`https://${trimmed}`}function getInputBoolean(input,camelKey,snakeKey,fallback){const snakeValue=input?.[snakeKey];
+const camelValue=input?.[camelKey];return typeof snakeValue==="boolean"?snakeValue:typeof camelValue==="boolean"?camelValue:fallback}function getInputString(input,camelKey,snakeKey,fallback=""){
+const snakeValue=input?.[snakeKey];const camelValue=input?.[camelKey];const value=snakeValue??camelValue;return typeof value==="string"&&value.trim().length>0?value:
+fallback}function parseMetadata(value){if(!value)return{};if(typeof value==="string"){try{return JSON.parse(value)}catch{return{}}}return typeof value==="object"?
+value:{}}function asArray(value){return Array.isArray(value)?value:value==null?[]:[value]}function parseTitle(html){const match=html.match(/<title[^>]*>([^<]+)<\/title>/i);
+return match?.[1]?.trim()||""}function joinUrl(baseUrl,path){return`${baseUrl}/${String(path||"").replace(/^\/+/,"")}`}function deepGet(source,path){if(!path)return source;
+return path.split(".").reduce((acc,key)=>{if(acc==null)return void 0;if(key.endsWith("]")){const match=key.match(/^([^[\]]+)\[(\d+)\]$/);if(!match)return acc?.[key];
+const[,arrayKey,indexText]=match;return acc?.[arrayKey]?.[Number(indexText)]}return acc?.[key]},source)}function renderTemplate(value,context){if(typeof value!==
+"string")return value;return value.replace(/\{\{\s*([^}]+?)\s*\}\}/g,(_,expr)=>{const resolved=deepGet(context,String(expr).trim());if(resolved==null)return"";return typeof resolved===
+"string"?resolved:JSON.stringify(resolved)})}function tryParseJson(body){try{return JSON.parse(body)}catch{return void 0}}function matcherHit(ctx,matcher){const part=String(
+matcher?.part||"body").toLowerCase();const type=String(matcher?.type||"contains").toLowerCase();const expected=matcher?.value;if(part==="status"){if(type==="in"&&
+Array.isArray(expected)){return expected.includes(ctx.status)}return ctx.status===expected}const source=part==="header"?String(ctx.headers[String(matcher?.key||
+"").toLowerCase()]||""):part==="title"?ctx.title:part==="json"?deepGet(ctx.json||{},String(matcher?.path||matcher?.key||"")):ctx.body;if(type==="exists"){return source!==
+void 0&&source!==null&&String(source).length>0}if(type==="equals")return String(source)===String(expected??"");if(type==="in"&&Array.isArray(expected)){return expected.
+map(String).includes(String(source))}if(type==="regex"){try{return new RegExp(String(expected||""),"i").test(String(source||""))}catch{return false}}return String(
+source||"").toLowerCase().includes(String(expected||"").toLowerCase())}function matchAll(ctx,matchers,operator){if(!Array.isArray(matchers)||matchers.length===0)
+return false;return String(operator||"and").toLowerCase()==="or"?matchers.some(matcher=>matcherHit(ctx,matcher)):matchers.every(matcher=>matcherHit(ctx,matcher))}
+function evaluateCondition(condition,context){if(condition?.matchers){return matchAll(context,asArray(condition.matchers),condition.operator||"and")}const field=String(
+condition?.field||"");const op=String(condition?.op||"equals").toLowerCase();const actual=deepGet(context,field);const expected=condition?.value;if(op==="exists"){
+return actual!==void 0&&actual!==null&&String(actual).length>0}if(op==="contains"){return String(actual||"").toLowerCase().includes(String(expected||"").toLowerCase())}
+if(op==="in"&&Array.isArray(expected)){return expected.map(String).includes(String(actual))}if(op==="regex"){try{return new RegExp(String(expected||""),"i").test(
+String(actual||""))}catch{return false}}return String(actual)===String(expected)}function evaluatePreconditions(preconditions,context){if(!Array.isArray(preconditions)||
+preconditions.length===0)return true;return preconditions.every(condition=>evaluateCondition(condition,context))}function getObservedFingerprints(input){return[
+...asArray(input.fingerprints),...asArray(input.technologies).map(item=>typeof item==="string"?item:item?.name||"")].filter(Boolean).map(item=>String(item).toLowerCase())}
+function ruleMatchesFingerprintScope(rule,observedFingerprints){const metadata=parseMetadata(rule.metadata);if(metadata.enabled===false)return false;const scope=metadata.
+match_scope||{};const expectedFingerprints=asArray(scope.fingerprints).map(item=>String(item).toLowerCase());if(expectedFingerprints.length>0&&!expectedFingerprints.
+some(item=>observedFingerprints.includes(item))){return false}return true}function ruleApplies(rule,input,targetContext){if(!ruleMatchesFingerprintScope(rule,getObservedFingerprints(
+input))){return false}return evaluatePreconditions(asArray(parseMetadata(rule.metadata).preconditions),targetContext)}function dedupeRules(rules){const seen=new Set;
+const deduped=[];for(const rule of rules){const metadata=parseMetadata(rule.metadata);const ruleId=String(rule.word||metadata.name||"").trim().toLowerCase();if(!ruleId||
+seen.has(ruleId))continue;seen.add(ruleId);deduped.push({...rule,metadata})}return deduped}async function loadStructuredDictionary(idOrName){if(typeof Sentinel?.
+Dictionary?.getEntries!=="function"){throw new Error("Risk Scanner requires Sentinel.Dictionary.getEntries")}const entries=await Sentinel.Dictionary.getEntries(
+idOrName,null);if(!Array.isArray(entries))throw new Error("Risk Scanner dictionary entries must be an array");return entries.filter(item=>item&&typeof item.word===
+"string").map(item=>({word:item.word,category:item.category||null,metadata:parseMetadata(item.metadata)}))}async function loadRules(input){if(Array.isArray(input.
+dictionaryEntries)&&(input.dictionaryEntries.length>0||!input.dictionaryId)){return input.dictionaryEntries.map(entry=>({...entry,metadata:parseMetadata(entry.metadata)}))}
+const dictionaryId=input.dictionaryId||await Sentinel?.Dictionary?.getDefaultId?.("poc_rule");if(typeof dictionaryId!=="string"||!dictionaryId.trim()){throw new Error(
+"Configure a Risk Scanner Rules dictionary or provide dictionaryEntries")}return loadStructuredDictionary(dictionaryId)}function normalizeRequests(metadata){const requests=Array.
+isArray(metadata.requests)?metadata.requests:metadata.request?[metadata.request]:[];return requests.map((request,index)=>({id:request?.id||`step_${index+1}`,method:String(
+request?.method||"GET").toUpperCase(),path:request?.path||"/",headers:request?.headers||{},body:request?.body,matchers:Array.isArray(request?.matchers)?request.
+matchers:void 0,extractors:Array.isArray(request?.extractors)?request.extractors:[]}))}function buildRequestContext(baseContext,executionContext){return{...baseContext,
+...executionContext,steps:executionContext.steps||{},extracted:executionContext.extracted||{}}}function applyExtractors(extractors,responseContext){const extracted={};
+for(const extractor of extractors){const name=String(extractor?.name||"").trim();if(!name)continue;const sourcePart=String(extractor?.part||"body").toLowerCase();
+const source=sourcePart==="header"?String(responseContext.headers[String(extractor?.key||"").toLowerCase()]||""):sourcePart==="title"?responseContext.title:sourcePart===
+"json"?deepGet(responseContext.json||{},String(extractor?.path||extractor?.key||"")):responseContext.body;if(extractor?.type==="regex"){try{const match=String(source||
+"").match(new RegExp(String(extractor?.pattern||extractor?.value||""),"i"));if(match?.[1])extracted[name]=match[1]}catch{continue}continue}if(extractor?.type===
+"json_path"){extracted[name]=deepGet(responseContext.json||{},String(extractor?.path||""));continue}extracted[name]=source}return extracted}async function executeRule(target,rule,input,onStep){
 const metadata=parseMetadata(rule.metadata);const baseContext={target,base_url:target,url:target,rule_id:rule.word,category:rule.category||"",variables:input.variables||
 {},fingerprints:asArray(input.fingerprints),technologies:asArray(input.technologies).map(item=>typeof item==="string"?item:item?.name||"")};if(!ruleApplies(rule,
 input,baseContext)){return{matched:false}}const requests=normalizeRequests(metadata);if(requests.length===0)return{matched:false};const executionContext={steps:{},

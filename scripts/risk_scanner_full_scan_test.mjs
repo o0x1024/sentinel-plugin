@@ -37,6 +37,34 @@ function fixture(t, dictionary, commit) {
 const context = () => monitorExecution(targets, { pluginId: 'risk_scanner' });
 
 for (const [name, plugin] of Object.entries({ source, published })) {
+  for (const monitor of [false, true]) {
+    test(`${name}: selected dictionary survives an empty inline placeholder in ${monitor ? 'monitor' : 'ordinary'} mode`, async t => {
+      const calls = [];
+      const f = fixture(t, {
+        getDefaultId: () => { assert.fail('An explicitly selected dictionary must be used'); },
+        getEntries: (id, limit) => { calls.push({ id, limit }); return rules(43); },
+      });
+      const output = await plugin.analyze({ targets, dictionaryId: 'owned-rules', dictionaryEntries: [],
+        ...(monitor ? { __monitorExecution: context() } : {}) });
+      assert.equal(output.success, true, output.error);
+      assert.deepEqual(calls, [{ id: 'owned-rules', limit: null }]);
+      assert.equal(f.requests, 43);
+      assert.equal(f.completions, monitor ? 1 : 0);
+      if (monitor) assert.equal(output.data.summary.diagnostics.loaded_rules, 43);
+      else assert.equal(output.data.summary.executedRules, 43);
+    });
+  }
+
+  test(`${name}: nonempty inline rules retain their explicit override behavior`, async t => {
+    const f = fixture(t, {
+      getDefaultId: () => { assert.fail('Inline rules select their own source'); },
+      getEntries: () => { assert.fail('Inline rules must not load an inherited dictionary'); },
+    });
+    const output = await plugin.analyze({ targets, dictionaryId: 'inherited-dictionary', dictionaryEntries: rules(2) });
+    assert.equal(output.success, true, output.error);
+    assert.equal(f.requests, 2);
+  });
+
   test(`${name}: explicit dictionary reads and executes every rule beyond 10000`, async t => {
     const entries = rules(10005), calls = [];
     let defaultCalls = 0;
@@ -88,7 +116,7 @@ for (const [name, plugin] of Object.entries({ source, published })) {
           return scenario === 'empty dictionary' ? [] : {};
         },
       });
-      const output = await plugin.analyze({ targets, dictionaryId: 'chosen-dictionary', __monitorExecution: context() });
+      const output = await plugin.analyze({ targets, dictionaryId: 'chosen-dictionary', dictionaryEntries: [], __monitorExecution: context() });
       assert.equal(output.success, false);
       assert.ok(output.error.length > 0);
       if (scenario === 'failed read') assert.match(output.error, /Owned dictionary read failure/);

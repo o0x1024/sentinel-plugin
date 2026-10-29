@@ -56,3 +56,13 @@ rules, global request concurrency and cancellation. The runner installs an
 exclusive temporary Cargo test and removes it afterward; existing test files
 are never overwritten. Add `--output report.json` to save its evidence.
 Use `--bundle path/to/plugin.ts` to validate an exact release artifact.
+
+## Rule source selection
+
+Nonempty `dictionaryEntries` explicitly override dictionary loading. An empty inline
+array does not mask a nonempty `dictionaryId` selected in plugin defaults or task
+parameters. That dictionary is read exactly once, without a rule-count cutoff.
+An empty or failed selected dictionary remains a failure and never selects another
+dictionary. With no inline override or explicit ID, the configured `poc_rule`
+default remains the source. An explicit empty inline source without a selected ID
+is still an error.
