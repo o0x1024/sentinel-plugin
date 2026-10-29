@@ -71,7 +71,7 @@ function assertComplete(output, f, targets, count, monitor) {
 }
 
 for (const [name, plugin] of Object.entries({ source, published })) {
-  test(`${name}: existing integer form exposes concurrency and explains maxRules`, () => {
+  test(`${name}: existing integer form exposes concurrency without a rule-count limit`, () => {
     const schema = plugin.get_input_schema();
     const field = schema.properties.concurrency;
     assert.equal(field?.type, 'integer');
@@ -79,14 +79,14 @@ for (const [name, plugin] of Object.entries({ source, published })) {
     assert.equal(field.minimum, 1);
     assert.equal(field.maximum, 1000);
     assert.match(field.description, /host global direct-fetch concurrency limit/);
-    assert.equal(schema.properties.maxRules.default, 20);
-    assert.match(schema.properties.maxRules.description, /each target/);
+    assert.equal(Object.hasOwn(schema.properties, 'maxRules'), false);
+    assert.equal(Object.hasOwn(schema.properties, 'max_rules'), false);
   });
 
   for (const monitor of [false, true]) {
     const mode = monitor ? 'monitor' : 'ordinary';
     for (const [label, concurrency, ruleCount, targetCount, expectedPeak] of [
-      ['default', undefined, 20, 3, 32],
+      ['default', undefined, 100, 2, 32],
       ['serial', 1, 4, 2, 1],
       ['custom', 4, 6, 3, 4],
       ['above old limit', 64, 40, 2, 64],
@@ -96,7 +96,7 @@ for (const [name, plugin] of Object.entries({ source, published })) {
         const f = fixture(t);
         const targets = Array.from({ length: targetCount }, (_, index) => `https://owned${index}.test/`);
         const dictionaryEntries = rules(ruleCount);
-        const output = await scan(plugin, { targets, dictionaryEntries, maxRules: ruleCount,
+        const output = await scan(plugin, { targets, dictionaryEntries,
           ...(concurrency === undefined ? {} : { concurrency }),
         }, monitor);
         assert.equal(f.peak, expectedPeak);
@@ -120,28 +120,27 @@ for (const [name, plugin] of Object.entries({ source, published })) {
       assert.equal(f.commits.length, 0);
     });
 
-    for (const maxRules of [undefined, 2]) {
-      test(`${name} ${mode}: maxRules=${maxRules ?? 'default 20'} selects rules after filtering for every target`, async t => {
-        const f = fixture(t);
-        const targets = ['https://one.test/', 'https://two.test/'];
-        const valid = rules(25);
-        const dictionaryEntries = [
-          { word: 'disabled', metadata: { ...valid[0].metadata, enabled: false } },
-          { word: 'unsafe', metadata: { ...valid[0].metadata, safe_mode: false } },
-          { word: 'other-scope', metadata: { ...valid[0].metadata, match_scope: { fingerprints: ['other-product'] } } },
-          valid[0], { ...valid[0], word: valid[0].word.toUpperCase() }, ...valid.slice(1),
-        ];
-        const output = await scan(plugin, { targets, dictionaryEntries, concurrency: 64,
-          ...(maxRules === undefined ? {} : { maxRules }),
-        }, monitor);
-        const selected = valid.slice(0, maxRules ?? 20);
-        const expected = targets.flatMap(target => selected.map(rule => target.slice(0, -1) + rule.metadata.requests[0].path));
-        assert.deepEqual(f.requests.map(item => item.url).sort(), expected.sort());
-        assertComplete(output, f, targets, selected.length * targets.length, monitor);
-      });
-    }
+    test(`${name} ${mode}: every applicable rule runs after filtering for every target`, async t => {
+      const f = fixture(t);
+      const targets = ['https://one.test/', 'https://two.test/'];
+      const valid = rules(100);
+      const dictionaryEntries = [
+        { word: 'disabled', metadata: { ...valid[0].metadata, enabled: false } },
+        { word: 'unsafe', metadata: { ...valid[0].metadata, safe_mode: false } },
+        { word: 'other-scope', metadata: { ...valid[0].metadata, match_scope: { fingerprints: ['other-product'] } } },
+        valid[0], { ...valid[0], word: valid[0].word.toUpperCase() }, ...valid.slice(1),
+      ];
+      const output = await scan(plugin, { targets, dictionaryEntries, concurrency: 64 }, monitor);
+      const expected = targets.flatMap(target => valid.map(rule => target.slice(0, -1) + rule.metadata.requests[0].path));
+      assert.deepEqual(f.requests.map(item => item.url).sort(), expected.sort());
+      assertComplete(output, f, targets, valid.length * targets.length, monitor);
+      assert.equal(output.data.summary.diagnostics.loaded_rules, 103);
+      assert.equal(output.data.summary.diagnostics.applicable_rules, 100);
+      assert.equal(output.data.summary.diagnostics.planned_rule_tasks, 200);
+      assert.equal(output.data.summary.diagnostics.completed_rule_tasks, 200);
+    });
 
-    test(`${name} ${mode}: maxRules counts rules while chained requests stay sequential inside each worker`, async t => {
+    test(`${name} ${mode}: chained requests stay sequential inside each worker`, async t => {
       const completedFirstSteps = new Set();
       const f = fixture(t, url => {
         if (url.endsWith('/step-0')) completedFirstSteps.add(url.slice(0, -1));
@@ -149,7 +148,7 @@ for (const [name, plugin] of Object.entries({ source, published })) {
         return new Response('', { status: 200 });
       });
       const targets = ['https://one.test/', 'https://two.test/'];
-      const output = await scan(plugin, { targets, dictionaryEntries: rules(5, 2), maxRules: 2, concurrency: 4 }, monitor);
+      const output = await scan(plugin, { targets, dictionaryEntries: rules(2, 2), concurrency: 4 }, monitor);
       assert.equal(f.peak, 4);
       assert.equal(f.requests.length, 8);
       assertComplete(output, f, targets, 4, monitor);

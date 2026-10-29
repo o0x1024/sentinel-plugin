@@ -157,7 +157,7 @@ test('risk stopOnFirstHit is shared across targets and rules while all targets r
     matchers: [{ part: 'status', type: 'equals', value: 200 }],
   } }));
   const output = await plugins.risk_scanner.analyze({ targets, dictionaryEntries: rules,
-    maxRules: 40, stopOnFirstHit: true, __monitorExecution: f.context });
+    stopOnFirstHit: true, __monitorExecution: f.context });
   assert.equal(output.success, true, output.error);
   assert.ok(f.requests.length > 0 && f.requests.length <= 32);
   assert.ok(f.requests.every(request => new URL(request.url).hostname === 'one.test'));
@@ -361,7 +361,7 @@ test('large streamed HTTP, directory, rule and JavaScript scans acknowledge ever
     if (kind === 'http') output = await plugins.http_prober.analyze({ targets, __monitorExecution: f.context });
     else if (kind === 'directory') output = await plugins.directory_bruteforcer.analyze({ targets,
       customWordlist: Array.from({ length: 1000 }, (_, index) => `path${index}`), __monitorExecution: f.context });
-    else if (kind === 'risk') output = await plugins.risk_scanner.analyze({ targets, maxRules: 65,
+    else if (kind === 'risk') output = await plugins.risk_scanner.analyze({ targets,
       dictionaryEntries: Array.from({ length: 65 }, (_, index) => ({ word: `rule${index}`, metadata: {
         requests: [{ method: 'GET', path: `/rule${index}` }], matchers: [{ part: 'status', type: 'equals', value: 200 }],
       } })), __monitorExecution: f.context });

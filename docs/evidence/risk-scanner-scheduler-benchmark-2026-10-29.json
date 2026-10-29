@@ -1,0 +1,63 @@
+{
+  "baseline_ref": "23853f6112ea8c6fea3b2ee9ee9bdc5396a78662",
+  "methodology": {
+    "execution": "Node 24; real published plugins in isolated child processes; 200 rules per target in both versions",
+    "measurement": "Inputs allocated before measurement; sample live heap after GC while the first 32 fetches are gated; fail the first result commit to stop",
+    "scope": "Producer preparation and scheduling memory only; excludes real network, QuickJS, SQLite and desktop acceptance"
+  },
+  "rows": [
+    {
+      "variant": "baseline",
+      "version": "2.2.12",
+      "bundle_sha256": "b444e260b15319915e2367d2acb358a3a9270fb2619151c90b9a8fb29e305b86",
+      "targets": 500,
+      "rules": 200,
+      "planned_rule_tasks": 100000,
+      "concurrency": 32,
+      "started_requests": 32,
+      "prepare_and_saturate_ms": 10.231,
+      "heap_growth_at_worker_saturation_bytes": 17291840,
+      "rss_growth_at_worker_saturation_bytes": 30015488
+    },
+    {
+      "variant": "current",
+      "version": "2.2.13",
+      "bundle_sha256": "a13c82c843fdf12ec65997ba36c931a08f8f8a0d66becdb4816d42b0242e7fa7",
+      "targets": 500,
+      "rules": 200,
+      "planned_rule_tasks": 100000,
+      "concurrency": 32,
+      "started_requests": 32,
+      "prepare_and_saturate_ms": 1.314,
+      "heap_growth_at_worker_saturation_bytes": 379880,
+      "rss_growth_at_worker_saturation_bytes": 688128
+    },
+    {
+      "variant": "baseline",
+      "version": "2.2.12",
+      "bundle_sha256": "b444e260b15319915e2367d2acb358a3a9270fb2619151c90b9a8fb29e305b86",
+      "targets": 5000,
+      "rules": 200,
+      "planned_rule_tasks": 1000000,
+      "concurrency": 32,
+      "started_requests": 32,
+      "prepare_and_saturate_ms": 92.3,
+      "heap_growth_at_worker_saturation_bytes": 172260368,
+      "rss_growth_at_worker_saturation_bytes": 300875776
+    },
+    {
+      "variant": "current",
+      "version": "2.2.13",
+      "bundle_sha256": "a13c82c843fdf12ec65997ba36c931a08f8f8a0d66becdb4816d42b0242e7fa7",
+      "targets": 5000,
+      "rules": 200,
+      "planned_rule_tasks": 1000000,
+      "concurrency": 32,
+      "started_requests": 32,
+      "prepare_and_saturate_ms": 4.154,
+      "heap_growth_at_worker_saturation_bytes": 1830848,
+      "rss_growth_at_worker_saturation_bytes": 6422528
+    }
+  ],
+  "largest_case_heap_reduction_factor": 94.09
+}

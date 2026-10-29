@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.12
+ * @version 2.2.13
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk
@@ -13,18 +13,19 @@
  * @seed_bindings []
  * @default_severity medium
  * @tags risk, poc, verification, dictionary, web, capability:fetch, capability:dictionary, capability:monitor-events, monitor:results-stream-v1
- * @description Execute safe dictionary-driven verification rules with variables, preconditions, chained requests, and structured evidence.
+ * @description Execute all applicable Risk Scanner Rules with bounded concurrency, lazy task scheduling, chained requests and durable evidence.
  */
 import { createMonitorResultStream } from '../../shared/monitor_results.ts';
 import { confirmedMonitorFinding } from '../../shared/monitor_finding.ts';
 import { createMonitorTargetWriter } from '../../shared/monitor_target_writer.ts';
+import { runTaskPool } from './task_pool.ts';
 
 
 declare const Sentinel: {
   Dictionary?: {
     get?(idOrName: string): Promise<any>;
     getDefaultId?(dictType: string): Promise<string | null>;
-    getEntries?(idOrName: string, limit?: number): Promise<any[]>;
+    getEntries?(idOrName: string, limit?: number | null): Promise<any[]>;
   };
 };
 
@@ -78,7 +79,6 @@ interface ToolInput {
   dictionaryId?: string;
   dictionaryEntries?: RuleEntry[];
   safe_mode?: boolean;
-  maxRules?: number;
   concurrency?: number;
   userAgent?: string;
   stopOnFirstHit?: boolean;
@@ -120,6 +120,12 @@ interface ToolOutput {
       totalTargets: number;
       executedRules: number;
       matchedRules: number;
+      diagnostics: {
+        loaded_rules: number;
+        applicable_rules: number;
+        planned_rule_tasks: number;
+        completed_rule_tasks: number;
+      };
     };
     surface_artifacts?: Record<string, any[]>;
   };
@@ -219,13 +225,6 @@ export function get_input_schema() {
         description: "Skip rules explicitly marked as unsafe",
         default: true,
       },
-      maxRules: {
-        type: "integer",
-        description: "Maximum rules selected for each target after deduplication and enabled, safe-mode and fingerprint filtering. Each rule may issue multiple HTTP requests.",
-        default: 20,
-        minimum: 1,
-        maximum: 200,
-      },
       concurrency: {
         type: "integer",
         description: "Maximum concurrent target/rule verifications per execution. Requests also share the host global direct-fetch concurrency limit.",
@@ -287,6 +286,16 @@ export function get_output_schema() {
               totalTargets: { type: "integer" },
               executedRules: { type: "integer" },
               matchedRules: { type: "integer" },
+              diagnostics: {
+                type: "object",
+                description: "Loaded and applicable rule counts, planned and completed target/rule tasks",
+                properties: {
+                  loaded_rules: { type: "integer" },
+                  applicable_rules: { type: "integer" },
+                  planned_rule_tasks: { type: "integer" },
+                  completed_rule_tasks: { type: "integer" },
+                },
+              },
             },
           },
           surface_artifacts: {
@@ -318,25 +327,7 @@ pluginGlobals.get_input_schema = get_input_schema;
 pluginGlobals.get_output_schema = get_output_schema;
 
 const RULE_FETCH_TIMEOUT_MS = 10000;
-
-async function runWithConcurrency<T>(
-  tasks: Array<() => Promise<T>>,
-  concurrency: number,
-): Promise<T[]> {
-  const results = new Array<T>(tasks.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, tasks.length) },
-    async () => {
-      while (nextIndex < tasks.length) {
-        const currentIndex = nextIndex++;
-        results[currentIndex] = await tasks[currentIndex]();
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
-}
+const PROGRESS_INTERVAL_MS = 250;
 
 function normalizeTarget(raw?: string): string | null {
   if (!raw || typeof raw !== "string") return null;
@@ -345,19 +336,6 @@ function normalizeTarget(raw?: string): string | null {
   return trimmed.startsWith("http://") || trimmed.startsWith("https://")
     ? trimmed
     : `https://${trimmed}`;
-}
-
-function getInputNumber(
-  input: ToolInput,
-  camelKey: keyof ToolInput,
-  snakeKey: string,
-  fallback: number,
-): number {
-  const snakeValue = (input as any)?.[snakeKey];
-  const camelValue = input?.[camelKey];
-  const value = snakeValue ?? camelValue;
-  const parsed = Number(value ?? fallback);
-  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function getInputBoolean(
@@ -612,53 +590,34 @@ function dedupeRules(rules: RuleEntry[]): RuleEntry[] {
 async function loadStructuredDictionary(
   idOrName: string,
 ): Promise<RuleEntry[]> {
-  if (!Sentinel?.Dictionary?.getEntries) return [];
-  try {
-    const entries = await Sentinel.Dictionary.getEntries(idOrName, 10000);
-    return entries
-      .filter((item: any) => item && typeof item.word === "string")
-      .map((item: any) => ({
-        word: item.word,
-        category: item.category || null,
-        metadata: parseMetadata(item.metadata),
-      }));
-  } catch {
-    return [];
+  if (typeof Sentinel?.Dictionary?.getEntries !== "function") {
+    throw new Error("Risk Scanner requires Sentinel.Dictionary.getEntries");
   }
+  // Explicit JSON null selects the host's existing unbounded dictionary query.
+  const entries = await Sentinel.Dictionary.getEntries(idOrName, null);
+  if (!Array.isArray(entries)) throw new Error("Risk Scanner dictionary entries must be an array");
+  return entries
+    .filter((item: any) => item && typeof item.word === "string")
+    .map((item: any) => ({
+      word: item.word,
+      category: item.category || null,
+      metadata: parseMetadata(item.metadata),
+    }));
 }
 
 async function loadRules(input: ToolInput): Promise<RuleEntry[]> {
-  if (
-    Array.isArray(input.dictionaryEntries) &&
-    input.dictionaryEntries.length > 0
-  ) {
+  if (Array.isArray(input.dictionaryEntries)) {
     return input.dictionaryEntries.map((entry) => ({
       ...entry,
       metadata: parseMetadata(entry.metadata),
     }));
   }
 
-  const defaultDictionaryId = Sentinel?.Dictionary?.getDefaultId
-    ? await Sentinel.Dictionary.getDefaultId("poc_rule")
-    : null;
-
-  const candidates = [
-    input.dictionaryId,
-    (input as any)?.dictionary_id,
-    defaultDictionaryId,
-    "builtin_safe_poc_rules",
-    "Safe POC Rules",
-  ].filter(
-    (value): value is string =>
-      typeof value === "string" && value.trim().length > 0,
-  );
-
-  for (const candidate of candidates) {
-    const rules = await loadStructuredDictionary(candidate);
-    if (rules.length > 0) return rules;
+  const dictionaryId = input.dictionaryId || await Sentinel?.Dictionary?.getDefaultId?.("poc_rule");
+  if (typeof dictionaryId !== "string" || !dictionaryId.trim()) {
+    throw new Error("Configure a Risk Scanner Rules dictionary or provide dictionaryEntries");
   }
-
-  return [];
+  return loadStructuredDictionary(dictionaryId);
 }
 
 function normalizeRequests(metadata: Record<string, any>): any[] {
@@ -932,7 +891,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     const stream = createMonitorResultStream(input);
     const writeTarget = createMonitorTargetWriter(input, stream, normalizeTarget);
     const safeMode = getInputBoolean(input, "safe_mode", "safe_mode", true);
-    const maxRules = getInputNumber(input, "maxRules", "max_rules", 20);
     const userAgent = getInputString(
       input,
       "userAgent",
@@ -948,7 +906,6 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     const normalizedInput: ToolInput = {
       ...input,
       safe_mode: safeMode,
-      maxRules,
       userAgent,
       stopOnFirstHit,
       dictionaryId:
@@ -985,9 +942,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         if (metadata.enabled === false) return false;
         if (safeMode && metadata.safe_mode === false) return false;
         return ruleMatchesFingerprintScope(rule, observedFingerprints);
-      })
-      .slice(0, maxRules);
-    const totalProgressUnits = targets.length * Math.max(rules.length, 1) + 2;
+      });
+    const taskCount = targets.length * rules.length;
+    const totalProgressUnits = taskCount + 2;
 
     await reportMonitorProgress(monitorExecution, {
       current: 0,
@@ -1000,20 +957,18 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
     const evidence: any[] = [];
     const vulnerabilityFindings: any[] = [];
 
-    const scanTasks: Array<{ target: string; rule: RuleEntry }> = [];
-    for (const target of targets) {
-      for (const rule of rules) {
-        scanTasks.push({ target, rule });
-      }
-    }
-
     let stopRequested = false;
     let executedRuleCount = 0;
+    let completedRuleCount = 0;
+    let lastProgressAt = Date.now();
     const failedTargets = new Set<string>();
-    await runWithConcurrency(
-      scanTasks.map(({ target, rule }) => async () => {
+    await runTaskPool(
+      taskCount,
+      concurrency,
+      async index => {
         stream.assertHealthy();
-        if (stopRequested) return;
+        const target = targets[Math.floor(index / rules.length)];
+        const rule = rules[index % rules.length];
         executedRuleCount += 1;
         const ruleKey = `rule:${rule.word}`;
         const result = await executeRule(target, rule, normalizedInput, async (step, index) => {
@@ -1048,12 +1003,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
           if (surfaceFinding) vulnerabilityFindings.push(surfaceFinding);
         }
         if (finding && stopOnFirstHit) stopRequested = true;
-        await reportMonitorProgress(monitorExecution, {
-          current: executedRuleCount, total: totalProgressUnits, currentTarget: target,
-          phase: "probe", message: `Executing verification rules for ${target}`,
-        });
-      }),
-      concurrency,
+        completedRuleCount += 1;
+        const now = Date.now();
+        if (completedRuleCount === taskCount || now - lastProgressAt >= PROGRESS_INTERVAL_MS) {
+          lastProgressAt = now;
+          await reportMonitorProgress(monitorExecution, {
+            current: completedRuleCount, total: totalProgressUnits, currentTarget: target,
+            phase: "probe", message: `Executing verification rules for ${target}`,
+          });
+        }
+      },
+      () => stopRequested,
     );
     for (const target of targets) await writeTarget(target, "target-complete", { success: true, data: {} }, {
       complete: true, status: failedTargets.has(target) ? "failed" : stopRequested ? "skipped" : "ok",
@@ -1082,6 +1042,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
           totalTargets: targets.length,
           executedRules: executedRuleCount,
           matchedRules: findings.length,
+          diagnostics: {
+            loaded_rules: allRules.length,
+            applicable_rules: rules.length,
+            planned_rule_tasks: taskCount,
+            completed_rule_tasks: completedRuleCount,
+          },
         },
         surface_artifacts: {
           findings: vulnerabilityFindings,

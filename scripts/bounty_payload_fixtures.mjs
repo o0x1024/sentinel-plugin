@@ -55,7 +55,7 @@ export function createPayloadCase(id, count, metrics) {
         case 'http_prober': targets = domains; input = { targets, ports: [80, 443, 8080, 8443], extractTitle: true }; break;
         case 'tech_fingerprinter': input = { targets, target_objects: references(targets, 'web'), dictionaryEntries: [featureRule] }; break;
         case 'directory_bruteforcer': input = { targets, customWordlist: ['path-a', 'path-b'], concurrency: 32 }; break;
-        case 'risk_scanner': input = { targets, dictionaryEntries: riskRules, maxRules: 2 }; break;
+        case 'risk_scanner': input = { targets, dictionaryEntries: riskRules }; break;
         case 'sensitive_file_scanner': input = { targets, dictionaryEntries: sensitiveRules }; break;
         case 'actuator_scanner': input = { targets, actuator_endpoints: ['info'], concurrency: 32 }; break;
         case 'js_analyzer': targets = urls.map(url => `${url}app.js`); input = { urls: targets, maxFiles: 1, followImports: false, concurrency: 32 }; break;

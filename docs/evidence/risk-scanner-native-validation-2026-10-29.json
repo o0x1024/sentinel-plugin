@@ -1,0 +1,15 @@
+{
+  "cancelled_connections_remaining": 0,
+  "cancelled_run_completed_targets": 0,
+  "completed_rule_tasks": 10005,
+  "elapsed_ms": 4805,
+  "held_requests_before_cancel": 4,
+  "host_global_concurrency": 4,
+  "loaded_rules": 10005,
+  "next_runtime_healthy": true,
+  "plugin_concurrency": 32,
+  "real_http_requests": 100,
+  "runtime": "real PluginManager / QuickJS / in-memory SQLite / owned loopback HTTP",
+  "plugin_version": "2.2.13",
+  "bundle_sha256": "a13c82c843fdf12ec65997ba36c931a08f8f8a0d66becdb4816d42b0242e7fa7"
+}

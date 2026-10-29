@@ -1,5 +1,5 @@
 {
-  "version": "2.5.12",
+  "version": "2.5.13",
   "updated_at": "2026-10-29",
   "plugins": [
     {
@@ -338,7 +338,7 @@
     {
       "id": "risk_scanner",
       "name": "Risk Scanner",
-      "version": "2.2.12",
+      "version": "2.2.13",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "risk",
@@ -347,7 +347,7 @@
       "target_asset_types": [
         "web"
       ],
-      "description": "Execute safe dictionary-driven verification rules loaded from workflow input or poc dictionaries, with fingerprint scoping, chained requests, and structured evidence.",
+      "description": "Execute all applicable Risk Scanner Rules with bounded concurrency, lazy task scheduling, chained requests and durable evidence.",
       "default_severity": "medium",
       "tags": [
         "risk",
