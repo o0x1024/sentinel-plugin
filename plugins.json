@@ -248,7 +248,7 @@
     {
       "id": "http_prober",
       "name": "HTTP Prober",
-      "version": "1.4.9",
+      "version": "1.4.10",
       "author": "Sentinel Team",
       "main_category": "bounty",
       "category": "recon",

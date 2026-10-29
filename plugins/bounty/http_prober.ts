@@ -3,7 +3,7 @@
  *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.9
+ * @version 1.4.10
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -137,18 +137,17 @@ has(port);const isHttpsPrimary=HTTPS_PRIMARY_PORTS.has(port);if(options.checkHtt
 protocols.push("https")}if(protocols.length===0&&options.probeUnknownPortsWithBoth){if(options.checkHttps){protocols.push("https")}if(options.checkHttp){protocols.
 push("http")}}if(protocols.length===0){if(options.checkHttps&&!options.checkHttp){protocols.push("https")}else if(options.checkHttp&&!options.checkHttps){protocols.
 push("http")}}for(const protocol of protocols){urls.push(normalizeTarget(target,port,protocol))}}return urls}async function probeUrl(url,options){const startTime=performance.
-now();const requestInit={headers:{"User-Agent":options.userAgent,"Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8","Accept-Language":"e\
-n-US,en;q=0.5"},redirect:options.followRedirects?"follow":"manual",maxRedirects:options.maxRedirects};const getRequestInit={...requestInit,method:"GET",maxBodyBytes:RESPONSE_PREVIEW_BYTES,
-headers:{...requestInit.headers,"Range":`bytes=0-${RESPONSE_PREVIEW_BYTES-1}`}};try{let response;let requestMethod=options.extractTitle?"GET":"HEAD";if(requestMethod===
-"GET"){response=await fetchProbe(url,getRequestInit)}else{response=await fetchProbe(url,{method:"HEAD",...requestInit})}let headers=collectResponseHeaders(response);
-let title;let contentLength=parseContentLength(headers);let contentSummary;if(requestMethod==="GET"&&shouldFetchBodyForTitle(response.status,headers,options.extractTitle)){
-try{const text=await response.text();title=extractTitle(text);contentSummary=buildContentSummary(text);if(!contentLength){contentLength=text.length}}catch{}}const technologies=detectTechnologies(
-headers);const result={url,alive:true,responseTime:Math.round(performance.now()-startTime),statusCode:response.status,statusText:response.statusText,title,contentLength,
-contentType:headers["content-type"],server:headers["server"],headers,technologies,contentSummary};result.redirectUrl=resolveRedirectUrl(url,response,headers);return result}catch(error){
-const responseTime=Math.round(performance.now()-startTime);return{url,alive:false,responseTime,error:error.message||String(error)}}}async function runSequentially(tasks,retainResults=true){
-if(tasks.length===0){return[]}const results=retainResults?new Array(tasks.length):[];const concurrency=Math.max(1,Math.min(MAX_CONCURRENCY,tasks.length));let nextIndex=0;
-const runNext=async()=>{while(nextIndex<tasks.length){const currentIndex=nextIndex;nextIndex+=1;const result=await tasks[currentIndex]();if(retainResults)results[currentIndex]=
-result}};const workers=Array.from({length:concurrency},()=>runNext());await Promise.all(workers);return results}function normalizeTechnologyList(technologies){return Array.
+now();const requestInit={method:"GET",headers:{"User-Agent":options.userAgent,"Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8","Accept\
+-Language":"en-US,en;q=0.5"},redirect:options.followRedirects?"follow":"manual",maxRedirects:options.maxRedirects,maxBodyBytes:RESPONSE_PREVIEW_BYTES};try{const response=await fetchProbe(
+url,requestInit);const headers=collectResponseHeaders(response);let title;let contentLength=parseContentLength(headers);let contentSummary;if(shouldFetchBodyForTitle(
+response.status,headers,options.extractTitle)){try{const text=await response.text();title=extractTitle(text);contentSummary=buildContentSummary(text);if(!contentLength){
+contentLength=text.length}}catch{}}const technologies=detectTechnologies(headers);const result={url,alive:true,responseTime:Math.round(performance.now()-startTime),
+statusCode:response.status,statusText:response.statusText,title,contentLength,contentType:headers["content-type"],server:headers["server"],headers,technologies,
+contentSummary};result.redirectUrl=resolveRedirectUrl(url,response,headers);return result}catch(error){const responseTime=Math.round(performance.now()-startTime);
+return{url,alive:false,responseTime,error:error.message||String(error)}}}async function runSequentially(tasks,retainResults=true){if(tasks.length===0){return[]}
+const results=retainResults?new Array(tasks.length):[];const concurrency=Math.max(1,Math.min(MAX_CONCURRENCY,tasks.length));let nextIndex=0;const runNext=async()=>{
+while(nextIndex<tasks.length){const currentIndex=nextIndex;nextIndex+=1;const result=await tasks[currentIndex]();if(retainResults)results[currentIndex]=result}};
+const workers=Array.from({length:concurrency},()=>runNext());await Promise.all(workers);return results}function normalizeTechnologyList(technologies){return Array.
 from(new Set((technologies||[]).map(item=>String(item||"").trim()).filter(Boolean))).sort((left,right)=>left.localeCompare(right))}function buildProbeEventId(prefix,url,timestamp){
 return`${prefix}-${url}-${timestamp}`.replace(/[^a-zA-Z0-9_-]+/g,"-").slice(0,120)}function buildProbeSnapshot(result,timestamp){return{url:result.url,alive:result.
 alive,statusCode:result.statusCode,title:result.title,contentType:result.contentType,server:result.server,redirectUrl:result.redirectUrl,technologies:normalizeTechnologyList(

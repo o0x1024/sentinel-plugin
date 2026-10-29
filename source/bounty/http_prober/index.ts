@@ -3,7 +3,7 @@
  *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.9
+ * @version 1.4.10
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -695,6 +695,7 @@ async function probeUrl(
 ): Promise<ProbeResult> {
     const startTime = performance.now();
     const requestInit = {
+        method: "GET",
         headers: {
             "User-Agent": options.userAgent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -702,32 +703,19 @@ async function probeUrl(
         },
         redirect: options.followRedirects ? "follow" : "manual",
         maxRedirects: options.maxRedirects,
-    } satisfies ProbeFetchInit;
-    const getRequestInit = {
-        ...requestInit,
-        method: "GET",
+        // Limit the body locally so probing preserves ordinary GET response semantics.
         maxBodyBytes: RESPONSE_PREVIEW_BYTES,
-        headers: {
-            ...requestInit.headers,
-            "Range": `bytes=0-${RESPONSE_PREVIEW_BYTES - 1}`,
-        },
     } satisfies ProbeFetchInit;
 
     try {
-        let response: any;
-        let requestMethod: "HEAD" | "GET" = options.extractTitle ? "GET" : "HEAD";
-        if (requestMethod === "GET") {
-            response = await fetchProbe(url, getRequestInit);
-        } else {
-            response = await fetchProbe(url, { method: "HEAD", ...requestInit });
-        }
-        let headers = collectResponseHeaders(response);
+        const response = await fetchProbe(url, requestInit);
+        const headers = collectResponseHeaders(response);
 
         let title: string | undefined;
         let contentLength = parseContentLength(headers);
         let contentSummary: string | undefined;
 
-        if (requestMethod === "GET" && shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
+        if (shouldFetchBodyForTitle(response.status, headers, options.extractTitle)) {
             try {
                 const text = await response.text();
                 title = extractTitle(text);
