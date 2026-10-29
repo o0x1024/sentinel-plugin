@@ -3,7 +3,7 @@
  *
  * @plugin subdomain_brute
  * @name Subdomain Brute Force
- * @version 1.0.1
+ * @version 1.0.2
  * @author Sentinel Team
  * @main_category bounty
  * @category recon

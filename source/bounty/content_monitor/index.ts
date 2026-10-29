@@ -3,7 +3,7 @@
  *
  * @plugin content_monitor
  * @name Content Monitor
- * @version 1.1.7
+ * @version 1.1.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type content

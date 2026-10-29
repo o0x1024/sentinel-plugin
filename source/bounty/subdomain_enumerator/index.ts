@@ -3,7 +3,7 @@
  *
  * @plugin subdomain_enumerator
  * @name Subdomain Enumerator
- * @version 2.2.8
+ * @version 2.2.9
  * @author Sentinel Team
  * @main_category bounty
  * @category recon
@@ -892,7 +892,15 @@ async function analyzeDomain(input: ToolInput, domain: string, stream: ReturnTyp
                 }
             }
         };
-        await writeTarget(domain, "domain-complete", { success: true, data: successful ? output.data! : {
+        await writeTarget(domain, "domain-complete", { success: true, data: successful ? {
+            snapshots: output.data!.snapshots,
+            changeEvents: output.data!.changeEvents,
+            summary: output.data!.summary,
+            surface_artifacts: {
+                changes: output.data!.surface_artifacts!.changes,
+                evidences: output.data!.surface_artifacts!.evidences,
+            },
+        } : {
             results: [{ domain, status: "failed", error: output.error }],
         } } as any, { status: successful ? "ok" : "failed", error: output.error });
         return output;
@@ -920,7 +928,12 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         const monitor = (globalThis as any).Sentinel?.Monitor;
         if (context && monitor?.reportProgress) {
             try {
-                await monitor.reportProgress({ monitorProgress: context, current: completed, total: domains.length,
+                await monitor.reportProgress({ monitorProgress: {
+                        taskId: context.task_id, taskName: context.task_name, programId: context.program_id,
+                        executionMode: context.execution_mode, startedAt: context.started_at, currentPlugin: context.current_plugin,
+                        currentPluginIndex: context.current_plugin_index, completedSteps: context.completed_steps,
+                        totalSteps: context.total_steps, importedAssets: context.imported_assets,
+                    }, current: completed, total: domains.length,
                     currentTarget: domain, phase: "enumerate", message: `Enumerating ${domain} (${completed}/${domains.length} completed)` });
             } catch { /* Progress delivery must not change query results. */ }
         }
@@ -940,6 +953,10 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
         }
     }));
     const failed = results.filter(result => !result.success);
+    if (stream.enabled) return await stream.finish<ToolOutput>({
+        success: failed.length === 0,
+        ...(failed.length ? { error: `Subdomain enumeration failed for ${failed.length}/${domains.length} domains: ${failed.map(result => result.error).join("; ")}` } : {}),
+    });
     const data = results.flatMap(result => result.data ? [result.data] : []);
     const subdomains = [...new Set(data.flatMap(item => item.subdomains))].sort();
     const sourceResults = data.flatMap(item => item.sourceResults.map(result => ({ ...result, domain: item.domain })));

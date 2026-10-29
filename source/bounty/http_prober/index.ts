@@ -3,7 +3,7 @@
  *
  * @plugin http_prober
  * @name HTTP Prober
- * @version 1.4.8
+ * @version 1.4.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web
@@ -910,204 +910,187 @@ function createTechnologyChangeEvent(url: string, added: string[], removed: stri
     };
 }
 
-/**
- * Main analysis function
- */
-async function buildProbeOutput(
-    input: ToolInput, results: ProbeResult[], timestamp: string,
-    monitorExecution?: MonitorExecutionContext,
-): Promise<ToolOutput> {
-    const previousSnapshots = input.previousSnapshots || {};
-        const aliveResults = results.filter(r => r.alive);
-        const deadResults = results.filter(r => !r.alive);
-        const changeEvents: ChangeEvent[] = [];
-        const snapshots: Record<string, ProbeSnapshot> = {};
+type ProbeOutputDelta = {
+    success: true;
+    data: Omit<NonNullable<ToolOutput["data"]>, "targets">;
+};
 
-        for (const result of results) {
-            // A failed request is not an authoritative endpoint removal.
-            if (!result.alive) continue;
-            const snapshot = buildProbeSnapshot(result, timestamp);
-            snapshots[result.url] = snapshot;
-            const previous = previousSnapshots[result.url];
+/** Project only the completed endpoints. Input inventories never enter a result delta. */
+function buildProbeDelta(
+    results: ProbeResult[], previousSnapshots: Record<string, ProbeSnapshot>, timestamp: string,
+): ProbeOutputDelta {
+    const aliveResults = results.filter(r => r.alive);
+    const deadResults = results.filter(r => !r.alive);
+    const changeEvents: ChangeEvent[] = [];
+    const snapshots: Record<string, ProbeSnapshot> = {};
 
-            if (!previous) {
-                if (snapshot.alive) {
-                    changeEvents.push(createAvailabilityEvent(null, snapshot, timestamp));
-                }
-                continue;
-            }
+    for (const result of results) {
+        // A failed request is not an authoritative endpoint removal.
+        if (!result.alive) continue;
+        const snapshot = buildProbeSnapshot(result, timestamp);
+        snapshots[result.url] = snapshot;
+        const previous = previousSnapshots[result.url];
 
-            if (previous.alive !== snapshot.alive) {
-                changeEvents.push(createAvailabilityEvent(previous, snapshot, timestamp));
-                continue;
+        if (!previous) {
+            if (snapshot.alive) {
+                changeEvents.push(createAvailabilityEvent(null, snapshot, timestamp));
             }
-
-            if (!snapshot.alive || !previous.alive) {
-                continue;
-            }
-
-            const contentDiffs: string[] = [];
-            if (previous.statusCode !== snapshot.statusCode) {
-                contentDiffs.push(`status ${previous.statusCode || "unknown"} -> ${snapshot.statusCode || "unknown"}`);
-            }
-            if ((previous.title || "") !== (snapshot.title || "")) {
-                contentDiffs.push(`title ${JSON.stringify(previous.title || "")} -> ${JSON.stringify(snapshot.title || "")}`);
-            }
-            if ((previous.server || "") !== (snapshot.server || "")) {
-                contentDiffs.push(`server ${JSON.stringify(previous.server || "")} -> ${JSON.stringify(snapshot.server || "")}`);
-            }
-            if ((previous.contentType || "") !== (snapshot.contentType || "")) {
-                contentDiffs.push(`content-type ${JSON.stringify(previous.contentType || "")} -> ${JSON.stringify(snapshot.contentType || "")}`);
-            }
-            if ((previous.redirectUrl || "") !== (snapshot.redirectUrl || "")) {
-                contentDiffs.push(`redirect ${JSON.stringify(previous.redirectUrl || "")} -> ${JSON.stringify(snapshot.redirectUrl || "")}`);
-            }
-            if (contentDiffs.length > 0) {
-                changeEvents.push(createContentChangeEvent(result.url, contentDiffs, previous, snapshot, timestamp));
-            }
-
-            const previousTechnologies = new Set(normalizeTechnologyList(previous.technologies));
-            const currentTechnologies = new Set(snapshot.technologies);
-            const addedTechnologies = snapshot.technologies.filter(item => !previousTechnologies.has(item));
-            const removedTechnologies = [...previousTechnologies].filter(item => !currentTechnologies.has(item));
-            if (addedTechnologies.length > 0 || removedTechnologies.length > 0) {
-                changeEvents.push(createTechnologyChangeEvent(result.url, addedTechnologies, removedTechnologies, timestamp));
-            }
+            continue;
         }
 
-        const surfaceDomains = [...new Set(aliveResults
-            .map(result => new URL(result.url).hostname)
-            .filter(hostname => hostname.includes(".") && !isIpLiteral(hostname))
-        )].map(hostname => ({
-            fqdn: hostname,
-            main_domain: hostname.split(".").slice(-2).join("."),
-            root_domain: hostname.split(".").slice(-2).join("."),
+        if (previous.alive !== snapshot.alive) {
+            changeEvents.push(createAvailabilityEvent(previous, snapshot, timestamp));
+            continue;
+        }
+
+        if (!snapshot.alive || !previous.alive) {
+            continue;
+        }
+
+        const contentDiffs: string[] = [];
+        if (previous.statusCode !== snapshot.statusCode) {
+            contentDiffs.push(`status ${previous.statusCode || "unknown"} -> ${snapshot.statusCode || "unknown"}`);
+        }
+        if ((previous.title || "") !== (snapshot.title || "")) {
+            contentDiffs.push(`title ${JSON.stringify(previous.title || "")} -> ${JSON.stringify(snapshot.title || "")}`);
+        }
+        if ((previous.server || "") !== (snapshot.server || "")) {
+            contentDiffs.push(`server ${JSON.stringify(previous.server || "")} -> ${JSON.stringify(snapshot.server || "")}`);
+        }
+        if ((previous.contentType || "") !== (snapshot.contentType || "")) {
+            contentDiffs.push(`content-type ${JSON.stringify(previous.contentType || "")} -> ${JSON.stringify(snapshot.contentType || "")}`);
+        }
+        if ((previous.redirectUrl || "") !== (snapshot.redirectUrl || "")) {
+            contentDiffs.push(`redirect ${JSON.stringify(previous.redirectUrl || "")} -> ${JSON.stringify(snapshot.redirectUrl || "")}`);
+        }
+        if (contentDiffs.length > 0) {
+            changeEvents.push(createContentChangeEvent(result.url, contentDiffs, previous, snapshot, timestamp));
+        }
+
+        const previousTechnologies = new Set(normalizeTechnologyList(previous.technologies));
+        const currentTechnologies = new Set(snapshot.technologies);
+        const addedTechnologies = snapshot.technologies.filter(item => !previousTechnologies.has(item));
+        const removedTechnologies = [...previousTechnologies].filter(item => !currentTechnologies.has(item));
+        if (addedTechnologies.length > 0 || removedTechnologies.length > 0) {
+            changeEvents.push(createTechnologyChangeEvent(result.url, addedTechnologies, removedTechnologies, timestamp));
+        }
+    }
+
+    const surfaceDomains = [...new Set(aliveResults
+        .map(result => new URL(result.url).hostname)
+        .filter(hostname => hostname.includes(".") && !isIpLiteral(hostname))
+    )].map(hostname => ({
+        fqdn: hostname,
+        main_domain: hostname.split(".").slice(-2).join("."),
+        root_domain: hostname.split(".").slice(-2).join("."),
+        source: "http_prober",
+        confidence: 0.9,
+    }));
+    const surfaceIps = [...new Set(aliveResults
+        .map(result => new URL(result.url).hostname)
+        .filter(hostname => isIpLiteral(hostname))
+    )].map(ipAddress => ({
+        ip_address: ipAddress,
+        ip_version: ipAddress.includes(":") ? "IPv6" : "IPv4",
+        source: "http_prober",
+        confidence: 0.9,
+    }));
+    const surfaceWebs = aliveResults.map(result => {
+        const parsed = new URL(result.url);
+        return {
+            canonical_url: result.url,
+            scheme: parsed.protocol.replace(":", ""),
+            hostname: parsed.hostname,
+            port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
+            site_title: result.title,
+            http_status_code: result.statusCode,
+            server_header: result.server,
+            response_headers: result.headers || {},
+            content_summary: result.contentSummary || `${result.statusCode || "unknown"} ${result.title || ""}`.trim(),
             source: "http_prober",
-            confidence: 0.9,
-        }));
-        const surfaceIps = [...new Set(aliveResults
-            .map(result => new URL(result.url).hostname)
-            .filter(hostname => isIpLiteral(hostname))
-        )].map(ipAddress => ({
-            ip_address: ipAddress,
-            ip_version: ipAddress.includes(":") ? "IPv6" : "IPv4",
+            confidence: 0.95,
+        };
+    });
+    const surfaceEvidences = aliveResults.flatMap(result => {
+        const parsed = new URL(result.url);
+        const evidences: any[] = [{
+            asset_type: "web",
+            asset_key: result.url,
+            evidence_type: "http_response_headers",
+            title: `HTTP Response Headers: ${parsed.hostname}`,
+            content_json: {
+                url: result.url,
+                headers: result.headers || {},
+            },
             source: "http_prober",
-            confidence: 0.9,
-        }));
-        const surfaceWebs = aliveResults.map(result => {
-            const parsed = new URL(result.url);
-            return {
-                canonical_url: result.url,
-                scheme: parsed.protocol.replace(":", ""),
-                hostname: parsed.hostname,
-                port: Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80)),
-                site_title: result.title,
-                http_status_code: result.statusCode,
-                server_header: result.server,
-                response_headers: result.headers || {},
-                content_summary: result.contentSummary || `${result.statusCode || "unknown"} ${result.title || ""}`.trim(),
-                source: "http_prober",
-                confidence: 0.95,
-            };
-        });
-        const surfaceEvidences = aliveResults.flatMap(result => {
-            const parsed = new URL(result.url);
-            const evidences: any[] = [{
+        }];
+
+        if (result.contentSummary) {
+            evidences.push({
                 asset_type: "web",
                 asset_key: result.url,
-                evidence_type: "http_response_headers",
-                title: `HTTP Response Headers: ${parsed.hostname}`,
+                evidence_type: "http_response_body_summary",
+                title: `HTTP Response Body Summary: ${parsed.hostname}`,
+                content_text: result.contentSummary,
                 content_json: {
                     url: result.url,
-                    headers: result.headers || {},
+                    status_code: result.statusCode,
+                    title: result.title,
+                    content_type: result.contentType,
+                    response_time: result.responseTime,
+                    technologies: result.technologies,
+                    redirect_url: result.redirectUrl,
                 },
                 source: "http_prober",
-            }];
-
-            if (result.contentSummary) {
-                evidences.push({
-                    asset_type: "web",
-                    asset_key: result.url,
-                    evidence_type: "http_response_body_summary",
-                    title: `HTTP Response Body Summary: ${parsed.hostname}`,
-                    content_text: result.contentSummary,
-                    content_json: {
-                        url: result.url,
-                        status_code: result.statusCode,
-                        title: result.title,
-                        content_type: result.contentType,
-                        response_time: result.responseTime,
-                        technologies: result.technologies,
-                        redirect_url: result.redirectUrl,
-                    },
-                    source: "http_prober",
-                });
-            }
-
-            return evidences;
-        });
-
-        const byStatusCode: Record<string, number> = {};
-        for (const result of aliveResults) {
-            const code = String(result.statusCode || "unknown");
-            byStatusCode[code] = (byStatusCode[code] || 0) + 1;
+            });
         }
 
-        await reportMonitorProgress(monitorExecution, {
-            current: results.length + 2,
-            total: results.length + 2,
-            phase: "build",
-            message: "Building web probe results",
-        });
+        return evidences;
+    });
 
-        return {
-            success: true,
-            data: {
-                targets: input.targets,
-                results,
-                changeEvents,
-                snapshots,
-                summary: {
-                    total: results.length,
-                    alive: aliveResults.length,
-                    dead: deadResults.length,
-                    byStatusCode,
-                    contentChanges: changeEvents.filter(event => event.eventType === "content_change").length,
-                    technologyChanges: changeEvents.filter(event => event.eventType === "technology_change").length,
-                },
-                surface_artifacts: {
-                    domains: surfaceDomains,
-                    ips: surfaceIps,
-                    webs: surfaceWebs,
-                    changes: changeEvents.map(event => ({
-                        asset_key: event.assetId,
-                        asset_type: "web",
-                        change_type: event.eventType,
-                        severity: event.severity,
-                        title: event.title,
-                        description: event.description,
-                        old_value: event.oldValue,
-                        new_value: event.newValue,
-                        risk_score: event.riskScore,
-                        source: "http_prober",
-                        metadata: event.metadata,
-                    })),
-                    evidences: surfaceEvidences,
-                    relations: aliveResults.map(result => {
-                        const parsed = new URL(result.url);
-                        if (isIpLiteral(parsed.hostname)) {
-                            return {
-                                from_type: "ip",
-                                from_key: parsed.hostname,
-                                to_type: "web",
-                                to_key: result.url,
-                                relation_type: "exposes_web",
-                                source: "http_prober",
-                                confidence: 0.9,
-                            };
-                        }
+    const byStatusCode: Record<string, number> = {};
+    for (const result of aliveResults) {
+        const code = String(result.statusCode || "unknown");
+        byStatusCode[code] = (byStatusCode[code] || 0) + 1;
+    }
+
+    return {
+        success: true,
+        data: {
+            results,
+            changeEvents,
+            snapshots,
+            summary: {
+                total: results.length,
+                alive: aliveResults.length,
+                dead: deadResults.length,
+                byStatusCode,
+                contentChanges: changeEvents.filter(event => event.eventType === "content_change").length,
+                technologyChanges: changeEvents.filter(event => event.eventType === "technology_change").length,
+            },
+            surface_artifacts: {
+                domains: surfaceDomains,
+                ips: surfaceIps,
+                webs: surfaceWebs,
+                changes: changeEvents.map(event => ({
+                    asset_key: event.assetId,
+                    asset_type: "web",
+                    change_type: event.eventType,
+                    severity: event.severity,
+                    title: event.title,
+                    description: event.description,
+                    old_value: event.oldValue,
+                    new_value: event.newValue,
+                    risk_score: event.riskScore,
+                    source: "http_prober",
+                    metadata: event.metadata,
+                })),
+                evidences: surfaceEvidences,
+                relations: aliveResults.map(result => {
+                    const parsed = new URL(result.url);
+                    if (isIpLiteral(parsed.hostname)) {
                         return {
-                            from_type: "domain",
+                            from_type: "ip",
                             from_key: parsed.hostname,
                             to_type: "web",
                             to_key: result.url,
@@ -1115,10 +1098,20 @@ async function buildProbeOutput(
                             source: "http_prober",
                             confidence: 0.9,
                         };
-                    }),
-                },
+                    }
+                    return {
+                        from_type: "domain",
+                        from_key: parsed.hostname,
+                        to_type: "web",
+                        to_key: result.url,
+                        relation_type: "exposes_web",
+                        source: "http_prober",
+                        confidence: 0.9,
+                    };
+                }),
             },
-        };
+        },
+    };
 }
 
 export async function analyze(input: ToolInput): Promise<ToolOutput> {
@@ -1136,7 +1129,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             return normalizeServiceTarget(target) !== null;
         });
 
-        const genericTargets = validStringTargets.filter((target) => !inferredServiceTargets.includes(target));
+        const serviceTargetSet = new Set(inferredServiceTargets);
+        const genericTargets = validStringTargets.filter((target) => !serviceTargetSet.has(target));
         const structuredServiceTargets = collectServiceTargets({
             ...input,
             service_targets: [
@@ -1196,13 +1190,21 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             ? ((input as any).__monitorExecution.result_stream.targets as string[])
                 .filter(target => !/^https?:\/\//.test(target) && normalizeServiceTarget(target) !== null)
             : inferredServiceTargets;
+        const serviceOwnersByEndpoint = new Map<string, string[]>();
+        for (const target of serviceOwners) {
+            const parsed = normalizeServiceTarget(target);
+            if (!parsed) continue;
+            const identity = `${parsed.host}:${parsed.port}`;
+            const endpointOwners = serviceOwnersByEndpoint.get(identity) || [];
+            endpointOwners.push(target);
+            serviceOwnersByEndpoint.set(identity, endpointOwners);
+        }
         for (const service of structuredServiceTargets) {
             const candidates = buildCandidateUrlsFromServiceTarget(service, {
                 checkHttp, checkHttps, probeUnknownPortsWithBoth: false,
             });
-            for (const target of serviceOwners) {
-                const parsed = normalizeServiceTarget(target);
-                if (parsed?.host === service.host && parsed.port === service.port) addOwner(target, candidates);
+            for (const target of serviceOwnersByEndpoint.get(`${service.host}:${service.port}`) || []) {
+                addOwner(target, candidates);
             }
         }
         const remaining = new Map<string, number>();
@@ -1229,7 +1231,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 if (stream.enabled) {
                     const targetOwners = [...(owners.get(url) || [])];
                     if (targetOwners.length === 0) throw new Error("HTTP probe has no injected target owner");
-                    const delta = await buildProbeOutput(input, [result], timestamp);
+                    const delta = buildProbeDelta([result], previousSnapshots, timestamp);
                     for (let index = 0; index < targetOwners.length; index++) {
                         const owner = targetOwners[index];
                         const left = remaining.get(owner)! - 1;
@@ -1259,7 +1261,13 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             phase: "compare",
             message: "Comparing HTTP snapshots",
         });
-        return await stream.finish(await buildProbeOutput(input, results, timestamp, monitorExecution));
+        await reportMonitorProgress(monitorExecution, {
+            current: totalProgressUnits, total: totalProgressUnits,
+            phase: "build", message: "Building web probe results",
+        });
+        if (stream.enabled) return await stream.finish<ToolOutput>();
+        const delta = buildProbeDelta(results, previousSnapshots, timestamp);
+        return { success: true, data: { targets: input.targets, ...delta.data } };
 
     } catch (error: any) {
         return {

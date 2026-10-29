@@ -201,3 +201,47 @@ test('monitor execution rejects a missing protocol without HTTP requests', async
   assert.match(output.error, /monitor-results-v1/);
   assert.equal(f.requests.length, 0);
 });
+
+async function apiSubmissionBytes(count) {
+  const targets = Array.from({ length: count }, (_, index) => `https://bulk${String(index).padStart(4, '0')}.owned.test/`);
+  const f = fixture(targets);
+  let workItems = 0, bytes = 0, maxBytes = 0, requests = 0;
+  globalThis.Sentinel.Monitor.commitResults = async request => {
+    const delta = request.output.data;
+    for (const forbidden of ['targets', 'urls', 'target_objects', 'service_targets', 'previousSnapshots', 'dictionaryEntries']) {
+      assert.equal(Object.hasOwn(delta, forbidden), false, `API delta contains ${forbidden}`);
+    }
+    for (const field of ['results', 'resourceResults']) if (delta[field]) {
+      assert.ok(delta[field].length <= request.work.length, `${field} contains previous targets' results`);
+    }
+    if (delta.snapshots) assert.ok(Object.keys(delta.snapshots).length <= request.work.length);
+    const serialized = JSON.stringify(request);
+    assert.ok(!serialized.includes('UNRELATED_HISTORY_MUST_STAY_AT_INPUT'));
+    const size = Buffer.byteLength(serialized);
+    assert.ok(size <= request.work.length * 12000 + 1024);
+    workItems += request.work.length;
+    bytes += size;
+    maxBytes = Math.max(maxBytes, size);
+    return { ok: true, sequence: request.sequence };
+  };
+  handleFetch = async url => {
+    requests++;
+    return String(url).endsWith('.js') ? javascript('fetch("/api/owned");') : html('<script src="/source.js"></script>');
+  };
+  const output = await analyze({ targets, previousSnapshots: { 'https://unrelated.owned.test/': {
+    marker: 'UNRELATED_HISTORY_MUST_STAY_AT_INPUT',
+  } }, __monitorExecution: f.context });
+  assert.equal(output.success, true, output.error);
+  assert.equal(workItems, count * 3);
+  assert.equal(requests, count * 2);
+  assert.equal(output.data.summary.diagnostics.completed_targets, count);
+  return { targets: count, workItems, bytes, maxBytes };
+}
+
+test('API committed bytes scale with current resources and completed roots, without repeated input or history', async t => {
+  const small = await apiSubmissionBytes(128);
+  const large = await apiSubmissionBytes(256);
+  assert.ok(large.bytes <= small.bytes * 2.1 + 2048, `API submissions grew superlinearly: ${small.bytes} -> ${large.bytes}`);
+  assert.ok(large.maxBytes <= small.maxBytes * 1.15 + 2048);
+  t.diagnostic(JSON.stringify({ plugin: 'api_monitor', samples: [small, large] }));
+});

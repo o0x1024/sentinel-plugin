@@ -1,5 +1,6 @@
 /** Bounded, acknowledged monitor deltas; ordinary tool calls retain their output. */
-type JsonObject = Record<string, any>;
+import { copyMonitorDelta, isJsonObject as object, jsonBytes, mergeMonitorDelta, monitorRequestBytes } from './monitor_delta.ts';
+import type { DeltaNode, JsonObject } from './monitor_delta.ts';
 type WorkStatus = "ok" | "failed" | "skipped";
 
 export interface MonitorResultOptions {
@@ -28,58 +29,6 @@ interface ResultRequest {
 const MAX_WORK_ITEMS = 32;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COMMIT_INTERVAL_MS = 5000;
-
-function object(value: unknown): value is JsonObject {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/** JSON.stringify escapes lone surrogates; count the UTF-8 encoding of its text. */
-function jsonBytes(value: unknown): number {
-    const text = JSON.stringify(value);
-    let bytes = 0;
-    for (let index = 0; index < text.length; index++) {
-        const code = text.charCodeAt(index);
-        if (code < 0x80) bytes++;
-        else if (code < 0x800) bytes += 2;
-        else if (code >= 0xd800 && code <= 0xdbff) { bytes += 4; index++; }
-        else bytes += 3;
-    }
-    return bytes;
-}
-
-/** Inputs are copied before buffering, so callers may release/reset their arrays. */
-function copyOutput(output: unknown): { success: true; data: JsonObject } {
-    if (!object(output) || output.success !== true || !object(output.data)) {
-        throw new Error("Monitor result delta must contain success:true and an object data");
-    }
-    return JSON.parse(JSON.stringify({ success: true, data: output.data }));
-}
-
-function mergeValue(left: any, right: any, summary = false): any {
-    if (Array.isArray(left) && Array.isArray(right)) return [...left, ...right];
-    if (summary && typeof left === "number" && typeof right === "number") return left + right;
-    if (object(left) && object(right)) {
-        const merged: JsonObject = { ...left };
-        for (const [key, value] of Object.entries(right)) {
-            merged[key] = key in merged ? mergeValue(merged[key], value, summary) : value;
-        }
-        return merged;
-    }
-    return right;
-}
-
-function mergeData(left: JsonObject, right: JsonObject): JsonObject {
-    const data: JsonObject = { ...left };
-    for (const [key, value] of Object.entries(right)) {
-        if (key === "snapshots") {
-            if (!object(value)) throw new Error("Monitor snapshot delta must be an object");
-            data.snapshots = { ...data.snapshots, ...value };
-        } else {
-            data[key] = key in data ? mergeValue(data[key], value, key === "summary") : value;
-        }
-    }
-    return data;
-}
 
 function positiveLimit(value: unknown, maximum: number, label: string): number {
     if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > maximum) {
@@ -119,7 +68,8 @@ export function createMonitorResultStream(input: unknown) {
     // Only unacknowledged work keys live here. The host owns durable duplicate detection.
     const bufferedKeys = new Set<string>();
     let buffered: WorkItem[] = [];
-    let data: JsonObject = {};
+    let data: DeltaNode | undefined;
+    let workContentsBytes = 0;
     let sequence = 0;
     let lastCommitAt = Date.now();
     let failed: Error | undefined;
@@ -129,6 +79,9 @@ export function createMonitorResultStream(input: unknown) {
     let submittedBatches = 0;
     let maxPendingObserved = 0;
     let backpressureMs = 0;
+    let submittedJsonBytes = 0;
+    let committedJsonBytes = 0;
+    let maxBatchJsonBytes = 0;
 
     function assertHealthy(): void {
         if (failed) throw failed;
@@ -154,14 +107,18 @@ export function createMonitorResultStream(input: unknown) {
         assertHealthy();
         if (!buffered.length) return;
         await capacity();
-        const request: ResultRequest = { sequence: sequence + 1, work: buffered, output: { success: true, data } };
-        if (jsonBytes(request) > byteLimit) throw new Error("Monitor result batch exceeds the JSON byte limit");
+        const request: ResultRequest = { sequence: sequence + 1, work: buffered, output: { success: true, data: data!.value } };
+        const encodedBytes = monitorRequestBytes(request.sequence, workContentsBytes, data!);
+        if (encodedBytes > byteLimit) throw new Error("Monitor result batch exceeds the JSON byte limit");
         sequence++;
         const keys = buffered.map(item => JSON.stringify([item.target, item.key]));
         buffered = [];
-        data = {};
+        data = undefined;
+        workContentsBytes = 0;
         lastCommitAt = Date.now();
         submittedBatches++;
+        submittedJsonBytes += encodedBytes;
+        maxBatchJsonBytes = Math.max(maxBatchJsonBytes, encodedBytes);
         let commit: Promise<void>;
         commit = Promise.resolve().then(async () => {
             const ack = await monitor.commitResults(request);
@@ -169,6 +126,7 @@ export function createMonitorResultStream(input: unknown) {
                 throw new Error(`Monitor result commit ${request.sequence} was not acknowledged`);
             }
             committedItems += request.work.length;
+            committedJsonBytes += encodedBytes;
         }).catch(error => { latch(error); }).finally(() => {
             for (const key of keys) bufferedKeys.delete(key);
             pending.delete(commit);
@@ -198,17 +156,21 @@ export function createMonitorResultStream(input: unknown) {
             const item: WorkItem = { target, key, status, complete: options.complete !== false };
             if (options.error !== undefined) item.error = options.error;
             if (options.failure_category !== undefined) item.failure_category = options.failure_category;
-            const delta = copyOutput(output);
-            const single: ResultRequest = { sequence: sequence + 1, work: [item], output: delta };
-            if (jsonBytes(single) > byteLimit) throw new Error("A single monitor work result exceeds the JSON byte limit");
-            let combined = mergeData(data, delta.data);
-            const candidate: ResultRequest = { sequence: sequence + 1, work: [...buffered, item], output: { success: true, data: combined } };
-            if (buffered.length && jsonBytes(candidate) > byteLimit) {
+            const delta = copyMonitorDelta(output);
+            const itemBytes = jsonBytes(item);
+            if (monitorRequestBytes(sequence + 1, itemBytes, delta) > byteLimit) {
+                throw new Error("A single monitor work result exceeds the JSON byte limit");
+            }
+            let combined = mergeMonitorDelta(data, delta);
+            let combinedWorkBytes = workContentsBytes + (buffered.length ? 1 : 0) + itemBytes;
+            if (buffered.length && monitorRequestBytes(sequence + 1, combinedWorkBytes, combined) > byteLimit) {
                 await flush();
-                combined = delta.data;
+                combined = delta;
+                combinedWorkBytes = itemBytes;
             }
             buffered.push(item);
             data = combined;
+            workContentsBytes = combinedWorkBytes;
             bufferedKeys.add(identity);
             if (item.complete) completed.add(target);
             if (buffered.length >= chunkSize || Date.now() - lastCommitAt >= COMMIT_INTERVAL_MS) await flush();
@@ -237,6 +199,9 @@ export function createMonitorResultStream(input: unknown) {
             finished = true;
             return { success: true, data: { stream_complete: true, summary: { diagnostics: {
                 ...pluginMetrics,
+                submitted_json_bytes: submittedJsonBytes,
+                committed_json_bytes: committedJsonBytes,
+                max_batch_json_bytes: maxBatchJsonBytes,
                 committed_work_items: committedItems,
                 completed_targets: completed.size,
                 submitted_batches: submittedBatches,

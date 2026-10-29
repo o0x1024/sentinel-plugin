@@ -14,7 +14,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "1.1.4",
+      "version": "1.1.5",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -29,7 +29,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "1.4.4",
+      "version": "1.4.5",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -45,7 +45,7 @@
         "capability:tls-inspect",
         "capability:monitor-events"
       ],
-      "version": "1.2.6",
+      "version": "1.2.7",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -60,7 +60,7 @@
       "capability_tags": [
         "capability:monitor-events"
       ],
-      "version": "1.0.3",
+      "version": "1.0.4",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -75,7 +75,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "1.1.7",
+      "version": "1.1.8",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -91,7 +91,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "1.2.9",
+      "version": "1.2.10",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -107,7 +107,7 @@
         "capability:network-scan",
         "capability:monitor-events"
       ],
-      "version": "1.1.5",
+      "version": "1.1.6",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -124,7 +124,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "1.3.7",
+      "version": "1.3.8",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -178,7 +178,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "1.2.8",
+      "version": "1.2.9",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -196,7 +196,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "1.4.8",
+      "version": "1.4.9",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -212,7 +212,7 @@
         "capability:ast-parse",
         "capability:monitor-events"
       ],
-      "version": "3.1.7",
+      "version": "3.1.8",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -228,7 +228,7 @@
         "capability:network-scan",
         "capability:monitor-events"
       ],
-      "version": "1.3.8",
+      "version": "1.3.9",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -244,7 +244,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "2.2.8",
+      "version": "2.2.9",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -260,7 +260,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "1.3.9",
+      "version": "1.3.10",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -276,7 +276,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "1.0.9",
+      "version": "1.0.10",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -292,7 +292,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "1.2.9",
+      "version": "1.2.10",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -314,7 +314,7 @@
         "capability:network-scan",
         "capability:monitor-events"
       ],
-      "version": "1.0.1",
+      "version": "1.0.2",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -336,7 +336,7 @@
         "capability:fetch",
         "capability:monitor-events"
       ],
-      "version": "2.2.8",
+      "version": "2.2.9",
       "stream_tag": "monitor:results-stream-v1"
     },
     {
@@ -347,7 +347,7 @@
         "domain"
       ],
       "seed_bindings": [],
-      "version": "1.1.7",
+      "version": "1.1.8",
       "stream_tag": "monitor:results-stream-v1",
       "capability_tags": [
         "capability:fetch",
@@ -367,7 +367,7 @@
         "capability:dictionary",
         "capability:monitor-events"
       ],
-      "version": "2.6.0",
+      "version": "2.6.1",
       "stream_tag": "monitor:results-stream-v1"
     },
     {

@@ -3,7 +3,7 @@
  *
  * @plugin risk_scanner
  * @name Risk Scanner
- * @version 2.2.8
+ * @version 2.2.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk

@@ -3,7 +3,7 @@
  *
  * @plugin fofa_asset_monitor
  * @name FOFA Asset Monitor
- * @version 1.2.8
+ * @version 1.2.9
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor
@@ -1129,7 +1129,16 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             for (let index = 0; index < plan.parents.length; index++) {
                 const parent = plan.parents[index];
                 remaining.set(parent, remaining.get(parent)! - 1);
-                await stream.record(parent, `query:${plan.id}:complete`, { success: true, data: index === 0 ? (result.success ? projected.data! : {
+                await stream.record(parent, `query:${plan.id}:complete`, { success: true, data: index === 0 ? (result.success ? {
+                    results: [{ id: result.id, target: result.target, success: true, complete: result.complete,
+                        totalReported: result.totalReported, pagesFetched: result.pagesFetched }],
+                    snapshots: projected.data!.snapshots,
+                    changeEvents: projected.data!.changeEvents,
+                    summary: { totalQueries: 1, successfulQueries: 1, failedQueries: 0,
+                        incompleteQueries: result.complete === false ? 1 : 0, totalReported: result.totalReported,
+                        totalAssets: result.assets.length, assetChanges: projected.data!.changeEvents.length },
+                    surface_artifacts: { changes: projected.data!.surface_artifacts.changes },
+                } : {
                     results: [{ id: result.id, target: result.target, success: false, error: result.error }],
                 }) : {} }, { complete: remaining.get(parent) === 0, status: result.success && result.complete !== false ? "ok" : "failed",
                     error: result.complete === false ? "FOFA page limit reached; complete baseline retained" : result.error });

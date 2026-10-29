@@ -3,7 +3,7 @@
  *
  * @plugin cert_monitor
  * @name Certificate Monitor
- * @version 1.2.6
+ * @version 1.2.7
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type cert
@@ -728,6 +728,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             phaseLabel: "Comparing snapshots",
         });
 
+        if (stream.enabled) return await stream.finish<ToolOutput>({ success: true });
         return await stream.finish(projectCertificateOutput(results, changeEvents, newSnapshots, {
             totalTargets: normalizedDomains.length, successfulChecks, failedChecks, certificateChanges, expiringCertificates, expiredCertificates,
         }));

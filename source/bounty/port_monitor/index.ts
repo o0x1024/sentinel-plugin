@@ -3,7 +3,7 @@
  *
  * @plugin port_monitor
  * @name Port Monitor
- * @version 1.3.8
+ * @version 1.3.9
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type port
@@ -730,6 +730,8 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                     // A bounded port set is discovery evidence, never a complete host baseline.
                     delete partial.data!.snapshots;
                     partial.data!.changeEvents = [];
+                    // Batch counters are deltas; host totals are reported only by host-complete.
+                    partial.data!.summary = { portBatches: 1, requestedPorts: batch.length, confirmedOpenPorts: result.open_ports?.length || 0 };
                     partial.data!.surface_artifacts!.changes = [];
                     partial.data!.surface_artifacts!.evidences = [{ asset_type: isIpLiteral(host) ? "ip" : "domain", asset_key: host,
                         evidence_type: "port_probe_batch", title: `Port probe batch: ${host}`, source: "port_monitor",
@@ -739,10 +741,17 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
                 }
                 const complete: NativePortScanResult = { host, open_ports: [...openPorts].sort((a, b) => a - b), resolved_ips: [...resolvedIps], ...(error ? { error } : {}) };
                 if (!stream.enabled) completedResults.push(complete);
-                await writeTarget(host, "host-complete", projectPortOutput([complete], previousSnapshots) as any, { status: error ? "failed" : "ok", error });
+                const projected = projectPortOutput([complete], previousSnapshots).data!;
+                await writeTarget(host, "host-complete", { success: true, data: {
+                    results: [{ host, success: !error, ...(error ? { error } : {}), knownOpenPortCount: complete.open_ports.length }],
+                    snapshots: projected.snapshots,
+                    changeEvents: projected.changeEvents,
+                    summary: projected.summary,
+                    surface_artifacts: { changes: projected.surface_artifacts!.changes, evidences: projected.surface_artifacts!.evidences },
+                } }, { status: error ? "failed" : "ok", error });
             }
         }));
-        return await stream.finish(projectPortOutput(completedResults, previousSnapshots));
+        return await stream.finish(stream.enabled ? { success: true } : projectPortOutput(completedResults, previousSnapshots));
 
     } catch (error: any) {
         return {

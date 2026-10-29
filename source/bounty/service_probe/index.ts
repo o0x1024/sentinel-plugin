@@ -3,7 +3,7 @@
  *
  * @plugin service_probe
  * @name Service Probe
- * @version 1.2.9
+ * @version 1.2.10
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type service

@@ -3,7 +3,7 @@
  *
  * @plugin api_monitor
  * @name API Monitor
- * @version 1.4.4
+ * @version 1.4.5
  * @author Sentinel Team
  * @main_category bounty
  * @category monitor

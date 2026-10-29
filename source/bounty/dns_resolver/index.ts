@@ -3,7 +3,7 @@
  *
  * @plugin dns_resolver
  * @name DNS Resolver
- * @version 1.1.5
+ * @version 1.1.6
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
@@ -401,7 +401,9 @@ export function get_output_schema() {
 
 pluginGlobals.get_output_schema = get_output_schema;
 
-function projectDnsOutput(targets: string[], results: DnsQueryResult[], previousSnapshots: Record<string, DnsSnapshot>, timestamp: string): ToolOutput {
+type DnsDelta = { success: true; data: Omit<NonNullable<ToolOutput["data"]>, "targets"> };
+
+function projectDnsOutput(targets: string[], results: DnsQueryResult[], previousSnapshots: Record<string, DnsSnapshot>, timestamp: string): DnsDelta {
         const changeEvents: ChangeEvent[] = [];
         const snapshots: Record<string, DnsSnapshot> = {};
         const domains = new Map<string, any>();
@@ -510,7 +512,6 @@ function projectDnsOutput(targets: string[], results: DnsQueryResult[], previous
         return {
             success: true,
             data: {
-                targets,
                 results,
                 changeEvents,
                 snapshots,
@@ -646,7 +647,9 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             phase: "compare",
             message: "Comparing DNS snapshots",
         });
-        return await stream.finish(stream.enabled ? { success: true } : projectDnsOutput(targets, results, previousSnapshots, timestamp));
+        if (stream.enabled) return await stream.finish<ToolOutput>({ success: true });
+        const projected = projectDnsOutput(targets, results, previousSnapshots, timestamp);
+        return await stream.finish({ success: true, data: { targets, ...projected.data } });
 
     } catch (error: any) {
         return {

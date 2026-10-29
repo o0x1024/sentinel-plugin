@@ -3,7 +3,7 @@
  *
  * @plugin cidr_mapper
  * @name CIDR Mapper
- * @version 1.0.3
+ * @version 1.0.4
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type ip
@@ -203,6 +203,7 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             results.push(result);
             await writeTarget(target, "mapping-complete", { success: true, data: { results: [result] } }, { status: error ? "failed" : "ok", error });
         }
+        if (stream.enabled) return await stream.finish<ToolOutput>({ success: true });
         return await stream.finish({ success: true, data: { targets, results, summary: {
             totalTargets: targets.length, generatedIps, truncatedTargets: results.filter(item => item.truncated).length,
         }, surface_artifacts: { ips, evidences } } });

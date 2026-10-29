@@ -3,7 +3,7 @@
  *
  * @plugin sensitive_file_scanner
  * @name Sensitive File Scanner
- * @version 1.3.9
+ * @version 1.3.10
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type risk

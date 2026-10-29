@@ -3,7 +3,7 @@
  *
  * @plugin actuator_scanner
  * @name Actuator Path Scanner
- * @version 1.1.4
+ * @version 1.1.5
  * @author Sentinel Team
  * @main_category bounty
  * @category risk
@@ -527,10 +527,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
 
         const allProbeUrls: string[] = [];
         const probeOwners = new Map<string, Set<string>>();
+        const originOwners = new Map<string, Set<string>>();
         const addProbe = (target: string, url: string) => {
             allProbeUrls.push(url);
             if (!probeOwners.has(url)) probeOwners.set(url, new Set());
             probeOwners.get(url)!.add(target);
+            const origin = extractOrigin(url);
+            if (!originOwners.has(origin)) originOwners.set(origin, new Set());
+            originOwners.get(origin)!.add(target);
         };
         const recordProbe = async (url: string, output: unknown, status: "ok" | "failed" | "skipped" = "ok", error?: string) => {
             const owners = [...(probeOwners.get(url) || [])];
@@ -570,16 +574,14 @@ export async function analyze(input: ToolInput): Promise<ToolOutput> {
             message: `Generated ${deduplicatedUrls.length} unique probe URLs (from ${totalGenerated} total). Building soft-404 baselines...`,
         });
 
-        const origins = [...new Set(deduplicatedUrls.map(extractOrigin))];
+        const origins = [...originOwners.keys()];
         const baselineMap = new Map<string, Soft404Baseline | null>();
         await runWithConcurrency(
             origins.map(origin => async () => {
                 stream.assertHealthy();
                 const baseline = await buildSoft404Baseline(origin, userAgent, timeout);
                 baselineMap.set(origin, baseline);
-                const owners = new Set(deduplicatedUrls.filter(url => extractOrigin(url) === origin)
-                    .flatMap(url => [...(probeOwners.get(url) || [])]));
-                for (const owner of owners) await stream.record(owner, `baseline:${origin}`, { success: true, data: {
+                for (const owner of originOwners.get(origin)!) await stream.record(owner, `baseline:${origin}`, { success: true, data: {
                     results: [{ origin, kind: "baseline", observed: baseline !== null }],
                 } }, { complete: false });
             }),

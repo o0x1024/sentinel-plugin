@@ -3,7 +3,7 @@
  *
  * @plugin favicon_fingerprinter
  * @name Favicon Fingerprinter
- * @version 1.3.7
+ * @version 1.3.8
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web

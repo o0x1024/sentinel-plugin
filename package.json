@@ -5,7 +5,9 @@
   "scripts": {
     "build:monitors": "node scripts/build_monitor_plugins.mjs",
     "check:monitors": "node scripts/build_monitor_plugins.mjs --check",
-    "test:monitor-results": "node --disable-warning=ExperimentalWarning --test scripts/monitor_results_test.mjs"
+    "test:monitor-results": "node --disable-warning=ExperimentalWarning --test scripts/monitor_results_test.mjs scripts/monitor_delta_test.mjs",
+    "test:monitor-payload": "node --disable-warning=ExperimentalWarning --test scripts/bounty_payload_test.mjs scripts/recon_monitor_delta_size_test.mjs",
+    "bench:monitor-payload": "node --disable-warning=ExperimentalWarning scripts/bounty_payload_benchmark.mjs --assert-linear"
   },
   "devDependencies": {
     "esbuild": "0.21.5"

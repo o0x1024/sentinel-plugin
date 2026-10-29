@@ -3,7 +3,7 @@
  *
  * @plugin directory_bruteforcer
  * @name Directory Bruteforcer
- * @version 1.2.9
+ * @version 1.2.10
  * @author Sentinel Team
  * @main_category bounty
  * @monitor_type web

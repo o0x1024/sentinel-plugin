@@ -78,6 +78,19 @@ summary. The helper copies buffered deltas so producers can release their
 local arrays after `record` resolves. Previously acknowledged work keys are
 not retained by the plugin helper; the host keeps durable duplicate authority.
 
+Stream deltas must never echo monitor inputs. Both the shared helper and the
+host reject top-level `data.targets`, `data.target_objects`,
+`data.service_targets`, `data.__monitorExecution`, `data.previousSnapshots`,
+`data.previous_snapshots`, `data.dictionaryEntries`, and `data.dictionary`
+before persistence. This also applies to a one-element echo. Target ownership
+already belongs to each work item; successful observations and authoritative
+snapshot changes belong in their respective result fields. The protocol does
+not silently remove invalid fields.
+
+Each discovery page/source is submitted once. Its final work item contains
+only completion information, authoritative snapshots, and final changes or
+evidence; it does not resend assets already acknowledged from earlier pages.
+
 Monitoring completion returns `stream_complete:true` and numeric diagnostics.
 It does not replay the saved payload. An unsuccessful final plugin output is
 reported as an execution failure after prior valid deltas have been flushed
@@ -120,7 +133,7 @@ Edit `source/bounty/<plugin>/index.ts` and its supporting modules. Published
 `plugins/bounty/<plugin>.ts` files are generated and contain no runtime imports.
 The build enumerates every bounty catalog entry, requires source/catalog
 version agreement and the stream tag, pins esbuild 0.21.5, and limits each
-published file to 2000 lines.
+published file to 3000 lines.
 
 ```sh
 rtk npm run build:monitors
@@ -129,7 +142,18 @@ rtk npm run test:monitor-results
 rtk proxy node --disable-warning=ExperimentalWarning scripts/run_readonly_tests.mjs scripts/check_monitor_contracts.ts
 rtk proxy node --disable-warning=ExperimentalWarning scripts/run_readonly_tests.mjs scripts/plugin_catalog_smoke.ts
 rtk proxy node --disable-warning=ExperimentalWarning scripts/run_readonly_tests.mjs scripts/tech_fingerprinter_test.ts
+rtk proxy node --disable-warning=ExperimentalWarning --test scripts/bounty_payload_test.mjs
+rtk proxy node --disable-warning=ExperimentalWarning scripts/bounty_payload_benchmark.mjs --sizes 64,256,1024 --assert-linear --output /private/tmp/sentinel-bounty-payload-benchmark.json
 ```
+
+The payload benchmark loads the old published plugins from the local
+`d92c508` Git ref and compares them with the current published bundles. It
+counts UTF-8 commit bytes, work records, maximum package size, and elapsed
+producer/serialization time at multiple input sizes. Its sink retains only
+counters, and the synthetic JSON report is limited to 1 MiB. Every network and
+native operation is a deterministic fixture. These measurements describe
+producer envelopes and submitted write volume; they do not measure real
+network, native DNS engine, QuickJS, or SQLite throughput.
 
 The Node 24 runner supplies read-only Deno file/test-registration APIs and
 blocks real fetch before installing deterministic test fixtures. It does not
